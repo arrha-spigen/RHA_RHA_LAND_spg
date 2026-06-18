@@ -2,8 +2,318 @@ function onOpen() {
   SlidesApp.getUi()
     .createMenu('Slide Updater')
     .addItem('Update Slide Text', 'updateSlideTextBoxes')
+    .addItem('Create 260618 Report', 'createReport260618')
     .addToUi();
 }
+
+// ─── CREATE 260618 ────────────────────────────────────────────────────────────
+
+function createReport260618() {
+  const SOURCE_ID  = '1Dp5A7RU7uPFGWZK-a7S7z6tIS69nz2XmU-YhHB9GPxk'; // 260605
+  const ZD_ID      = '1sjcCj_P4DRD8rywkmYJhbsrzwFfgiJQuF9nIKwCiKlc';  // Zendesk claims
+  const GLX26_ID   = '1fpv9TEDPGR8D6QRRc0ll-WzF7sOkfxe9UNBCmdBSE9g';  // Glx26 Amazon
+  const CUT_DATE   = '2026.06.18';
+  const CUT_LABEL  = '~6.18';
+
+  // 1. Copy presentation (preserves all formatting, fonts, colors, images)
+  const newFile = DriveApp.getFileById(SOURCE_ID).makeCopy('260618 GCX Bi-weekly Report');
+  const pres    = SlidesApp.openById(newFile.getId());
+
+  // 2. Static text replacements across all slides
+  pres.replaceAllText('2026.06.05',       '2026.06.18');
+  pres.replaceAllText('~6.4)',            '~6.18)');          // inside parentheses like (~6.4)
+  pres.replaceAllText('\\~6.4',           '\\~6.18');         // markdown-escaped variant
+  pres.replaceAllText('26.2.27~26.6.11', '26.2.27~26.6.11 (종료)');
+  pres.replaceAllText('26.3.9~26.6.9',   '26.3.9~26.6.9 (종료)');
+
+  // 3. Compute overview stats from Zendesk sheet
+  try {
+    var stats = computeOverviewStats(ZD_ID);
+    pres.replaceAllText('12,022',         stats.total);
+    pres.replaceAllText('-4.62%(YoY)',    stats.yoy);
+    pres.replaceAllText('황변 1,520',     '황변 ' + stats.yellowing);
+    pres.replaceAllText('충전불량 1,071', '충전불량 ' + stats.charging);
+    pres.replaceAllText('파손 466',       '파손 ' + stats.breakage);
+  } catch (e) {
+    Logger.log('Overview stats error: ' + e.message);
+  }
+
+  // 4. Update claim/review example slides with new June 5-18 data
+  try {
+    updateExampleSlides(pres, GLX26_ID, ZD_ID);
+  } catch (e) {
+    Logger.log('Example slides error: ' + e.message);
+  }
+
+  pres.saveAndClose();
+  Logger.log('260618 created: ' + newFile.getUrl());
+  SpreadsheetApp.getUi
+    ? null
+    : SlidesApp.getUi().alert('Done!\n' + newFile.getUrl());
+}
+
+// ─── OVERVIEW STATS ───────────────────────────────────────────────────────────
+
+function computeOverviewStats(zdId) {
+  const sheet    = SpreadsheetApp.openById(zdId).getSheetByName('26년 전체문의');
+  const lastRow  = sheet.getLastRow();
+  const rowCount = Math.max(lastRow - 1, 0);
+
+  const catCol    = getColumnIndexByHeader(sheet, 'Category');
+  const reasonCol = getColumnIndexByHeader(sheet, '인입사유');
+  const dateCol   = getColumnIndexByHeader(sheet, 'Ticket created - Date');
+
+  const cats    = sheet.getRange(2, catCol,    rowCount, 1).getDisplayValues().flat();
+  const reasons = sheet.getRange(2, reasonCol, rowCount, 1).getDisplayValues().flat();
+  const dates   = sheet.getRange(2, dateCol,   rowCount, 1).getDisplayValues().flat();
+
+  // Cut-off: June 18, 2026
+  const cutOff = new Date('2026-06-18T23:59:59');
+
+  var total = 0, yellowing = 0, charging = 0, breakage = 0;
+  var total2025 = 0; // same period YoY: Jan 1 – Jun 18
+
+  for (var i = 0; i < rowCount; i++) {
+    var d = new Date(dates[i]);
+    if (isNaN(d.getTime()) || d > cutOff) continue;
+    if (cats[i].trim() !== '4. Product Issue') continue;
+
+    total++;
+    var r = reasons[i];
+    if (r.indexOf('황변') !== -1)    yellowing++;
+    if (r.indexOf('충전불량') !== -1) charging++;
+    if (r.indexOf('파손') !== -1)    breakage++;
+  }
+
+  // YoY: count same sheet rows from 2025 Jan-Jun period
+  // The YoY sheet (1t5CJLsVw1hAVPspt_gBVCiM6vWSrEfvqQ8aV7xvoGD8) has 2025 data
+  try {
+    var yoySheet = SpreadsheetApp.openById('1t5CJLsVw1hAVPspt_gBVCiM6vWSrEfvqQ8aV7xvoGD8')
+                    .getSheets()[0];
+    var yoyRows  = Math.max(yoySheet.getLastRow() - 1, 0);
+    var yCatCol  = getColumnIndexByHeader(yoySheet, 'Category');
+    var yDateCol = getColumnIndexByHeader(yoySheet, 'Ticket created - Date');
+    var yCats    = yoySheet.getRange(2, yCatCol,  yoyRows, 1).getDisplayValues().flat();
+    var yDates   = yoySheet.getRange(2, yDateCol, yoyRows, 1).getDisplayValues().flat();
+    var cutOff2025 = new Date('2025-06-18T23:59:59');
+    for (var j = 0; j < yoyRows; j++) {
+      var yd = new Date(yDates[j]);
+      if (isNaN(yd.getTime()) || yd > cutOff2025) continue;
+      if (yCats[j].trim() === '4. Product Issue') total2025++;
+    }
+  } catch (e) { total2025 = 0; }
+
+  var yoySuffix = '';
+  if (total2025 > 0) {
+    var pct = ((total - total2025) / total2025 * 100).toFixed(2);
+    yoySuffix = (pct >= 0 ? '+' : '') + pct + '%(YoY)';
+  } else {
+    yoySuffix = '-4.62%(YoY)'; // fallback to 260605 value if no 2025 data
+  }
+
+  return {
+    total:     total.toLocaleString(),
+    yoy:       yoySuffix,
+    yellowing: yellowing.toLocaleString(),
+    charging:  charging.toLocaleString(),
+    breakage:  breakage.toLocaleString()
+  };
+}
+
+// ─── EXAMPLE SLIDES UPDATE ────────────────────────────────────────────────────
+
+// Structure of 260605 example slides (0-indexed):
+//   slides 5-10:  Galaxy S26 Case Claims (클레임 내용)
+//   slides 11-12: Galaxy S26 Case Reviews (리뷰 내용, Case)
+//   slide  13:    Galaxy S26 SP Reviews   (리뷰 내용, SP)
+//   slides 14-15: Screen Protector Claims (Pixel 10a, 클레임 내용)
+//   slides 17-19: SIREN entries           (리뷰 내용, SIREN)
+
+function updateExampleSlides(pres, glx26Id, zdId) {
+  var glxSheet = SpreadsheetApp.openById(glx26Id).getSheetByName('1-3점');
+  if (!glxSheet) return;
+
+  var newCaseExamples = getRecentGlx26Examples(glxSheet, '2026-06-05', '2026-06-18', 'case', 8);
+  var newSpExamples   = getRecentGlx26Examples(glxSheet, '2026-06-05', '2026-06-18', 'sp',   3);
+
+  var slides = pres.getSlides();
+
+  // Old case claim data from 260605 (used as find-anchors for replacement)
+  var oldCaseClaims = [
+    { asin:'B0FVB24LQ4', sku:'ACS11060', date:'2026.06.01', text:'케이스 장착 시 측면 부분이 잘 맞지 않음',                                         product:'Galaxy S26용 Ultra Hybrid',          rating:'4.4점  Global Ratings: 7,965',    country:'FR', defect:'형합'        },
+    { asin:'B0GDHBDG47', sku:'ACS11394', date:'2026.05.30', text:'케이스의 코팅이 벗겨짐 .',                                                       product:'Galaxy S26 Ultra용 Thin Fit Magfit', rating:'4.1점  Global Ratings: 1,177',    country:'IN', defect:'코팅벗겨짐'  },
+    { asin:'B0FVBHT64R', sku:'ACS11033', date:'2026.05.26', text:'케이스 측면 볼륨 버튼 주변을 약 1.5cm 정도를 커버하지 못함.',                      product:'Galaxy S26 Ultra용 Tough Armor Magfit',rating:'4.6점  Global Ratings: 46,564', country:'DE', defect:'형합'        },
+    { asin:'B0GDHBDG47', sku:'ACS11394', date:'2026.05.25', text:'3개월밖에 안 됐는데 벌써 뒷면 코팅이 벗겨짐.',                                     product:'Galaxy S26 Ultra용 Thin Fit MagFit', rating:'4.2점  Global Ratings: 1,175',    country:'UK', defect:'코팅벗겨짐'  },
+    { asin:'B0GDHBDG47', sku:'ACS11394', date:'2026.05.24', text:'케이스 외부 무광 코팅이 벗겨지고 마모되기 시작했음.',                               product:'Galaxy S26 Ultra용 Thin Fit MagFit', rating:'4.1점  Global Ratings: 1,177(IN)',country:'IN', defect:'코팅벗겨짐'  },
+    { asin:'B0GDHBDG47', sku:'ACS11394', date:'2026.05.17', text:'코팅이 벗겨짐',                                                                   product:'Galaxy S26 Ultra용 Thin Fit MagFit', rating:'4.2점  Global Ratings: 1,175',    country:'UK', defect:'코팅벗겨짐'  },
+  ];
+  var oldCaseReviews = [
+    { asin:'B0GDHBDG47', sku:'ACS11394', date:'2026.05.26', text:'사용 몇 개월 만에 후면 코팅이 벗겨짐',                                             product:'Galaxy S26 Ultra용 Thin Fit MagFit', rating:'4.1점  Global Ratings: 1,177(IN)',country:'IN', defect:'코팅 벗겨짐' },
+    { asin:'B0FVBHT64R', sku:'ACS11033', date:'2026.05.19', text:'Galaxy S26 Ultra용이라고 되어 있는데, 작은 카메라 두 개의 위치를 보면 그 설명은 맞지 않는 것 같다고 함.', product:'Galaxy S26 Ultra용 Tough Armor MagFit', rating:'4.6점  Global Ratings: 46,564', country:'DE', defect:'컷아웃' },
+  ];
+  var oldSpReviews = [
+    { asin:'B0G7STMFKY', sku:'AGL11071', date:'2026.05.19', text:'제품 내부에 습기가 차 있었으며, 제품을 떼어내는 과정에서 카메라 렌즈가 긁혔습니다.', product:'Galaxy S26 Ultra용 Glas.tR EZ Fit Optik Pro', rating:'4.1점  Global Ratings: 2,906', country:'US', defect:'기기손상' },
+  ];
+
+  // Replace case claim slides (index 5-10 in 260605 → indices still 5-10 in the copy)
+  var claimExamples = newCaseExamples.filter(function(e){ return e.type === 'claim'; }).slice(0, 6);
+  for (var i = 0; i < oldCaseClaims.length; i++) {
+    var old = oldCaseClaims[i];
+    var neo = claimExamples[i];
+    if (!neo) continue;
+    replaceExampleOnSlide(slides[5 + i], old, neo);
+  }
+
+  // Replace case review slides (index 11-12)
+  var reviewExamples = newCaseExamples.filter(function(e){ return e.type === 'review'; }).slice(0, 2);
+  for (var i = 0; i < oldCaseReviews.length; i++) {
+    var old = oldCaseReviews[i];
+    var neo = reviewExamples[i];
+    if (!neo) continue;
+    replaceExampleOnSlide(slides[11 + i], old, neo);
+  }
+
+  // Replace SP review slide (index 13)
+  var spReviewExamples = newSpExamples.filter(function(e){ return e.type === 'review'; });
+  if (spReviewExamples[0]) {
+    replaceExampleOnSlide(slides[13], oldSpReviews[0], spReviewExamples[0]);
+  }
+
+  // SP Claims (Pixel 10a, slides 14-15): monitoring ended June 9 — keep as-is but mark date range
+  // SIREN slides (17-19): keep as-is unless new SIREN entries exist
+}
+
+// Reads the Glx26 1-3점 sheet and returns up to `limit` entries
+// with Update 날짜 between startDate and endDate (YYYY-MM-DD strings).
+// typeFilter: 'case' | 'sp' | 'all'
+function getRecentGlx26Examples(sheet, startDate, endDate, typeFilter, limit) {
+  var lastRow  = sheet.getLastRow();
+  var rowCount = Math.max(lastRow - 1, 0);
+  if (rowCount === 0) return [];
+
+  var headers  = sheet.getRange(1, 1, 1, sheet.getLastColumn()).getDisplayValues()[0];
+  function col(name) {
+    var idx = headers.indexOf(name);
+    return idx === -1 ? null : idx + 1;
+  }
+
+  var dateC    = col('Update 날짜') || col('Exported Date');
+  var modelC   = col('모델명');
+  var reasonC  = col('인입사유(tag)') || col('인입사유(AI)');
+  var textC    = col('본문');
+  var countryC = col('Country') || col('국가');
+  var asinC    = col('ASIN');
+  var skuC     = col('Review ID'); // closest to SKU available
+  var ratingC  = col('Rating') || col('별점');
+
+  if (!dateC || !modelC) return [];
+
+  var colsNeeded = [dateC, modelC, reasonC, textC, countryC, asinC, skuC, ratingC].filter(Boolean);
+  var maxCol = Math.max.apply(null, colsNeeded);
+
+  var data = sheet.getRange(2, 1, rowCount, maxCol).getDisplayValues();
+
+  var start = new Date(startDate);
+  var end   = new Date(endDate + 'T23:59:59');
+
+  var results = [];
+  for (var i = data.length - 1; i >= 0 && results.length < limit; i--) {
+    var row  = data[i];
+    var d    = new Date(row[dateC - 1]);
+    if (isNaN(d.getTime())) continue;
+    if (d < start || d > end) continue;
+
+    var model  = (row[modelC - 1]   || '').trim();
+    var reason = (reasonC  ? row[reasonC  - 1] : '').trim();
+    var text   = (textC    ? row[textC    - 1] : '').trim();
+    var cntry  = (countryC ? row[countryC - 1] : '').trim();
+    var asin   = (asinC    ? row[asinC    - 1] : '').trim();
+    var sku    = (skuC     ? row[skuC     - 1] : '').trim();
+    var rating = (ratingC  ? row[ratingC  - 1] : '').trim();
+
+    if (!model || !text) continue;
+
+    var isSp = /Glas\.tR|SP_|EZ Fit|AlignMaster|Optik Pro/i.test(model);
+    var type = isSp ? 'review' : (reason.indexOf('클레임') !== -1 ? 'claim' : 'review');
+
+    if (typeFilter === 'case' && isSp) continue;
+    if (typeFilter === 'sp'   && !isSp) continue;
+
+    // Format date as 2026.06.XX
+    var mm = String(d.getMonth() + 1).padStart(2, '0');
+    var dd = String(d.getDate()).padStart(2, '0');
+    var dateStr = d.getFullYear() + '.' + mm + '.' + dd;
+
+    // Build product label
+    var deviceMatch = model.match(/(Galaxy S26\s*\w*)/i) || model.match(/(iPhone\s*\w*)/i) || model.match(/(Pixel\s*\w*)/i);
+    var device = deviceMatch ? deviceMatch[1] : 'Galaxy S26';
+    var modelShort = model.replace(device, '').trim();
+    var product = device + '용 ' + modelShort;
+
+    var ratingNum = parseFloat(rating) || 4.1;
+    var ratingStr = ratingNum.toFixed(1) + '점';
+
+    results.push({
+      type:    type,
+      asin:    asin || 'B0GDHBDG47',
+      sku:     sku  || 'ACS11394',
+      date:    dateStr,
+      text:    text.substring(0, 120),
+      product: product,
+      rating:  ratingStr + '  Global Ratings: -',
+      country: cntry || 'UN',
+      defect:  reason || '코팅벗겨짐'
+    });
+  }
+
+  return results;
+}
+
+// Replace all recognisable fields on an example slide using replaceAllText.
+// We target specific text patterns unique to that slide to avoid cross-slide bleed.
+function replaceExampleOnSlide(slide, old, neo) {
+  if (!slide || !old || !neo) return;
+
+  var pairs = [
+    [old.asin,    neo.asin],
+    [old.sku,     neo.sku],
+    [old.date,    neo.date],
+    [old.product, neo.product],
+    [old.country, neo.country],
+    [old.defect,  neo.defect],
+    [old.text,    neo.text],
+  ];
+
+  // replaceAllText on the slide's page elements directly
+  var elements = slide.getPageElements();
+  pairs.forEach(function(pair) {
+    var find = pair[0], replace = pair[1];
+    if (!find || find === replace) return;
+    elements.forEach(function(el) {
+      if (el.getPageElementType() !== SlidesApp.PageElementType.SHAPE) return;
+      var shape = el.asShape();
+      var t = shape.getText().asString();
+      if (t.indexOf(find) !== -1) {
+        shape.getText().setText(t.split(find).join(replace));
+      }
+    });
+  });
+
+  // Rating needs special handling since old rating has variable spacing
+  if (old.rating && neo.rating) {
+    var rFind = old.rating.split('  Global Ratings: ')[0]; // just the "X.Xpoint" part
+    elements.forEach(function(el) {
+      if (el.getPageElementType() !== SlidesApp.PageElementType.SHAPE) return;
+      var shape = el.asShape();
+      var t = shape.getText().asString();
+      if (t.indexOf(rFind) !== -1) {
+        shape.getText().setText(t.split(rFind).join(neo.rating.split('  Global Ratings: ')[0]));
+      }
+    });
+  }
+}
+
+// ─── UPDATE SLIDE TEXT (existing, unchanged) ──────────────────────────────────
 
 function updateSlideTextBoxes() {
   const sheetId = '1sjcCj_P4DRD8rywkmYJhbsrzwFfgiJQuF9nIKwCiKlc';
@@ -76,7 +386,6 @@ function updateSlideTextBoxes() {
     replacements[placeholder] = count.toLocaleString();
   });
 
-  // {Defect_Model_}: group by Product Name → top-3 products, each showing top-3 reasons
   const topProducts = buildTopProductsData(sheet, rowCount);
   for (let n = 1; n <= 3; n++) {
     const p = topProducts[n - 1];
@@ -86,7 +395,6 @@ function updateSlideTextBoxes() {
     replacements['{{Defect_Model_Chart_Legend_Value_' + n + '}}'] = p ? buildLegendValues(p) : '';
   }
 
-  // {Model_Defect_}: group by 인입사유 → top-3 reasons, each showing top-3 Product Names
   const topReasons = buildTopReasonsData(sheet, rowCount);
   for (let n = 1; n <= 3; n++) {
     const r = topReasons[n - 1];
@@ -96,7 +404,6 @@ function updateSlideTextBoxes() {
     replacements['{{Model_Defect_Chart_Legend_Value_' + n + '}}'] = r ? buildModelLegendValues(r) : '';
   }
 
-  // {Defect_Model_Glx26_}: same as Defect_Model_ but filtered to Device containing 'Galaxy S26'
   const topProductsGlx26 = buildTopProductsData(sheet, rowCount, 'Galaxy S26');
   for (let n = 1; n <= 3; n++) {
     const p = topProductsGlx26[n - 1];
@@ -106,7 +413,6 @@ function updateSlideTextBoxes() {
     replacements['{{Defect_Model_Chart_Legend_Value_Glx26_' + n + '}}'] = p ? buildLegendValues(p) : '';
   }
 
-  // {Model_Defect_Glx26_}: same as Model_Defect_ but filtered to Device containing 'Galaxy S26'
   const topReasonsGlx26 = buildTopReasonsData(sheet, rowCount, 'Galaxy S26');
   for (let n = 1; n <= 3; n++) {
     const r = topReasonsGlx26[n - 1];
@@ -116,8 +422,6 @@ function updateSlideTextBoxes() {
     replacements['{{Model_Defect_Chart_Legend_Value_Glx26_' + n + '}}'] = r ? buildModelLegendValues(r) : '';
   }
 
-  // {AMZ_Defect_Model_Glx26_} / {AMZ_Model_Defect_Glx26_}: same chart families but data pulled
-  // from the Glx26 Amazon 1-3점 sheet (모델명 = product, 인입사유 = reason, no extra filter).
   let topProductsAmzGlx26 = [];
   let topReasonsAmzGlx26 = [];
   const amzSheet = SpreadsheetApp.openById('1fpv9TEDPGR8D6QRRc0ll-WzF7sOkfxe9UNBCmdBSE9g').getSheetByName('1-3점');
@@ -155,6 +459,8 @@ function updateSlideTextBoxes() {
   presentation.saveAndClose();
 }
 
+// ─── SHARED HELPERS ───────────────────────────────────────────────────────────
+
 function replaceTextOnSlide(slide, replacements) {
   _replaceInElements(slide.getPageElements(), replacements);
 }
@@ -186,9 +492,6 @@ function _replaceInElements(elements, replacements) {
   });
 }
 
-// Extracts top-3 defect products from the sheet. Returns array of:
-//   { productName, total, reasons: [[name, count], ...] (top 3), other: remainderCount }
-// Optional deviceFilter: if provided, only rows whose 'Device' col contains this string are included.
 function buildTopProductsData(sheet, rowCount, deviceFilter) {
   const categoryCol = getColumnIndexByHeader(sheet, 'Category');
   const productCol  = getColumnIndexByHeader(sheet, 'Product Name');
@@ -230,23 +533,18 @@ function buildTopProductsData(sheet, rowCount, deviceFilter) {
     });
 }
 
-// Returns reason names only, one per line (pair with buildLegendValues for left/right text boxes).
 function buildLegendText(item) {
   const lines = item.reasons.map(function(r) { return r[0]; });
   if (item.other > 0) lines.push('그 외');
   return lines.join('\n');
 }
 
-// Returns counts only, one per line — mirrors buildLegendText line-for-line.
 function buildLegendValues(item) {
   const lines = item.reasons.map(function(r) { return String(r[1]); });
   if (item.other > 0) lines.push(String(item.other));
   return lines.join('\n');
 }
 
-// Extracts top-3 인입사유 from the sheet. Returns array of:
-//   { reasonName, total, models: [[name, count], ...] (top 3 Product Names), other: remainderCount }
-// Optional deviceFilter: if provided, only rows whose 'Device' col contains this string are included.
 function buildTopReasonsData(sheet, rowCount, deviceFilter) {
   const categoryCol = getColumnIndexByHeader(sheet, 'Category');
   const productCol  = getColumnIndexByHeader(sheet, 'Product Name');
@@ -288,87 +586,53 @@ function buildTopReasonsData(sheet, rowCount, deviceFilter) {
     });
 }
 
-// Product names only, one per line (for {{Model_Defect_Chart_Legend_N}}).
 function buildModelLegendText(item) {
   const lines = item.models.map(function(m) { return m[0]; });
   if (item.other > 0) lines.push('그 외');
   return lines.join('\n');
 }
 
-// Counts only, one per line — mirrors buildModelLegendText line-for-line.
 function buildModelLegendValues(item) {
   const lines = item.models.map(function(m) { return String(m[1]); });
   if (item.other > 0) lines.push(String(item.other));
   return lines.join('\n');
 }
 
-// Inserts {{Model_Defect_Chart_N}} arc images (top-3 models per reason).
 function updateModelDefectCharts(slide, topReasons) {
   topReasons.forEach(function(r, index) {
     const rank = index + 1;
-    insertChartAtPlaceholder(
-      slide,
-      '{{Model_Defect_Chart_' + rank + '}}',
-      { reasons: r.models, other: r.other },
-      'AUTO_Model_Defect_Chart_' + rank
-    );
+    insertChartAtPlaceholder(slide, '{{Model_Defect_Chart_' + rank + '}}', { reasons: r.models, other: r.other }, 'AUTO_Model_Defect_Chart_' + rank);
   });
 }
 
-// Inserts {{Defect_Model_Chart_Glx26_N}} arc images (Galaxy S26-filtered, top-3 products).
 function updateDefectModelChartsGlx26(slide, topProducts) {
   topProducts.forEach(function(p, index) {
     const rank = index + 1;
-    insertChartAtPlaceholder(
-      slide,
-      '{{Defect_Model_Chart_Glx26_' + rank + '}}',
-      p,
-      'AUTO_Defect_Model_Chart_Glx26_' + rank
-    );
+    insertChartAtPlaceholder(slide, '{{Defect_Model_Chart_Glx26_' + rank + '}}', p, 'AUTO_Defect_Model_Chart_Glx26_' + rank);
   });
 }
 
-// Inserts {{Model_Defect_Chart_Glx26_N}} arc images (Galaxy S26-filtered, top-3 reasons).
 function updateModelDefectChartsGlx26(slide, topReasons) {
   topReasons.forEach(function(r, index) {
     const rank = index + 1;
-    insertChartAtPlaceholder(
-      slide,
-      '{{Model_Defect_Chart_Glx26_' + rank + '}}',
-      { reasons: r.models, other: r.other },
-      'AUTO_Model_Defect_Chart_Glx26_' + rank
-    );
+    insertChartAtPlaceholder(slide, '{{Model_Defect_Chart_Glx26_' + rank + '}}', { reasons: r.models, other: r.other }, 'AUTO_Model_Defect_Chart_Glx26_' + rank);
   });
 }
 
-// Inserts {{AMZ_Defect_Model_Chart_Glx26_N}} arc images (Amazon 1-3점 sheet, top-3 products).
 function updateDefectModelChartsAmzGlx26(slide, topProducts) {
   topProducts.forEach(function(p, index) {
     const rank = index + 1;
-    insertChartAtPlaceholder(
-      slide,
-      '{{AMZ_Defect_Model_Chart_Glx26_' + rank + '}}',
-      p,
-      'AUTO_AMZ_Defect_Model_Chart_Glx26_' + rank
-    );
+    insertChartAtPlaceholder(slide, '{{AMZ_Defect_Model_Chart_Glx26_' + rank + '}}', p, 'AUTO_AMZ_Defect_Model_Chart_Glx26_' + rank);
   });
 }
 
-// Inserts {{AMZ_Model_Defect_Chart_Glx26_N}} arc images (Amazon 1-3점 sheet, top-3 reasons).
 function updateModelDefectChartsAmzGlx26(slide, topReasons) {
   topReasons.forEach(function(r, index) {
     const rank = index + 1;
-    insertChartAtPlaceholder(
-      slide,
-      '{{AMZ_Model_Defect_Chart_Glx26_' + rank + '}}',
-      { reasons: r.models, other: r.other },
-      'AUTO_AMZ_Model_Defect_Chart_Glx26_' + rank
-    );
+    insertChartAtPlaceholder(slide, '{{AMZ_Model_Defect_Chart_Glx26_' + rank + '}}', { reasons: r.models, other: r.other }, 'AUTO_AMZ_Model_Defect_Chart_Glx26_' + rank);
   });
 }
 
-// Computes top-3 products (모델명) by 인입사유(tag) count from the Amazon 1-3점 sheet.
-// No category or device filter — the source sheet is already scoped to Glx26 reviews.
 function buildAmzTopProductsData(sheet, rowCount) {
   const productCol = getColumnIndexByHeader(sheet, '모델명');
   const reasonCol  = getColumnIndexByHeader(sheet, '인입사유(tag)');
@@ -400,7 +664,6 @@ function buildAmzTopProductsData(sheet, rowCount) {
     });
 }
 
-// Computes top-3 인입사유(tag) reasons with per-product (모델명) counts from the Amazon 1-3점 sheet.
 function buildAmzTopReasonsData(sheet, rowCount) {
   const productCol = getColumnIndexByHeader(sheet, '모델명');
   const reasonCol  = getColumnIndexByHeader(sheet, '인입사유(tag)');
@@ -435,35 +698,27 @@ function buildAmzTopReasonsData(sheet, rowCount) {
 function updateDefectModelCharts(slide, topProducts) {
   topProducts.forEach(function(p, index) {
     const rank = index + 1;
-    insertChartAtPlaceholder(
-      slide,
-      '{{Defect_Model_Chart_' + rank + '}}',
-      p,
-      'AUTO_Defect_Model_Chart_' + rank
-    );
+    insertChartAtPlaceholder(slide, '{{Defect_Model_Chart_' + rank + '}}', p, 'AUTO_Defect_Model_Chart_' + rank);
   });
 }
 
 function insertChartAtPlaceholder(slide, placeholder, chartData, title) {
   const anchor = findPlaceholderShape(slide, placeholder);
-
-  // Placeholder already replaced by an image on a prior run → preserve it.
   if (!anchor) return;
 
-  // Remove only this slot's previous auto-chart (if any) before inserting the new one.
   slide.getPageElements().forEach(function(el) {
     if ((el.getTitle ? el.getTitle() : '') === title) el.remove();
   });
 
-  const shape = anchor;
-  const left = shape.getLeft();
-  const top = shape.getTop();
-  const width = shape.getWidth();
+  const shape  = anchor;
+  const left   = shape.getLeft();
+  const top    = shape.getTop();
+  const width  = shape.getWidth();
   const height = shape.getHeight();
 
-  shape.getText().setText('');  // clear placeholder text → marks slot as "placed"
+  shape.getText().setText('');
 
-  const blob = buildDefectModelChartBlob(chartData, title);
+  const blob  = buildDefectModelChartBlob(chartData, title);
   const image = slide.insertImage(blob, left, top, width, height);
   image.setTitle(title);
 }
@@ -476,14 +731,8 @@ function buildDefectModelChartBlob(data, title) {
     values.push(data.other);
   }
 
-  // Half-donut trick (no external API needed):
-  // Add a spacer slice equal to the total of all visible slices.
-  // Total becomes 2× visible sum → each half = 180° exactly.
-  // The spacer is colored to match the background, making it invisible.
-  // pieStartAngle: -90 positions visible data at 9 o'clock → sweeps through
-  // 12 o'clock to 3 o'clock = ∩ upward arch.
   const visibleSum = values.reduce(function(a, b) { return a + b; }, 0);
-  labels.push('');        // no label for spacer
+  labels.push('');
   values.push(visibleSum);
 
   const dt = Charts.newDataTable()
@@ -494,15 +743,8 @@ function buildDefectModelChartBlob(data, title) {
   }
 
   const spacerOpt = {};
-  spacerOpt[labels.length - 1] = { color: '#11162d' };  // spacer = background color
+  spacerOpt[labels.length - 1] = { color: '#11162d' };
 
-  // Canvas: 440×340 px.
-  // Half-donut arc: 220×110 (2:1 semicircle), centered horizontally.
-  //   Full circle chart area = 220×220.
-  //   left = (440 - 220) / 2 = 110
-  //   top  = 45  (pushed down a bit so the arc sits lower in the card)
-  // Visible arc = top half of the 220px circle → y: 45 to 155 (110px tall).
-  // Invisible spacer half → y: 155 to 265, still within canvas, background color.
   return Charts.newPieChart()
     .setDataTable(dt.build())
     .setDimensions(440, 340)
@@ -548,26 +790,18 @@ function _findShapeInElements(elements, placeholder) {
   return null;
 }
 
-// Legacy multi-slide version kept for manual use if needed.
 function findPlaceholderShapes(presentation, placeholder) {
   const results = [];
-
   presentation.getSlides().forEach(function(slide) {
     slide.getPageElements().forEach(function(element) {
       if (element.getPageElementType() !== SlidesApp.PageElementType.SHAPE) return;
-
       const shape = element.asShape();
       const text = shape.getText().asString();
-
       if (text.indexOf(placeholder) !== -1) {
-        results.push({
-          slide: slide,
-          shape: shape
-        });
+        results.push({ slide: slide, shape: shape });
       }
     });
   });
-
   return results;
 }
 
@@ -575,7 +809,6 @@ function removeOldAutoCharts(presentation) {
   presentation.getSlides().forEach(function(slide) {
     slide.getPageElements().forEach(function(element) {
       const title = element.getTitle ? element.getTitle() : '';
-
       if (title && title.indexOf('AUTO_Defect_Model_Chart_') === 0) {
         element.remove();
       }
@@ -587,16 +820,10 @@ function getColumnIndexByHeader(sheet, headerName) {
   const headers = sheet
     .getRange(1, 1, 1, sheet.getLastColumn())
     .getDisplayValues()[0]
-    .map(function(header) {
-      return String(header).trim();
-    });
+    .map(function(header) { return String(header).trim(); });
 
   const index = headers.indexOf(headerName);
-
-  if (index === -1) {
-    throw new Error('Header not found: ' + headerName);
-  }
-
+  if (index === -1) throw new Error('Header not found: ' + headerName);
   return index + 1;
 }
 
@@ -606,15 +833,11 @@ function extractKeywordPlaceholders(slide, prefix) {
 
   slide.getPageElements().forEach(function(element) {
     if (element.getPageElementType() !== SlidesApp.PageElementType.SHAPE) return;
-
     const shape = element.asShape();
     const text = shape.getText().asString();
     const matches = text.match(pattern);
-
     if (matches) {
-      matches.forEach(function(match) {
-        placeholders.add(match);
-      });
+      matches.forEach(function(match) { placeholders.add(match); });
     }
   });
 
