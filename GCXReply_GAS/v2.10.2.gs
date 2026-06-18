@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         GCX Reply
 // @namespace    https://spigen.com/gcx
-// @version      2.10.1
+// @version      2.10.2
 // @description  Amazon order data via GAS web app + Spigen product info + Zendesk auto-fill
 // @author       Spigen GCX
 // @updateURL    https://raw.githubusercontent.com/codingintheusa0402/spigen-gcx-automation/main/tampermonkey_scripts/GCX%20Reply.user.js
@@ -57,7 +57,7 @@
   };
 
   const FULFILLMENT_MAP = { AFN: 'fba', MFN: 'merchant__fbm_' };
-  const SCRIPT_VER = (typeof GM_info !== 'undefined' ? GM_info?.script?.version : null) || '2.10.1';
+  const SCRIPT_VER = (typeof GM_info !== 'undefined' ? GM_info?.script?.version : null) || '2.10.2';
 
   // ── Module state ─────────────────────────────────────────────────────────
   let lastOrderData    = null;
@@ -1689,6 +1689,33 @@
       border-top: 1px solid rgba(0,0,0,0.07);
       margin-top: 2px;
     }
+    .sp-item-card {
+      padding: 4px 0 5px;
+      border-bottom: 1px solid rgba(0,0,0,0.05);
+    }
+    .sp-item-card:last-child { border-bottom: none; }
+    .sp-item-asin {
+      font-size: 11px;
+      color: #3a6ea8;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      margin-bottom: 2px;
+    }
+    .sp-item-sku {
+      font-size: 10.5px;
+      color: #888;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+    .sp-item-name {
+      font-size: 12px;
+      color: #1c1c1e;
+      font-weight: 500;
+      word-break: break-word;
+      line-height: 1.45;
+    }
 
     /* ── Step log ───────────────────────────────────────────────────────── */
     #sp-load-log {
@@ -1969,8 +1996,15 @@
     ).join('');
 
     const itemRows = it.map(item => {
-      const title = item.Title ? item.Title.slice(0, 44) + (item.Title.length > 44 ? '…' : '') : item.ASIN;
-      return row(item.SellerSKU || item.ASIN, `${item.QuantityOrdered}×  ${title}`);
+      const asin  = item.ASIN || '';
+      const sku   = item.SellerSKU && item.SellerSKU !== asin ? item.SellerSKU : '';
+      const title = item.Title || asin;
+      const qty   = item.QuantityOrdered || 1;
+      return `<div class="sp-item-card">
+        <div class="sp-item-asin" title="${esc(asin)}">${esc(asin)}</div>
+        ${sku ? `<div class="sp-item-sku" title="${esc(sku)}">${esc(sku)}</div>` : ''}
+        <div class="sp-item-name">${esc(qty)}× ${esc(title)}</div>
+      </div>`;
     }).join('');
 
     const orderCountNote = data.totalPurchases != null
@@ -2426,8 +2460,15 @@
       e.preventDefault();
       e.stopPropagation();
 
-      const startX = e.clientX, startY = e.clientY;
+      // Normalize to left-anchor so ALL edge/corner math is consistent.
+      // Without this, panels anchored via `right: 16px` would expand the
+      // wrong direction when the right edge is dragged.
       const r = panel.getBoundingClientRect();
+      panel.style.left  = r.left + 'px';
+      panel.style.right = 'auto';
+      panel.style.top   = r.top  + 'px';
+
+      const startX = e.clientX, startY = e.clientY;
       const startLeft = r.left, startTop = r.top;
       const startW = r.width,   startH   = r.height;
 
@@ -2447,12 +2488,10 @@
           panel.style.right = 'auto';
         }
         if (h.bottom) {
-          const maxH = window.innerHeight - startTop - 8;
-          panel.style.height = Math.max(MIN_H, Math.min(maxH, startH + dy)) + 'px';
+          panel.style.height = Math.max(MIN_H, startH + dy) + 'px';
         }
         if (h.top) {
-          const maxStretch = startTop - 72; // don't go above y=72
-          const newH = Math.min(startH + maxStretch, Math.max(MIN_H, startH - dy));
+          const newH = Math.max(MIN_H, startH - dy);
           panel.style.height = newH + 'px';
           panel.style.top    = (startTop + startH - newH) + 'px';
         }
@@ -2498,18 +2537,19 @@
     const panel = buildPanel();
     document.body.appendChild(panel);
 
-    // Restore saved size + position — clamp to viewport so panel never starts off-screen.
+    // Restore saved size + position.
+    // Only soft-clamp to ensure ≥50px of the panel header is visible so the
+    // user can always grab it — allow any other off-screen position.
     const _savedUi = loadUi();
     if (_savedUi.w) panel.style.width  = _savedUi.w + 'px';
     if (_savedUi.h) panel.style.height = _savedUi.h + 'px';
     if (_savedUi.x != null) {
-      const clampedX = Math.max(4, Math.min(_savedUi.x, window.innerWidth - 220));
-      panel.style.left = clampedX + 'px';
+      panel.style.left  = _savedUi.x + 'px';
       panel.style.right = 'auto';
     }
     if (_savedUi.y != null) {
-      const clampedY = Math.max(72, Math.min(_savedUi.y, window.innerHeight - 80));
-      panel.style.top = clampedY + 'px';
+      // Only keep the top clamp so the drag handle stays reachable
+      panel.style.top = Math.max(-panel.offsetHeight + 50, _savedUi.y) + 'px';
     }
 
     // Start minimized on filter/list pages; expanded on ticket pages
