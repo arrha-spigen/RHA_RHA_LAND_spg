@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         GCX Reply
 // @namespace    https://spigen.com/gcx
-// @version      2.9.8
+// @version      2.9.9
 // @description  Amazon order data via GAS web app + Spigen product info + Zendesk auto-fill
 // @author       Spigen GCX
 // @updateURL    https://raw.githubusercontent.com/codingintheusa0402/spigen-gcx-automation/main/tampermonkey_scripts/GCX%20Reply.user.js
@@ -57,7 +57,7 @@
   };
 
   const FULFILLMENT_MAP = { AFN: 'fba', MFN: 'merchant__fbm_' };
-  const SCRIPT_VER = (typeof GM_info !== 'undefined' ? GM_info?.script?.version : null) || '2.9.8';
+  const SCRIPT_VER = (typeof GM_info !== 'undefined' ? GM_info?.script?.version : null) || '2.9.9';
 
   // ── Module state ─────────────────────────────────────────────────────────
   let lastOrderData    = null;
@@ -1392,16 +1392,16 @@
     svg.innerHTML = `<defs>
       <filter id="sp-glass-distort" x="-10%" y="-10%" width="120%" height="120%" color-interpolation-filters="linearRGB">
         <!-- Edge mask: erode alpha then subtract to isolate the border zone -->
-        <feMorphology in="SourceAlpha" operator="erode" radius="22" result="innerAlpha"/>
+        <feMorphology in="SourceAlpha" operator="erode" radius="20" result="innerAlpha"/>
         <feComposite in="SourceAlpha" in2="innerAlpha" operator="out" result="edgeMask"/>
         <!-- Soften the mask so displacement tapers smoothly inward -->
-        <feGaussianBlur in="edgeMask" stdDeviation="7" result="softEdge"/>
+        <feGaussianBlur in="edgeMask" stdDeviation="5" result="softEdge"/>
         <!-- Low-frequency fractal noise for smooth glass-wave refraction -->
         <feTurbulence type="fractalNoise" baseFrequency="0.007 0.005" numOctaves="3" seed="42" result="turbulence"/>
         <!-- Multiply noise by edge mask → distortion only near the glass rim -->
         <feBlend in="turbulence" in2="softEdge" mode="multiply" result="edgeTurbulence"/>
-        <!-- Apply up to 26px displacement at the rim, zero at center -->
-        <feDisplacementMap in="SourceGraphic" in2="edgeTurbulence" scale="26" xChannelSelector="R" yChannelSelector="G"/>
+        <!-- Apply up to 13px displacement at the rim, zero at center -->
+        <feDisplacementMap in="SourceGraphic" in2="edgeTurbulence" scale="13" xChannelSelector="R" yChannelSelector="G"/>
       </filter>
     </defs>`;
     (document.body || document.documentElement).appendChild(svg);
@@ -1453,11 +1453,11 @@
       inset: 0;
       border-radius: 21px;
       background: linear-gradient(to bottom,
-        rgba(255,255,255,0.18) 0%,
-        rgba(168,170,180,0.18) 100%
+        rgba(255,255,255,0.22) 0%,
+        rgba(168,170,180,0.22) 100%
       );
-      backdrop-filter: blur(18px) saturate(180%);
-      -webkit-backdrop-filter: blur(18px) saturate(180%);
+      backdrop-filter: blur(14px) saturate(180%);
+      -webkit-backdrop-filter: blur(14px) saturate(180%);
       filter: url(#sp-glass-distort);
       pointer-events: none;
     }
