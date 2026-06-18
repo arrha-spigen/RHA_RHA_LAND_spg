@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         GCX Reply
 // @namespace    https://spigen.com/gcx
-// @version      2.9.9
+// @version      2.10.0
 // @description  Amazon order data via GAS web app + Spigen product info + Zendesk auto-fill
 // @author       Spigen GCX
 // @updateURL    https://raw.githubusercontent.com/codingintheusa0402/spigen-gcx-automation/main/tampermonkey_scripts/GCX%20Reply.user.js
@@ -57,7 +57,7 @@
   };
 
   const FULFILLMENT_MAP = { AFN: 'fba', MFN: 'merchant__fbm_' };
-  const SCRIPT_VER = (typeof GM_info !== 'undefined' ? GM_info?.script?.version : null) || '2.9.9';
+  const SCRIPT_VER = (typeof GM_info !== 'undefined' ? GM_info?.script?.version : null) || '2.10.0';
 
   // ── Module state ─────────────────────────────────────────────────────────
   let lastOrderData    = null;
@@ -1407,10 +1407,16 @@
     (document.body || document.documentElement).appendChild(svg);
   })();
   safeAddStyle_(`
-    /* ── Main panel — liquid-glass-js accurate ──────────────────────────── */
-    /* library: tintOpacity=0.2 → mix(blurredBg, white→gray0.7, 0.2)        */
-    /* = 80% background shows through, 20% white-to-gray gradient overlay.  */
-    /* Edge refraction lives in #sp-glass-layer via SVG feDisplacementMap.  */
+    /* ── Iridescent border animation ────────────────────────────────────── */
+    @property --sp-iris {
+      syntax: '<angle>';
+      inherits: false;
+      initial-value: 0deg;
+    }
+    @keyframes sp-iris {
+      to { --sp-iris: 360deg; }
+    }
+    /* ── Main panel ─────────────────────────────────────────────────────── */
     #sp-order-panel {
       position: fixed;
       right: 16px;
@@ -1425,25 +1431,20 @@
       background:
         transparent padding-box,
         conic-gradient(
-          from 210deg at 28% 12%,
-          rgba(255,255,255,0.90) 0deg,
-          rgba(255,255,255,0.50) 50deg,
-          rgba(255,255,255,0.12) 115deg,
-          rgba(255,255,255,0.06) 185deg,
-          rgba(255,255,255,0.14) 250deg,
-          rgba(255,255,255,0.46) 305deg,
-          rgba(255,255,255,0.90) 360deg
+          from var(--sp-iris) at 50% 50%,
+          #ff3cac, #ff6b35, #ffd700, #3cff6b, #00cfff, #7c3cff, #ff3cac
         ) border-box;
-      border: 1.5px solid transparent;
+      border: 2px solid transparent;
       border-radius: 22px;
       box-shadow:
         0 24px 64px rgba(0,0,0,0.15),
         0 6px 18px rgba(0,0,0,0.09),
-        inset 0 1px 0 rgba(255,255,255,0.88);
+        inset 0 1px 0 rgba(255,255,255,0.70);
       font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Arial, sans-serif;
       font-size: 12.5px;
       color: #1c1c1e;
       z-index: 99999;
+      animation: sp-iris 4s linear infinite;
     }
 
     /* Glass layer: backdrop-blur (18px = library's gentle blur) + SVG edge   */
@@ -1777,6 +1778,26 @@
       border: 1px solid rgba(0,0,0,0.08);
       border-radius: 8px;
       min-height: 36px;
+    }
+
+    /* ── Drag-ghost: glass dissolves while moving ────────────────────────── */
+    /* Glass layer transitions fast on drag start, recovers on drop.         */
+    #sp-order-panel #sp-glass-layer {
+      transition: background 0.12s ease, backdrop-filter 0.12s ease,
+                  -webkit-backdrop-filter 0.12s ease, opacity 0.12s ease;
+    }
+    #sp-order-panel.sp-dragging #sp-glass-layer {
+      background: transparent;
+      backdrop-filter: none;
+      -webkit-backdrop-filter: none;
+      opacity: 0;
+    }
+    #sp-order-panel.sp-dragging #sp-panel-header {
+      background: transparent;
+      border-bottom-color: transparent;
+    }
+    #sp-order-panel.sp-dragging {
+      box-shadow: 0 8px 20px rgba(0,0,0,0.10);
     }
   `);
 
@@ -2344,6 +2365,7 @@
       const offY = e.clientY - rect.top;
       let moved = false;
       const onMove = e2 => {
+        if (!moved) panel.classList.add('sp-dragging');
         moved = true;
         panel.style.left  = (e2.clientX - offX) + 'px';
         panel.style.top   = (e2.clientY - offY) + 'px';
@@ -2351,7 +2373,10 @@
       };
       const onUp = () => {
         handle._dragMoved = moved;
-        if (moved) saveUi({ x: parseInt(panel.style.left), y: parseInt(panel.style.top) });
+        if (moved) {
+          saveUi({ x: parseInt(panel.style.left), y: parseInt(panel.style.top) });
+          panel.classList.remove('sp-dragging');
+        }
         removeEventListener('mousemove', onMove);
         removeEventListener('mouseup', onUp);
       };
