@@ -693,14 +693,14 @@ function updateFeedbackSheet() {
       '【Before】 SC orders-api SellerSKU 미확보(세션 만료) 또는 ACS10046에 PAN 미포함 → PAN EU 미감지 → FBA 선택\n【현황】 v2.7.6 병렬 SC 조회 적용 중 — SC 세션 유지 시 자동 감지 가능. SellerSKU 직접 확인 후 추가 조치 예정\n📋 티켓: #1000150172 (ASIN B0FD22YW2J)',
       null],
     [37,
-      '【Before】 v2.7.7 fixProductSheetData AGL07928 수정이 시트에 미적용(함수 미실행) → 동일 오매칭 재발\n【After v2.8.2】 fixProductSheetData 재실행 → AGL07928 모델명 "Glas.tR EZ Fit Slim" 정상 적용\n✅ 테스트 티켓: #1000150312 (ASIN B0D84YX465)',
+      '【현황 - GCX Test: Fail】 소스 데이터 불일치\nASIN_Master(먼데이보드): "Glas.tR EZ Fit" / TCK 국가별 제품 리스트(아마존 직판): "Glas.tR Slim (2P)" / 젠데스크: "Glas.tR EZ Fit Slim"\n【시도】 v2.8.2 fixProductSheetData AGL07928 모델명 "Glas.tR EZ Fit Slim" 재적용 → 단, 소스 데이터 근본 불일치로 재발 가능성 있음\n📋 테스트 티켓: #1000150312 (ASIN B0D84YX465)',
       'v2.7.7'],
     [38,
       '【Before】 동일 원인 → SC SellerSKU "PE2304IN 45w"가 문의SKU 필드에 입력됨\n【After v2.8.3】 동일 수정 사항 적용 (Spigen SKU 패턴 검증)\n✅ 테스트 티켓: #1000150368 (ASIN B0DQ14CVX1)',
       'v2.8.3'],
     [39,
       '【Before】 인도(Amazon.in) SP-API LWA 토큰 만료 시 예외 미처리 → 주문 조회 전체 실패\n【After GAS 2026-06-15】 지역별 LWA 예외 개별 catch, 403+만료 시 캐시 자동 삭제 후 1회 재시도\n📋 테스트 티켓: #1000150413',
-      null],
+      'v2.8.4'],
   ];
 
   UPDATES.forEach(([row, feedback, build]) => {
