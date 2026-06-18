@@ -1,6 +1,6 @@
 // ==UserScript==
 // @name         Amazon MCF Autofill
-// @version      1.2.1
+// @version      1.3.0
 // @updateURL    https://raw.githubusercontent.com/codingintheusa0402/spigen-gcx-automation/main/tampermonkey_scripts/Amazon%20MCF%20Autofill.user.js
 // @downloadURL  https://raw.githubusercontent.com/codingintheusa0402/spigen-gcx-automation/main/tampermonkey_scripts/Amazon%20MCF%20Autofill.user.js
 // @match        https://sellercentral.amazon.*/mcf/orders/create-order*
@@ -783,7 +783,8 @@ async function fetchOrderIdByEmail(email) {
   // ── URL 해시 브릿지: Zendesk GCX Reply → MCF 자동입력 ───────────────────
   async function autoFillFromUrlHash() {
     const hash = sessionStorage.getItem('_spigen_mcf_hash') || '';
-    sessionStorage.removeItem('_spigen_mcf_hash');
+    // NOTE: do NOT removeItem here — keep the entry until fill succeeds so that
+    // a page refresh can retry. We remove only after success or definitive timeout.
     try {
       if (!hash || !hash.includes('spigen_mcf=')) return;
       const encoded = hash.split('spigen_mcf=')[1];
@@ -794,20 +795,37 @@ async function fetchOrderIdByEmail(email) {
 
       msg('Zendesk에서 자동입력 중…');
 
-      // 특정 필드 대신 fillAll 자체를 최대 30초간 재시도
+      // Some SC marketplaces (UK, DE) only show address fields AFTER a product is
+      // selected. If fillAll can't find address fields, we still need to kick off
+      // the ASIN search so product selection happens, which then reveals address fields.
       let filled = false;
+      let asinSearchKicked = false;
       for (let i = 0; i < 60; i++) {
         await sleep(500);
         const ok = fillAll({ name:d.name, street:d.street, city:d.city, state:d.state,
                   postal:d.postal, phone:d.phone, email:d.email,
                   country:d.country, countryRaw:d.country, q:d.asin });
         if (ok) { filled = true; break; }
+
+        // Address fields not visible yet — check if ASIN search box is ready and kick
+        // off autoSelectBestSku so product selection can unblock address fields.
+        if (!asinSearchKicked && d.asin) {
+          const searchInner = document.getElementById('sku-search-input')
+            ?.shadowRoot?.querySelector('input');
+          if (searchInner && (searchInner.value || '').trim()) {
+            asinSearchKicked = true;
+            autoSelectBestSku();
+            LOG('ASIN search kicked from retry loop (address not yet visible).');
+          }
+        }
       }
+
+      sessionStorage.removeItem('_spigen_mcf_hash');
 
       if (!filled) { msg('폼 타임아웃'); return; }
 
       msg('입력 중…');
-      if (d.asin) autoSelectBestSku();
+      if (d.asin && !asinSearchKicked) autoSelectBestSku();
       if (d.country) setTimeout(() => setCountry(d.country), 800);
       if (d.email) {
         msg('시트 업데이트 중…');
@@ -822,6 +840,17 @@ async function fetchOrderIdByEmail(email) {
   }
 
   setTimeout(autoFillFromUrlHash, 500);
+
+  // SPA navigation: if Amazon routes to the MCF page via hashchange (client-side nav
+  // from elsewhere on SC without a full page reload), the IIFE at document-start
+  // already ran and missed the hash. Catch it here.
+  window.addEventListener('hashchange', () => {
+    if (location.hash && location.hash.includes('spigen_mcf=')) {
+      try { sessionStorage.setItem('_spigen_mcf_hash', location.hash); } catch(e) {}
+      history.replaceState(null, '', location.pathname + location.search);
+      autoFillFromUrlHash();
+    }
+  });
 
   }); // end waitForDOM
 })();
