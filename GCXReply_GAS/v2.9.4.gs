@@ -1,7 +1,8 @@
 // ==UserScript==
 // @name         GCX Reply
 // @namespace    https://spigen.com/gcx
-// @version      2.9.7
+
+// @version      2.9.4
 // @description  Amazon order data via GAS web app + Spigen product info + Zendesk auto-fill
 // @author       Spigen GCX
 // @updateURL    https://raw.githubusercontent.com/codingintheusa0402/spigen-gcx-automation/main/tampermonkey_scripts/GCX%20Reply.user.js
@@ -57,7 +58,7 @@
   };
 
   const FULFILLMENT_MAP = { AFN: 'fba', MFN: 'merchant__fbm_' };
-  const SCRIPT_VER = (typeof GM_info !== 'undefined' ? GM_info?.script?.version : null) || '2.9.7';
+  const SCRIPT_VER = (typeof GM_info !== 'undefined' ? GM_info?.script?.version : null) || '2.9.4';
 
   // ── Module state ─────────────────────────────────────────────────────────
   let lastOrderData    = null;
@@ -591,23 +592,7 @@
   // ── AI 인입사유용 텍스트 추출 (고객 메시지 + Spigen CS 요약) ─────────────────
   function getAiInputText_() {
     const m = location.pathname.match(/\/tickets\/(\d+)/);
-    const ticketId = m?.[1];
-    const pane = (ticketId && document.querySelector(`[data-test-id="ticket-${ticketId}-standard-layout"]`)) || document.body;
-
-    // Priority 1: Zendesk comment body elements (avoids sidebar metadata)
-    const commentEls = pane.querySelectorAll(
-      '[data-test-id*="comment-body"], [data-test-id*="comment-viewer"], ' +
-      '[data-test-id*="event-message"], [data-test-id*="rich-text"], ' +
-      '.rich_text, [data-garden-id*="comment"], [class*="CommentContent"]'
-    );
-    if (commentEls.length > 0) {
-      const texts = [...commentEls].map(el => el.innerText.trim()).filter(t => t.length > 20);
-      if (texts.length > 0) {
-        return texts.slice(0, 4).join('\n\n').slice(0, 2500);
-      }
-    }
-
-    // Priority 2: Find CS summary then extract surrounding conversation
+    const pane = (m && document.querySelector(`[data-test-id="ticket-${m[1]}-standard-layout"]`)) || document.body;
     const full = (pane.innerText || '').replace(/[ \t]+/g, ' ').trim();
     if (!full) return '';
 
@@ -615,15 +600,15 @@
     const csIdx   = full.indexOf(CS_NAME);
 
     if (csIdx !== -1) {
-      // Take content immediately BEFORE CS comment (actual conversation, not sidebar start)
-      const start       = Math.max(0, csIdx - 1200);
-      const customerPart = full.slice(start, csIdx).trim();
+      // 고객 첫 메시지 (CS 요약 이전) + CS 한국어 요약 (이후 600자)
+      const customerPart = full.slice(0, Math.min(csIdx, 800)).trim();
       const csPart       = full.slice(csIdx + CS_NAME.length, csIdx + CS_NAME.length + 600).trim();
-      return [customerPart, csPart ? `[CS요약]\n${csPart}` : ''].filter(Boolean).join('\n\n---\n\n').slice(0, 2500);
+      const combined = [customerPart, csPart ? `[CS요약]\n${csPart}` : ''].filter(Boolean).join('\n\n---\n\n');
+      return combined.slice(0, 2500);
     }
 
-    // Priority 3: Skip first ~600 chars (usually sidebar metadata) and take the rest
-    return full.slice(600, 2600);
+    // CS 요약 없으면 첫 2000자만 사용
+    return full.slice(0, 2000);
   }
 
   // ── MCF: 티켓 본문에서 고객 주소 파싱 (MCF Autofill parseClipboard와 동일 로직) ─
@@ -981,28 +966,12 @@
   }
 
   // ── AI 인입사유 ───────────────────────────────────────────────────────────
-  function showAiReasonBtn_(category) {
-    const container = document.getElementById('sp-ai-reason-result');
-    if (!container) return;
-    container.innerHTML = `
-      <div style="padding:0 14px 0;">
-        <div style="border-top:1px solid #e9ebec;padding:7px 0 6px;">
-          <button id="sp-ai-reason-btn" style="background:rgba(124,58,237,0.88);color:#fff;border:none;border-radius:8px;padding:5px 0;cursor:pointer;font-size:12px;width:100%;backdrop-filter:blur(4px);">✦ AI 인입사유 분석</button>
-        </div>
-      </div>`;
-    container.querySelector('#sp-ai-reason-btn').addEventListener('click', () => {
-      const review = getAiInputText_();
-      fetchAiReason_(review, category);
-    });
-  }
-
   function fetchAiReason_(review, category) {
     const container = document.getElementById('sp-ai-reason-result');
     if (!container || !review) return;
     const _session = _panelSession;
     container.innerHTML = `<div style="padding:0 14px;"><div style="font-size:11px;color:#aaa;padding:6px 0;">AI 인입사유 분석 중…</div></div>`;
     logStep_('AI 인입사유 분석 중…');
-    logStep_('AI 입력텍스트: ' + review.slice(0, 600).replace(/\n+/g, ' / '));
     GM_xmlhttpRequest({
       method:   'GET',
       url:      `${GAS_URL}?action=inferReason&review=${encodeURIComponent(review.slice(0, 2000))}&category=${encodeURIComponent(category || '')}`,
@@ -1183,7 +1152,8 @@
       maybeShowAutoFill(document.getElementById(PANEL_ID));
 
       const aiCategory = lastProductData?.['대분류'] || '';
-      showAiReasonBtn_(aiCategory);
+      const aiReview   = getAiInputText_();
+      if (aiReview) fetchAiReason_(aiReview, aiCategory);
 
       container.innerHTML = `<div style="padding:0 14px 8px;">${results.map(({ asin, product, source, sourceUrl, error, marketplaces }) => {
         if (!product) {
@@ -2522,7 +2492,8 @@
       if (result) result.innerHTML = '<div id="sp-status">Scanning ticket for order IDs…</div>';
       const productResult = document.getElementById('sp-product-result');
       if (productResult) productResult.innerHTML = '';
-      showAiReasonBtn_('');
+      const aiReasonEl = document.getElementById('sp-ai-reason-result');
+      if (aiReasonEl) aiReasonEl.innerHTML = '';
       lastAiReason = null;
       const chips = document.getElementById('sp-detected-ids');
       if (chips) chips.innerHTML = '';
