@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         GCX Reply
 // @namespace    https://spigen.com/gcx
-// @version      2.9.7
+// @version      2.9.8
 // @description  Amazon order data via GAS web app + Spigen product info + Zendesk auto-fill
 // @author       Spigen GCX
 // @updateURL    https://raw.githubusercontent.com/codingintheusa0402/spigen-gcx-automation/main/tampermonkey_scripts/GCX%20Reply.user.js
@@ -57,7 +57,7 @@
   };
 
   const FULFILLMENT_MAP = { AFN: 'fba', MFN: 'merchant__fbm_' };
-  const SCRIPT_VER = (typeof GM_info !== 'undefined' ? GM_info?.script?.version : null) || '2.9.7';
+  const SCRIPT_VER = (typeof GM_info !== 'undefined' ? GM_info?.script?.version : null) || '2.9.8';
 
   // ── Module state ─────────────────────────────────────────────────────────
   let lastOrderData    = null;
@@ -1380,25 +1380,37 @@
   // Inject SVG filter for glass edge distortion (liquid-glass-js inspired).
   // feTurbulence generates smooth noise; feDisplacementMap shifts the blurred
   // backdrop by up to 5px based on that noise, creating a lens-refraction look.
+  // Edge-concentrated glass refraction filter (liquid-glass-js inspired).
+  // feMorphology+feComposite builds an edge-only alpha mask so displacement
+  // is strongest at the glass border and zero at the center — matching the
+  // shader's rimIntensity/edgeIntensity decay away from the shape edge.
   (function injectGlassFilter_() {
     if (document.getElementById('sp-glass-svg')) return;
     const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
     svg.id = 'sp-glass-svg';
     svg.setAttribute('style', 'position:absolute;width:0;height:0;overflow:hidden;pointer-events:none;');
     svg.innerHTML = `<defs>
-      <filter id="sp-glass-distort" x="-6%" y="-6%" width="112%" height="112%" color-interpolation-filters="linearRGB">
-        <feTurbulence type="fractalNoise" baseFrequency="0.0065 0.0045" numOctaves="2" seed="42" result="noise"/>
-        <feDisplacementMap in="SourceGraphic" in2="noise" scale="5" xChannelSelector="R" yChannelSelector="G"/>
+      <filter id="sp-glass-distort" x="-10%" y="-10%" width="120%" height="120%" color-interpolation-filters="linearRGB">
+        <!-- Edge mask: erode alpha then subtract to isolate the border zone -->
+        <feMorphology in="SourceAlpha" operator="erode" radius="22" result="innerAlpha"/>
+        <feComposite in="SourceAlpha" in2="innerAlpha" operator="out" result="edgeMask"/>
+        <!-- Soften the mask so displacement tapers smoothly inward -->
+        <feGaussianBlur in="edgeMask" stdDeviation="7" result="softEdge"/>
+        <!-- Low-frequency fractal noise for smooth glass-wave refraction -->
+        <feTurbulence type="fractalNoise" baseFrequency="0.007 0.005" numOctaves="3" seed="42" result="turbulence"/>
+        <!-- Multiply noise by edge mask → distortion only near the glass rim -->
+        <feBlend in="turbulence" in2="softEdge" mode="multiply" result="edgeTurbulence"/>
+        <!-- Apply up to 26px displacement at the rim, zero at center -->
+        <feDisplacementMap in="SourceGraphic" in2="edgeTurbulence" scale="26" xChannelSelector="R" yChannelSelector="G"/>
       </filter>
     </defs>`;
     (document.body || document.documentElement).appendChild(svg);
   })();
   safeAddStyle_(`
-    /* ── Main panel — liquid-glass-js inspired ──────────────────────────── */
-    /* Backdrop blur + SVG displacement live on #sp-glass-layer (first child) */
-    /* so the SVG distortion only affects the blurred background, not text.  */
-    /* Border uses a conic gradient centered in the upper-left to simulate   */
-    /* light wrapping around real glass edges.                                */
+    /* ── Main panel — liquid-glass-js accurate ──────────────────────────── */
+    /* library: tintOpacity=0.2 → mix(blurredBg, white→gray0.7, 0.2)        */
+    /* = 80% background shows through, 20% white-to-gray gradient overlay.  */
+    /* Edge refraction lives in #sp-glass-layer via SVG feDisplacementMap.  */
     #sp-order-panel {
       position: fixed;
       right: 16px;
@@ -1410,57 +1422,54 @@
       display: flex;
       flex-direction: column;
       overflow: hidden;
-      /* No fill here — fill lives on #sp-glass-layer so the SVG filter     */
-      /* can distort it; border is a conic gradient for light-wrap effect.   */
       background:
         transparent padding-box,
         conic-gradient(
           from 210deg at 28% 12%,
-          rgba(255,255,255,0.92) 0deg,
-          rgba(255,255,255,0.55) 50deg,
-          rgba(255,255,255,0.14) 115deg,
-          rgba(255,255,255,0.07) 185deg,
-          rgba(255,255,255,0.16) 250deg,
-          rgba(255,255,255,0.48) 305deg,
-          rgba(255,255,255,0.92) 360deg
+          rgba(255,255,255,0.90) 0deg,
+          rgba(255,255,255,0.50) 50deg,
+          rgba(255,255,255,0.12) 115deg,
+          rgba(255,255,255,0.06) 185deg,
+          rgba(255,255,255,0.14) 250deg,
+          rgba(255,255,255,0.46) 305deg,
+          rgba(255,255,255,0.90) 360deg
         ) border-box;
       border: 1.5px solid transparent;
       border-radius: 22px;
       box-shadow:
-        0 24px 64px rgba(0,0,0,0.14),
-        0 6px 18px rgba(0,0,0,0.08),
-        inset 0 2px 0 rgba(255,255,255,0.96),
-        inset 2px 0 0 rgba(255,255,255,0.32),
-        inset -1px 0 0 rgba(0,0,0,0.04),
-        inset 0 -1.5px 0 rgba(0,0,0,0.07);
+        0 24px 64px rgba(0,0,0,0.15),
+        0 6px 18px rgba(0,0,0,0.09),
+        inset 0 1px 0 rgba(255,255,255,0.88);
       font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Arial, sans-serif;
       font-size: 12.5px;
       color: #1c1c1e;
       z-index: 99999;
     }
 
-    /* Glass blur + WebGL-style distortion via SVG feTurbulence+feDisplacementMap */
-    /* Sits behind all panel content; filter distorts the blurred backdrop.   */
+    /* Glass layer: backdrop-blur (18px = library's gentle blur) + SVG edge   */
+    /* refraction. Fill matches library shader: top=white/18%, bot=gray/18%  */
     #sp-glass-layer {
       position: absolute;
       inset: 0;
       border-radius: 21px;
-      background: rgba(255,255,255,0.10);
-      backdrop-filter: blur(40px) saturate(200%) brightness(1.04);
-      -webkit-backdrop-filter: blur(40px) saturate(200%) brightness(1.04);
+      background: linear-gradient(to bottom,
+        rgba(255,255,255,0.18) 0%,
+        rgba(168,170,180,0.18) 100%
+      );
+      backdrop-filter: blur(18px) saturate(180%);
+      -webkit-backdrop-filter: blur(18px) saturate(180%);
       filter: url(#sp-glass-distort);
       pointer-events: none;
     }
-    /* Caustic light overlay: bright upper-left (incident light), dim lower-right */
+    /* Caustic sheen: subtle specular at upper-left only (library's rim light) */
     #sp-glass-layer::before {
       content: '';
       position: absolute;
       inset: 0;
       border-radius: inherit;
       background:
-        radial-gradient(ellipse 80% 50% at 10% -10%, rgba(255,255,255,0.22) 0%, transparent 68%),
-        radial-gradient(ellipse 50% 28% at 92% 110%, rgba(255,255,255,0.10) 0%, transparent 62%),
-        linear-gradient(180deg, rgba(255,255,255,0.07) 0%, transparent 45%);
+        radial-gradient(ellipse 75% 45% at 12% -8%, rgba(255,255,255,0.14) 0%, transparent 65%),
+        radial-gradient(ellipse 45% 25% at 90% 106%, rgba(255,255,255,0.06) 0%, transparent 55%);
       pointer-events: none;
     }
 
@@ -1471,8 +1480,8 @@
       position: relative;
       z-index: 1;
       padding: 9px 12px;
-      background: rgba(255, 255, 255, 0.16);
-      border-bottom: 1px solid rgba(255, 255, 255, 0.38);
+      background: rgba(255, 255, 255, 0.05);
+      border-bottom: 1px solid rgba(255, 255, 255, 0.22);
       border-radius: 22px 22px 0 0;
       display: flex;
       align-items: center;
@@ -1546,8 +1555,8 @@
     }
     #sp-order-input {
       flex: 1;
-      background: rgba(255,255,255,0.62);
-      border: 1px solid rgba(180,190,220,0.55);
+      background: rgba(255,255,255,0.38);
+      border: 1px solid rgba(180,190,220,0.40);
       border-radius: 8px;
       padding: 5px 8px;
       font-size: 12px;
@@ -1555,11 +1564,11 @@
       outline: none;
       color: #1a1a2e;
     }
-    #sp-order-input:focus { border-color: #5ba4cf; box-shadow: 0 0 0 2px rgba(91,164,207,.25); background: rgba(255,255,255,0.82); }
+    #sp-order-input:focus { border-color: #5ba4cf; box-shadow: 0 0 0 2px rgba(91,164,207,.20); background: rgba(255,255,255,0.58); }
     #sp-asin-input {
       flex: 1;
-      background: rgba(255,255,255,0.62);
-      border: 1px solid rgba(180,190,220,0.55);
+      background: rgba(255,255,255,0.38);
+      border: 1px solid rgba(180,190,220,0.40);
       border-radius: 8px;
       padding: 5px 8px;
       font-size: 12px;
@@ -1567,7 +1576,7 @@
       outline: none;
       color: #1a1a2e;
     }
-    #sp-asin-input:focus { border-color: #f0a500; box-shadow: 0 0 0 2px rgba(240,165,0,.25); background: rgba(255,255,255,0.82); }
+    #sp-asin-input:focus { border-color: #f0a500; box-shadow: 0 0 0 2px rgba(240,165,0,.20); background: rgba(255,255,255,0.58); }
 
     /* ── Buttons ────────────────────────────────────────────────────────── */
     #sp-lookup-btn {
@@ -1666,7 +1675,7 @@
       gap: 6px;
     }
     .sp-row:nth-child(odd) {
-      background: rgba(0,0,0,0.03);
+      background: rgba(0,0,0,0.02);
       margin: 0 -14px;
       padding: 4px 14px;
       border-radius: 6px;

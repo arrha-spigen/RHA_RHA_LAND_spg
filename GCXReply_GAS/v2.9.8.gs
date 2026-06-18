@@ -1,8 +1,7 @@
 // ==UserScript==
 // @name         GCX Reply
 // @namespace    https://spigen.com/gcx
-
-// @version      2.9.4
+// @version      2.9.8
 // @description  Amazon order data via GAS web app + Spigen product info + Zendesk auto-fill
 // @author       Spigen GCX
 // @updateURL    https://raw.githubusercontent.com/codingintheusa0402/spigen-gcx-automation/main/tampermonkey_scripts/GCX%20Reply.user.js
@@ -58,7 +57,7 @@
   };
 
   const FULFILLMENT_MAP = { AFN: 'fba', MFN: 'merchant__fbm_' };
-  const SCRIPT_VER = (typeof GM_info !== 'undefined' ? GM_info?.script?.version : null) || '2.9.4';
+  const SCRIPT_VER = (typeof GM_info !== 'undefined' ? GM_info?.script?.version : null) || '2.9.8';
 
   // ── Module state ─────────────────────────────────────────────────────────
   let lastOrderData    = null;
@@ -592,7 +591,23 @@
   // ── AI 인입사유용 텍스트 추출 (고객 메시지 + Spigen CS 요약) ─────────────────
   function getAiInputText_() {
     const m = location.pathname.match(/\/tickets\/(\d+)/);
-    const pane = (m && document.querySelector(`[data-test-id="ticket-${m[1]}-standard-layout"]`)) || document.body;
+    const ticketId = m?.[1];
+    const pane = (ticketId && document.querySelector(`[data-test-id="ticket-${ticketId}-standard-layout"]`)) || document.body;
+
+    // Priority 1: Zendesk comment body elements (avoids sidebar metadata)
+    const commentEls = pane.querySelectorAll(
+      '[data-test-id*="comment-body"], [data-test-id*="comment-viewer"], ' +
+      '[data-test-id*="event-message"], [data-test-id*="rich-text"], ' +
+      '.rich_text, [data-garden-id*="comment"], [class*="CommentContent"]'
+    );
+    if (commentEls.length > 0) {
+      const texts = [...commentEls].map(el => el.innerText.trim()).filter(t => t.length > 20);
+      if (texts.length > 0) {
+        return texts.slice(0, 4).join('\n\n').slice(0, 2500);
+      }
+    }
+
+    // Priority 2: Find CS summary then extract surrounding conversation
     const full = (pane.innerText || '').replace(/[ \t]+/g, ' ').trim();
     if (!full) return '';
 
@@ -600,15 +615,15 @@
     const csIdx   = full.indexOf(CS_NAME);
 
     if (csIdx !== -1) {
-      // 고객 첫 메시지 (CS 요약 이전) + CS 한국어 요약 (이후 600자)
-      const customerPart = full.slice(0, Math.min(csIdx, 800)).trim();
+      // Take content immediately BEFORE CS comment (actual conversation, not sidebar start)
+      const start       = Math.max(0, csIdx - 1200);
+      const customerPart = full.slice(start, csIdx).trim();
       const csPart       = full.slice(csIdx + CS_NAME.length, csIdx + CS_NAME.length + 600).trim();
-      const combined = [customerPart, csPart ? `[CS요약]\n${csPart}` : ''].filter(Boolean).join('\n\n---\n\n');
-      return combined.slice(0, 2500);
+      return [customerPart, csPart ? `[CS요약]\n${csPart}` : ''].filter(Boolean).join('\n\n---\n\n').slice(0, 2500);
     }
 
-    // CS 요약 없으면 첫 2000자만 사용
-    return full.slice(0, 2000);
+    // Priority 3: Skip first ~600 chars (usually sidebar metadata) and take the rest
+    return full.slice(600, 2600);
   }
 
   // ── MCF: 티켓 본문에서 고객 주소 파싱 (MCF Autofill parseClipboard와 동일 로직) ─
@@ -966,12 +981,28 @@
   }
 
   // ── AI 인입사유 ───────────────────────────────────────────────────────────
+  function showAiReasonBtn_(category) {
+    const container = document.getElementById('sp-ai-reason-result');
+    if (!container) return;
+    container.innerHTML = `
+      <div style="padding:0 14px 0;">
+        <div style="border-top:1px solid #e9ebec;padding:7px 0 6px;">
+          <button id="sp-ai-reason-btn" style="background:rgba(124,58,237,0.88);color:#fff;border:none;border-radius:8px;padding:5px 0;cursor:pointer;font-size:12px;width:100%;backdrop-filter:blur(4px);">✦ AI 인입사유 분석</button>
+        </div>
+      </div>`;
+    container.querySelector('#sp-ai-reason-btn').addEventListener('click', () => {
+      const review = getAiInputText_();
+      fetchAiReason_(review, category);
+    });
+  }
+
   function fetchAiReason_(review, category) {
     const container = document.getElementById('sp-ai-reason-result');
     if (!container || !review) return;
     const _session = _panelSession;
     container.innerHTML = `<div style="padding:0 14px;"><div style="font-size:11px;color:#aaa;padding:6px 0;">AI 인입사유 분석 중…</div></div>`;
     logStep_('AI 인입사유 분석 중…');
+    logStep_('AI 입력텍스트: ' + review.slice(0, 600).replace(/\n+/g, ' / '));
     GM_xmlhttpRequest({
       method:   'GET',
       url:      `${GAS_URL}?action=inferReason&review=${encodeURIComponent(review.slice(0, 2000))}&category=${encodeURIComponent(category || '')}`,
@@ -1152,8 +1183,7 @@
       maybeShowAutoFill(document.getElementById(PANEL_ID));
 
       const aiCategory = lastProductData?.['대분류'] || '';
-      const aiReview   = getAiInputText_();
-      if (aiReview) fetchAiReason_(aiReview, aiCategory);
+      showAiReasonBtn_(aiCategory);
 
       container.innerHTML = `<div style="padding:0 14px 8px;">${results.map(({ asin, product, source, sourceUrl, error, marketplaces }) => {
         if (!product) {
@@ -1350,25 +1380,37 @@
   // Inject SVG filter for glass edge distortion (liquid-glass-js inspired).
   // feTurbulence generates smooth noise; feDisplacementMap shifts the blurred
   // backdrop by up to 5px based on that noise, creating a lens-refraction look.
+  // Edge-concentrated glass refraction filter (liquid-glass-js inspired).
+  // feMorphology+feComposite builds an edge-only alpha mask so displacement
+  // is strongest at the glass border and zero at the center — matching the
+  // shader's rimIntensity/edgeIntensity decay away from the shape edge.
   (function injectGlassFilter_() {
     if (document.getElementById('sp-glass-svg')) return;
     const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
     svg.id = 'sp-glass-svg';
     svg.setAttribute('style', 'position:absolute;width:0;height:0;overflow:hidden;pointer-events:none;');
     svg.innerHTML = `<defs>
-      <filter id="sp-glass-distort" x="-6%" y="-6%" width="112%" height="112%" color-interpolation-filters="linearRGB">
-        <feTurbulence type="fractalNoise" baseFrequency="0.0065 0.0045" numOctaves="2" seed="42" result="noise"/>
-        <feDisplacementMap in="SourceGraphic" in2="noise" scale="5" xChannelSelector="R" yChannelSelector="G"/>
+      <filter id="sp-glass-distort" x="-10%" y="-10%" width="120%" height="120%" color-interpolation-filters="linearRGB">
+        <!-- Edge mask: erode alpha then subtract to isolate the border zone -->
+        <feMorphology in="SourceAlpha" operator="erode" radius="22" result="innerAlpha"/>
+        <feComposite in="SourceAlpha" in2="innerAlpha" operator="out" result="edgeMask"/>
+        <!-- Soften the mask so displacement tapers smoothly inward -->
+        <feGaussianBlur in="edgeMask" stdDeviation="7" result="softEdge"/>
+        <!-- Low-frequency fractal noise for smooth glass-wave refraction -->
+        <feTurbulence type="fractalNoise" baseFrequency="0.007 0.005" numOctaves="3" seed="42" result="turbulence"/>
+        <!-- Multiply noise by edge mask → distortion only near the glass rim -->
+        <feBlend in="turbulence" in2="softEdge" mode="multiply" result="edgeTurbulence"/>
+        <!-- Apply up to 26px displacement at the rim, zero at center -->
+        <feDisplacementMap in="SourceGraphic" in2="edgeTurbulence" scale="26" xChannelSelector="R" yChannelSelector="G"/>
       </filter>
     </defs>`;
     (document.body || document.documentElement).appendChild(svg);
   })();
   safeAddStyle_(`
-    /* ── Main panel — liquid-glass-js inspired ──────────────────────────── */
-    /* Backdrop blur + SVG displacement live on #sp-glass-layer (first child) */
-    /* so the SVG distortion only affects the blurred background, not text.  */
-    /* Border uses a conic gradient centered in the upper-left to simulate   */
-    /* light wrapping around real glass edges.                                */
+    /* ── Main panel — liquid-glass-js accurate ──────────────────────────── */
+    /* library: tintOpacity=0.2 → mix(blurredBg, white→gray0.7, 0.2)        */
+    /* = 80% background shows through, 20% white-to-gray gradient overlay.  */
+    /* Edge refraction lives in #sp-glass-layer via SVG feDisplacementMap.  */
     #sp-order-panel {
       position: fixed;
       right: 16px;
@@ -1380,57 +1422,54 @@
       display: flex;
       flex-direction: column;
       overflow: hidden;
-      /* No fill here — fill lives on #sp-glass-layer so the SVG filter     */
-      /* can distort it; border is a conic gradient for light-wrap effect.   */
       background:
         transparent padding-box,
         conic-gradient(
           from 210deg at 28% 12%,
-          rgba(255,255,255,0.92) 0deg,
-          rgba(255,255,255,0.55) 50deg,
-          rgba(255,255,255,0.14) 115deg,
-          rgba(255,255,255,0.07) 185deg,
-          rgba(255,255,255,0.16) 250deg,
-          rgba(255,255,255,0.48) 305deg,
-          rgba(255,255,255,0.92) 360deg
+          rgba(255,255,255,0.90) 0deg,
+          rgba(255,255,255,0.50) 50deg,
+          rgba(255,255,255,0.12) 115deg,
+          rgba(255,255,255,0.06) 185deg,
+          rgba(255,255,255,0.14) 250deg,
+          rgba(255,255,255,0.46) 305deg,
+          rgba(255,255,255,0.90) 360deg
         ) border-box;
       border: 1.5px solid transparent;
       border-radius: 22px;
       box-shadow:
-        0 24px 64px rgba(0,0,0,0.14),
-        0 6px 18px rgba(0,0,0,0.08),
-        inset 0 2px 0 rgba(255,255,255,0.96),
-        inset 2px 0 0 rgba(255,255,255,0.32),
-        inset -1px 0 0 rgba(0,0,0,0.04),
-        inset 0 -1.5px 0 rgba(0,0,0,0.07);
+        0 24px 64px rgba(0,0,0,0.15),
+        0 6px 18px rgba(0,0,0,0.09),
+        inset 0 1px 0 rgba(255,255,255,0.88);
       font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Arial, sans-serif;
       font-size: 12.5px;
       color: #1c1c1e;
       z-index: 99999;
     }
 
-    /* Glass blur + WebGL-style distortion via SVG feTurbulence+feDisplacementMap */
-    /* Sits behind all panel content; filter distorts the blurred backdrop.   */
+    /* Glass layer: backdrop-blur (18px = library's gentle blur) + SVG edge   */
+    /* refraction. Fill matches library shader: top=white/18%, bot=gray/18%  */
     #sp-glass-layer {
       position: absolute;
       inset: 0;
       border-radius: 21px;
-      background: rgba(255,255,255,0.10);
-      backdrop-filter: blur(40px) saturate(200%) brightness(1.04);
-      -webkit-backdrop-filter: blur(40px) saturate(200%) brightness(1.04);
+      background: linear-gradient(to bottom,
+        rgba(255,255,255,0.18) 0%,
+        rgba(168,170,180,0.18) 100%
+      );
+      backdrop-filter: blur(18px) saturate(180%);
+      -webkit-backdrop-filter: blur(18px) saturate(180%);
       filter: url(#sp-glass-distort);
       pointer-events: none;
     }
-    /* Caustic light overlay: bright upper-left (incident light), dim lower-right */
+    /* Caustic sheen: subtle specular at upper-left only (library's rim light) */
     #sp-glass-layer::before {
       content: '';
       position: absolute;
       inset: 0;
       border-radius: inherit;
       background:
-        radial-gradient(ellipse 80% 50% at 10% -10%, rgba(255,255,255,0.22) 0%, transparent 68%),
-        radial-gradient(ellipse 50% 28% at 92% 110%, rgba(255,255,255,0.10) 0%, transparent 62%),
-        linear-gradient(180deg, rgba(255,255,255,0.07) 0%, transparent 45%);
+        radial-gradient(ellipse 75% 45% at 12% -8%, rgba(255,255,255,0.14) 0%, transparent 65%),
+        radial-gradient(ellipse 45% 25% at 90% 106%, rgba(255,255,255,0.06) 0%, transparent 55%);
       pointer-events: none;
     }
 
@@ -1441,8 +1480,8 @@
       position: relative;
       z-index: 1;
       padding: 9px 12px;
-      background: rgba(255, 255, 255, 0.16);
-      border-bottom: 1px solid rgba(255, 255, 255, 0.38);
+      background: rgba(255, 255, 255, 0.05);
+      border-bottom: 1px solid rgba(255, 255, 255, 0.22);
       border-radius: 22px 22px 0 0;
       display: flex;
       align-items: center;
@@ -1516,8 +1555,8 @@
     }
     #sp-order-input {
       flex: 1;
-      background: rgba(255,255,255,0.62);
-      border: 1px solid rgba(180,190,220,0.55);
+      background: rgba(255,255,255,0.38);
+      border: 1px solid rgba(180,190,220,0.40);
       border-radius: 8px;
       padding: 5px 8px;
       font-size: 12px;
@@ -1525,11 +1564,11 @@
       outline: none;
       color: #1a1a2e;
     }
-    #sp-order-input:focus { border-color: #5ba4cf; box-shadow: 0 0 0 2px rgba(91,164,207,.25); background: rgba(255,255,255,0.82); }
+    #sp-order-input:focus { border-color: #5ba4cf; box-shadow: 0 0 0 2px rgba(91,164,207,.20); background: rgba(255,255,255,0.58); }
     #sp-asin-input {
       flex: 1;
-      background: rgba(255,255,255,0.62);
-      border: 1px solid rgba(180,190,220,0.55);
+      background: rgba(255,255,255,0.38);
+      border: 1px solid rgba(180,190,220,0.40);
       border-radius: 8px;
       padding: 5px 8px;
       font-size: 12px;
@@ -1537,7 +1576,7 @@
       outline: none;
       color: #1a1a2e;
     }
-    #sp-asin-input:focus { border-color: #f0a500; box-shadow: 0 0 0 2px rgba(240,165,0,.25); background: rgba(255,255,255,0.82); }
+    #sp-asin-input:focus { border-color: #f0a500; box-shadow: 0 0 0 2px rgba(240,165,0,.20); background: rgba(255,255,255,0.58); }
 
     /* ── Buttons ────────────────────────────────────────────────────────── */
     #sp-lookup-btn {
@@ -1636,7 +1675,7 @@
       gap: 6px;
     }
     .sp-row:nth-child(odd) {
-      background: rgba(0,0,0,0.03);
+      background: rgba(0,0,0,0.02);
       margin: 0 -14px;
       padding: 4px 14px;
       border-radius: 6px;
@@ -2492,8 +2531,7 @@
       if (result) result.innerHTML = '<div id="sp-status">Scanning ticket for order IDs…</div>';
       const productResult = document.getElementById('sp-product-result');
       if (productResult) productResult.innerHTML = '';
-      const aiReasonEl = document.getElementById('sp-ai-reason-result');
-      if (aiReasonEl) aiReasonEl.innerHTML = '';
+      showAiReasonBtn_('');
       lastAiReason = null;
       const chips = document.getElementById('sp-detected-ids');
       if (chips) chips.innerHTML = '';
