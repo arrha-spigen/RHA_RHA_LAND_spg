@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         GCX Reply
 // @namespace    https://spigen.com/gcx
-// @version      2.10.0
+// @version      2.10.1
 // @description  Amazon order data via GAS web app + Spigen product info + Zendesk auto-fill
 // @author       Spigen GCX
 // @updateURL    https://raw.githubusercontent.com/codingintheusa0402/spigen-gcx-automation/main/tampermonkey_scripts/GCX%20Reply.user.js
@@ -57,7 +57,7 @@
   };
 
   const FULFILLMENT_MAP = { AFN: 'fba', MFN: 'merchant__fbm_' };
-  const SCRIPT_VER = (typeof GM_info !== 'undefined' ? GM_info?.script?.version : null) || '2.10.0';
+  const SCRIPT_VER = (typeof GM_info !== 'undefined' ? GM_info?.script?.version : null) || '2.10.1';
 
   // ── Module state ─────────────────────────────────────────────────────────
   let lastOrderData    = null;
@@ -1058,6 +1058,9 @@
       t.addEventListener('click', e => { e.stopPropagation(); t.closest('.sp-block').classList.toggle('collapsed'); });
     });
     applySectionState(container);
+    // Always expand after a fresh analysis — user just asked for it
+    const _aiBlock = container.querySelector('[data-sp-section="ai_reason"]');
+    if (_aiBlock) _aiBlock.classList.remove('collapsed');
   }
 
   // ── Product info renderer ────────────────────────────────────────────────
@@ -1512,26 +1515,19 @@
     }
     #sp-panel-close:hover { opacity: 1; background: rgba(180,185,210,0.35); }
 
-    #sp-order-panel.minimized #sp-panel-body,
-    #sp-order-panel.minimized #sp-resize-handle { display: none; }
+    #sp-order-panel.minimized #sp-panel-body { display: none; }
     #sp-order-panel.minimized #sp-panel-header { border-radius: 22px; border-bottom: none; cursor: pointer; }
 
-    /* ── Resize handle ──────────────────────────────────────────────────── */
-    #sp-resize-handle {
-      position: absolute;
-      bottom: 0;
-      right: 0;
-      width: 16px;
-      height: 16px;
-      cursor: se-resize;
-      opacity: .28;
-      background: repeating-linear-gradient(
-        -45deg,
-        #8890bb 0px, #8890bb 2px,
-        transparent 2px, transparent 5px
-      );
-    }
-    #sp-resize-handle:hover { opacity: .65; }
+    /* ── Edge-resize cursors (set via data-resize-dir on panel) ─────────── */
+    #sp-order-panel[data-rdir] * { cursor: inherit !important; }
+    #sp-order-panel[data-rdir="nw"] { cursor: nw-resize !important; }
+    #sp-order-panel[data-rdir="n"]  { cursor: n-resize  !important; }
+    #sp-order-panel[data-rdir="ne"] { cursor: ne-resize !important; }
+    #sp-order-panel[data-rdir="e"]  { cursor: e-resize  !important; }
+    #sp-order-panel[data-rdir="se"] { cursor: se-resize !important; }
+    #sp-order-panel[data-rdir="s"]  { cursor: s-resize  !important; }
+    #sp-order-panel[data-rdir="sw"] { cursor: sw-resize !important; }
+    #sp-order-panel[data-rdir="w"]  { cursor: w-resize  !important; }
 
     /* ── Scrollable body ────────────────────────────────────────────────── */
     #sp-panel-body {
@@ -1848,7 +1844,6 @@
         <div id="sp-product-result"></div>
       </div>
       <div id="sp-load-log"></div>
-      <div id="sp-resize-handle"></div>
     `;
     return d;
   }
@@ -2358,7 +2353,10 @@
   // ── Draggable panel ───────────────────────────────────────────────────────
   function makeDraggable(panel, handle) {
     handle.addEventListener('mousedown', e => {
-      if (e.target.closest('#sp-minimize-btn, #sp-panel-close, #sp-resize-handle')) return;
+      if (e.target.closest('#sp-minimize-btn, #sp-panel-close')) return;
+      // Let edge-resize take over when within 8px of any panel edge
+      const _r = panel.getBoundingClientRect();
+      if (e.clientY - _r.top < 8 || _r.right - e.clientX < 8 || e.clientX - _r.left < 8) return;
       e.preventDefault();
       const rect = panel.getBoundingClientRect();
       const offX = e.clientX - rect.left;
@@ -2385,26 +2383,99 @@
     });
   }
 
-  // ── Resizable panel ───────────────────────────────────────────────────────
-  function makeResizable_(panel, handle) {
-    handle.addEventListener('mousedown', e => {
+  // ── Resizable panel — all 8 edges/corners ────────────────────────────────
+  function makeResizable_(panel) {
+    const EDGE = 8; // px from border that counts as "edge zone"
+
+    function hitTest(e) {
+      const r = panel.getBoundingClientRect();
+      const top    = e.clientY - r.top    <= EDGE;
+      const bottom = r.bottom  - e.clientY <= EDGE;
+      const left   = e.clientX - r.left   <= EDGE;
+      const right  = r.right   - e.clientX <= EDGE;
+      return { top, bottom, left, right };
+    }
+
+    function dirKey({ top, bottom, left, right }) {
+      if (top    && left)  return 'nw';
+      if (top    && right) return 'ne';
+      if (bottom && left)  return 'sw';
+      if (bottom && right) return 'se';
+      if (top)             return 'n';
+      if (bottom)          return 's';
+      if (left)            return 'w';
+      if (right)           return 'e';
+      return '';
+    }
+
+    // Show edge cursors as the mouse moves over the panel
+    panel.addEventListener('mousemove', e => {
+      if (e.buttons) return; // don't change cursor while another button is held
+      const dir = dirKey(hitTest(e));
+      if (dir) panel.dataset.rdir = dir;
+      else     delete panel.dataset.rdir;
+    });
+    panel.addEventListener('mouseleave', () => { delete panel.dataset.rdir; });
+
+    // Start resize on mousedown near any edge
+    panel.addEventListener('mousedown', e => {
+      const h = hitTest(e);
+      const dir = dirKey(h);
+      if (!dir) return; // interior click — let drag handle take over
+
       e.preventDefault();
       e.stopPropagation();
+
       const startX = e.clientX, startY = e.clientY;
-      const startW = panel.offsetWidth, startH = panel.offsetHeight;
-      const onMove = e2 => {
-        const w = Math.max(200, Math.min(700, startW + e2.clientX - startX));
-        const h = Math.max(80,  startH + e2.clientY - startY);
-        panel.style.width  = w + 'px';
-        panel.style.height = h + 'px';
+      const r = panel.getBoundingClientRect();
+      const startLeft = r.left, startTop = r.top;
+      const startW = r.width,   startH   = r.height;
+
+      const MIN_W = 200, MAX_W = 700, MIN_H = 80;
+
+      const onMove = ev => {
+        const dx = ev.clientX - startX;
+        const dy = ev.clientY - startY;
+
+        if (h.right) {
+          panel.style.width = Math.max(MIN_W, Math.min(MAX_W, startW + dx)) + 'px';
+        }
+        if (h.left) {
+          const newW = Math.max(MIN_W, Math.min(MAX_W, startW - dx));
+          panel.style.width = newW + 'px';
+          panel.style.left  = (startLeft + startW - newW) + 'px';
+          panel.style.right = 'auto';
+        }
+        if (h.bottom) {
+          const maxH = window.innerHeight - startTop - 8;
+          panel.style.height = Math.max(MIN_H, Math.min(maxH, startH + dy)) + 'px';
+        }
+        if (h.top) {
+          const maxStretch = startTop - 72; // don't go above y=72
+          const newH = Math.min(startH + maxStretch, Math.max(MIN_H, startH - dy));
+          panel.style.height = newH + 'px';
+          panel.style.top    = (startTop + startH - newH) + 'px';
+        }
       };
+
       const onUp = () => {
-        saveUi({ w: panel.offsetWidth, h: panel.offsetHeight });
-        removeEventListener('mousemove', onMove);
-        removeEventListener('mouseup', onUp);
+        saveUi({
+          x: panel.style.left  ? parseInt(panel.style.left)  : null,
+          y: panel.style.top   ? parseInt(panel.style.top)   : null,
+          w: panel.offsetWidth,
+          h: panel.offsetHeight
+        });
+        document.body.style.cursor     = '';
+        document.body.style.userSelect = '';
+        document.removeEventListener('mousemove', onMove);
+        document.removeEventListener('mouseup',   onUp);
       };
-      addEventListener('mousemove', onMove);
-      addEventListener('mouseup', onUp);
+
+      // Lock cursor + prevent text selection across whole page during drag
+      document.body.style.cursor     = dir + '-resize';
+      document.body.style.userSelect = 'none';
+      document.addEventListener('mousemove', onMove);
+      document.addEventListener('mouseup',   onUp);
     });
   }
 
@@ -2446,7 +2517,7 @@
 
     const header = panel.querySelector('#sp-panel-header');
     makeDraggable(panel, header);
-    makeResizable_(panel, panel.querySelector('#sp-resize-handle'));
+    makeResizable_(panel);
 
     // Minimize / expand
     panel.querySelector('#sp-minimize-btn').onclick = e => {
