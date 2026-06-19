@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         GCX Reply
 // @namespace    https://spigen.com/gcx
-// @version      2.10.4
+// @version      2.10.5
 // @description  Amazon order data via GAS web app + Spigen product info + Zendesk auto-fill
 // @author       Spigen GCX
 // @updateURL    https://raw.githubusercontent.com/codingintheusa0402/spigen-gcx-automation/main/tampermonkey_scripts/GCX%20Reply.user.js
@@ -743,10 +743,7 @@
     if (!lastOrderData) return;
     const payload = buildMcfPayload_(panel);
     const encoded = btoa(encodeURIComponent(JSON.stringify(payload)));
-    const mcfBase = payload.country === 'JP'
-      ? 'https://sellercentral-japan.amazon.com/mcf/orders/create-order/'
-      : 'https://sellercentral.amazon.com/mcf/orders/create-order';
-    window.open(mcfBase + '#spigen_mcf=' + encoded, '_blank');
+    window.open(getMcfBase_(payload.country) + '#spigen_mcf=' + encoded, '_blank');
     const status = panel.querySelector('#sp-mcf-status');
     if (status) {
       status.textContent = '✓ MCF 탭 열림 — 자동입력 대기중';
