@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         GCX Reply
 // @namespace    https://spigen.com/gcx
-// @version      2.10.3
+// @version      2.10.4
 // @description  Amazon order data via GAS web app + Spigen product info + Zendesk auto-fill
 // @author       Spigen GCX
 // @updateURL    https://raw.githubusercontent.com/codingintheusa0402/spigen-gcx-automation/main/tampermonkey_scripts/GCX%20Reply.user.js
@@ -1461,8 +1461,8 @@
       border-radius: 22px;
       box-shadow:
         0 0 18px var(--sp-glow-clr),
-        0 24px 64px rgba(0,0,0,0.15),
-        0 6px 18px rgba(0,0,0,0.09),
+        0 10px 28px rgba(0,0,0,0.10),
+        0 3px 8px rgba(0,0,0,0.06),
         inset 0 1px 0 rgba(255,255,255,0.70);
       font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Arial, sans-serif;
       font-size: 12.5px;
@@ -2775,47 +2775,54 @@
     return `https://sellercentral.${dom || 'amazon.com'}/mcf/orders/create-order`;
   }
 
-  // MCF 링크 패치 — Amazon MCF 직접 링크 + Zendesk 매크로 Netlify 리다이렉트 링크 모두 커버
+  // MCF 링크 패치 — event delegation instead of per-link onclick.
+  // Per-link onclick requires the link to already be in the DOM when patchMcfLinks_
+  // runs. Zendesk iframes are detected by a 1-second interval, so clicks in the first
+  // second fall through to the raw Netlify redirect (no hash). Event delegation on
+  // the document/iframe catches ALL clicks regardless of when the link was added,
+  // including future links injected by Zendesk's SPA renderer.
   function patchMcfLinks_(rootEl) {
-    try {
-      // Amazon MCF 직접 링크
-      (rootEl || document).querySelectorAll('a[href*="mcf/orders/create-order"]').forEach(link => {
-        if (link.href.includes('spigen_mcf=')) return;
-        const base = link.href.split('#')[0].replace(/\?[^]*$/, '');
-        link.onclick = e => {
-          e.preventDefault();
-          const payload = buildMcfPayload_(document.getElementById(PANEL_ID));
-          const encoded = btoa(encodeURIComponent(JSON.stringify(payload)));
-          window.open(base + '#spigen_mcf=' + encoded, '_blank');
-        };
-      });
-      // Zendesk 매크로 Netlify 리다이렉트 링크 → Amazon MCF로 직접 열기
-      (rootEl || document).querySelectorAll('a[href*=".netlify.app"]').forEach(link => {
-        link.onclick = e => {
-          e.preventDefault();
-          const payload = buildMcfPayload_(document.getElementById(PANEL_ID));
-          const encoded = btoa(encodeURIComponent(JSON.stringify(payload)));
-          window.open(getMcfBase_(payload.country) + '#spigen_mcf=' + encoded, '_blank');
-        };
-      });
-    } catch(e) {}
+    const root = rootEl instanceof Document ? rootEl : (rootEl ? rootEl.ownerDocument || document : document);
+    if (root._mcfDelegated) return;
+    root._mcfDelegated = true;
+
+    root.addEventListener('click', (e) => {
+      const link = e.target.closest('a');
+      if (!link) return;
+      const href = link.href || '';
+      const isNetlify = href.includes('.netlify.app');
+      const isMcfDirect = href.includes('mcf/orders/create-order') && !href.includes('spigen_mcf=');
+      if (!isNetlify && !isMcfDirect) return;
+
+      e.preventDefault();
+      e.stopPropagation();
+
+      try {
+        const payload = buildMcfPayload_(document.getElementById(PANEL_ID));
+        const encoded = btoa(encodeURIComponent(JSON.stringify(payload)));
+        const base = isMcfDirect
+          ? href.split('#')[0].replace(/\?[^]*$/, '')
+          : getMcfBase_(payload.country);
+        window.open(base + '#spigen_mcf=' + encoded, '_blank');
+      } catch (err) {
+        // Encoding failed — open the original link so the click isn't silently swallowed.
+        window.open(href, '_blank');
+      }
+    }, true); // capture phase: fires before React/Zendesk handlers
   }
 
-  // 메인 문서 감시
-  const _mcfLinkObs = new MutationObserver(() => patchMcfLinks_());
-  _mcfLinkObs.observe(document.body, { childList: true, subtree: true });
-  patchMcfLinks_();
+  // 메인 문서 감시 (delegation attaches once; MutationObserver no longer needed for links)
+  patchMcfLinks_(document);
 
   // iframe 내부도 감시 (Zendesk 에디터 등)
+  // patchMcfLinks_ now uses event delegation so we just need to attach the listener
+  // to the iframe document once — no MutationObserver per-link needed anymore.
   if (typeof setInterval === 'function') setInterval(() => {
     document.querySelectorAll('iframe').forEach(iframe => {
       try {
         const doc = iframe.contentDocument;
-        if (!doc || !doc.body || doc.body.dataset.mcfWatching) return;
-        doc.body.dataset.mcfWatching = '1';
+        if (!doc || !doc.body) return;
         patchMcfLinks_(doc);
-        new MutationObserver(() => patchMcfLinks_(doc))
-          .observe(doc.body, { childList: true, subtree: true });
       } catch(e) {}
     });
   }, 1000);
