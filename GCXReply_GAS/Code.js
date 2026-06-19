@@ -128,6 +128,36 @@ function setupKeepWarmTrigger() {
   Logger.log('keepWarm trigger created — fires every 5 minutes');
 }
 
+// ── JP auth diagnostic (run manually from GAS editor) ────────────────────────
+// Clears cache, tests getLwaToken_('jp'), then hits a simple SP-API endpoint.
+// Check Execution log for results.
+function diagJP() {
+  CacheService.getScriptCache().remove('lwa_jp');
+  Logger.log('Cache cleared.');
+
+  const props = PropertiesService.getScriptProperties().getProperties();
+  Logger.log('CLIENT_ID_JP present:      ' + !!props['LWA_CLIENT_ID_JP']);
+  Logger.log('CLIENT_SECRET_JP present:  ' + !!props['LWA_CLIENT_SECRET_JP']);
+  Logger.log('CLIENT_SECRET_JP prefix:   ' + (props['LWA_CLIENT_SECRET_JP'] || '').slice(0, 30));
+  Logger.log('REFRESH_TOKEN_JP present:  ' + !!props['LWA_REFRESH_TOKEN_JP']);
+  Logger.log('REFRESH_TOKEN_JP prefix:   ' + (props['LWA_REFRESH_TOKEN_JP'] || '').slice(0, 30));
+
+  let token;
+  try {
+    token = getLwaToken_('jp');
+    Logger.log('LWA token: OK  (' + token.slice(0, 30) + '...)');
+  } catch(e) {
+    Logger.log('LWA token: FAILED → ' + e.message);
+    return;
+  }
+
+  // /sellers/v1/marketplaceParticipations needs no order ID — good auth test
+  const r = spApiGet_('https://sellingpartnerapi-fe.amazon.com', 'us-west-2', 'jp',
+                       '/sellers/v1/marketplaceParticipations');
+  Logger.log('SP-API status: ' + r.status);
+  Logger.log('SP-API body:   ' + r.body.slice(0, 600));
+}
+
 // ── LWA token (cached 4 min) ──────────────────────────────────────────────────
 function getLwaToken_(cred) {
   const cache    = CacheService.getScriptCache();
@@ -324,7 +354,11 @@ function fetchOrderData_(orderId) {
     }
 
     const order  = JSON.parse(r.body).payload || {};
-    if (!order.AmazonOrderId) { regionErrors.push(`${cred}:200-noId`); continue; }
+    if (!order.AmazonOrderId) {
+      const preview = r.body.substring(0, 120).replace(/\s+/g, ' ');
+      regionErrors.push(`${cred}:200-noId(${preview})`);
+      continue;
+    }
 
     const rdtResult = getRdt_(endpoint, region, cred, orderId);
     const rdtToken  = rdtResult.token || undefined;
