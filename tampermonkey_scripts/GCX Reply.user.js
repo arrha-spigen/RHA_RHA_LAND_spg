@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         GCX Reply
 // @namespace    https://spigen.com/gcx
-// @version      2.13.4
+// @version      2.13.5
 // @description  Amazon order data via GAS web app + Spigen product info + Zendesk auto-fill
 // @author       Spigen GCX
 // @updateURL    https://raw.githubusercontent.com/codingintheusa0402/spigen-gcx-automation/main/tampermonkey_scripts/GCX%20Reply.user.js
@@ -58,7 +58,7 @@
   };
 
   const FULFILLMENT_MAP = { AFN: 'fba', MFN: 'merchant__fbm_' };
-  const SCRIPT_VER = (typeof GM_info !== 'undefined' ? GM_info?.script?.version : null) || '2.13.4';
+  const SCRIPT_VER = (typeof GM_info !== 'undefined' ? GM_info?.script?.version : null) || '2.13.5';
 
   // ── Module state ─────────────────────────────────────────────────────────
   let lastOrderData    = null;
@@ -2432,7 +2432,11 @@
 
     const itemAsins    = it.map(i => i.ASIN).filter(Boolean);
     const returnAsin   = itemAsins.length ? itemAsins.join(', ') : (panelAsin || '—');
-    const fulfillLabel = fulfillmentLabel_(o.FulfillmentChannel, it[0]?.SellerSKU || '');
+    // All Seller SKUs (multi-item orders list every SKU, deduped, in item order).
+    const sellerSkus   = [...new Set(it.map(i => i.SellerSKU).filter(Boolean))];
+    const sellerSkuStr = sellerSkus.join(', ');
+    // PAN-EU detection: treat the order as PAN if ANY item carries a PAN/EUP SKU.
+    const fulfillLabel = fulfillmentLabel_(o.FulfillmentChannel, sellerSkus.join(' ') || it[0]?.SellerSKU || '');
     const amount     = o.OrderTotal ? `${o.OrderTotal.Amount} ${o.OrderTotal.CurrencyCode}` : '—';
     const buyerName  = b.BuyerName || o.BuyerInfo?.BuyerName || ad.Name || '—';
 
@@ -2492,7 +2496,7 @@
         </div>
         <div class="sp-block-body">
           ${rowLinked('Amazon Order ID', orderId, sellerCentralUrl(orderId, o.SalesChannel, ad.CountryCode))}
-          ${row('Seller SKU',       it[0]?.SellerSKU || '')}
+          ${row('Seller SKU',       sellerSkuStr)}
           ${row('Order Status',     o.OrderStatus)}
           ${row('Purchase Date',    fmtPurchaseDate_(o.PurchaseDate, ad.CountryCode))}
           ${row('Amount',           amount)}
@@ -2698,61 +2702,54 @@
           }
 
           const prefs = getDataFetchPrefs();
-          if (prefs.fetchProduct) {
-            if (itemAsins.length) {
-              logStep_(`Product lookup: ${itemAsins.join(', ')}`);
-              renderAllProducts(itemAsins);
-            } else if (resolvedAsin) {
-              logStep_(`Product lookup: ${resolvedAsin}`);
-              renderAllProducts([resolvedAsin]);
-              // SP-API items were blocked → also fetch SC in parallel just to get SellerSKU
-              // (product lookup already started above with the known ASIN — don't block it)
-              if (data.itemsStatus !== 200) {
-                fetchScItems(orderId, data.order?.SalesChannel, data.address?.CountryCode, scItems => {
-                  if (_panelSession !== _session || !result.isConnected) return;
-                  if (scItems && scItems.length) {
-                    lastOrderData.items = scItems;
-                    result.innerHTML = renderOrder(Object.assign({}, lastOrderData, { items: scItems }), orderId, resolvedAsin);
-                    result.querySelectorAll('.sp-block-title').forEach(t => {
-                      t.addEventListener('click', e => { e.stopPropagation(); t.closest('.sp-block').classList.toggle('collapsed'); });
-                    });
-                    applySectionState(result);
-                    maybeShowAutoFill(document.getElementById(PANEL_ID));
-                  }
-                });
-              }
-            } else if (data.itemsStatus !== 200) {
-              // SP-API items blocked AND no ASIN → query Seller Central for ASIN + SellerSKU
-              const asinValEl = result.querySelector('.sp-row .sp-val');
-              if (asinValEl) asinValEl.textContent = 'Seller Central…';
-              fetchScItems(orderId, data.order?.SalesChannel, data.address?.CountryCode, scItems => {
-                if (_panelSession !== _session || !result.isConnected) return;
-                if (scItems && scItems.length) {
-                  lastOrderData.items = scItems;
-                  const newAsins = scItems.map(i => i.ASIN).filter(Boolean);
-                  if (asinInput && !asinInput.value) asinInput.value = newAsins.join(', ');
-                  result.innerHTML = renderOrder(Object.assign({}, data, { items: scItems }), orderId, newAsins.join(', '));
-                  result.querySelectorAll('.sp-block-title').forEach(t => {
-                    t.addEventListener('click', e => { e.stopPropagation(); t.closest('.sp-block').classList.toggle('collapsed'); });
-                  });
-                  applySectionState(result);
-                  renderAllProducts(newAsins); // finish() will set _productReady = true
-                  maybeShowAutoFill(document.getElementById(PANEL_ID));
-                } else {
-                  // SC returned no items → no product lookup possible → enable button now
-                  _productReady = true;
-                  maybeShowAutoFill(document.getElementById(PANEL_ID));
-                }
-              });
+
+          // Spigen-sheet product lookup is gated by the Product Info toggle.
+          // Seller SKU / item ASINs are ORDER data and must NOT be gated by it.
+          const doProductLookup = asins => {
+            if (prefs.fetchProduct && asins && asins.length) {
+              logStep_(`Product lookup: ${asins.join(', ')}`);
+              renderAllProducts(asins);
             } else {
-              // No ASIN detected and items were accessible but empty → no product lookup → enable now
               _productReady = true;
               maybeShowAutoFill(document.getElementById(PANEL_ID));
             }
-          } else {
-            // Product fetch disabled → mark ready immediately
-            _productReady = true;
+          };
+
+          const rerenderOrder = renderAsin => {
+            result.innerHTML = renderOrder(lastOrderData, orderId, renderAsin);
+            result.querySelectorAll('.sp-block-title').forEach(t => {
+              t.addEventListener('click', e => { e.stopPropagation(); t.closest('.sp-block').classList.toggle('collapsed'); });
+            });
+            applySectionState(result);
             maybeShowAutoFill(document.getElementById(PANEL_ID));
+          };
+
+          if (itemAsins.length) {
+            // SP-API returned items directly (SellerSKU + ASIN already present).
+            doProductLookup(itemAsins);
+          } else if (data.itemsStatus !== 200) {
+            // SP-API items blocked (the usual case) → Seller Central session returns
+            // ALL items (every SellerSKU + ASIN). Runs regardless of Product Info.
+            if (!resolvedAsin) {
+              const asinValEl = result.querySelector('.sp-row .sp-val');
+              if (asinValEl) asinValEl.textContent = 'Seller Central…';
+            }
+            fetchScItems(orderId, data.order?.SalesChannel, data.address?.CountryCode, scItems => {
+              if (_panelSession !== _session || !result.isConnected) return;
+              if (scItems && scItems.length) {
+                lastOrderData.items = scItems;
+                const newAsins = scItems.map(i => i.ASIN).filter(Boolean);
+                if (asinInput && !asinInput.value) asinInput.value = newAsins.join(', ');
+                rerenderOrder(newAsins.join(', ') || resolvedAsin);
+                doProductLookup(newAsins.length ? newAsins : (resolvedAsin ? [resolvedAsin] : []));
+              } else {
+                // SC returned nothing → fall back to any ASIN we already have.
+                doProductLookup(resolvedAsin ? [resolvedAsin] : []);
+              }
+            });
+          } else {
+            // Items accessible but empty → product lookup from the resolved ASIN if any.
+            doProductLookup(resolvedAsin ? [resolvedAsin] : []);
           }
         } catch (err) {
           setStatus('Parse error: ' + err.message);
