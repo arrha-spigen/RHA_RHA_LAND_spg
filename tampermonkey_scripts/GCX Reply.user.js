@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         GCX Reply
 // @namespace    https://spigen.com/gcx
-// @version      2.13.6
+// @version      2.13.7
 // @description  Amazon order data via GAS web app + Spigen product info + Zendesk auto-fill
 // @author       Spigen GCX
 // @updateURL    https://raw.githubusercontent.com/codingintheusa0402/spigen-gcx-automation/main/tampermonkey_scripts/GCX%20Reply.user.js
@@ -58,7 +58,7 @@
   };
 
   const FULFILLMENT_MAP = { AFN: 'fba', MFN: 'merchant__fbm_' };
-  const SCRIPT_VER = (typeof GM_info !== 'undefined' ? GM_info?.script?.version : null) || '2.13.6';
+  const SCRIPT_VER = (typeof GM_info !== 'undefined' ? GM_info?.script?.version : null) || '2.13.7';
 
   // ── Module state ─────────────────────────────────────────────────────────
   let lastOrderData    = null;
@@ -2610,15 +2610,25 @@
         redirect: 'follow',
         timeout:  20000,
         onload(res) {
-          if (res.status !== 200) return onFail();
+          if (res.status !== 200) {
+            logStep_(`SC items: ${url.replace(/^https:\/\//,'')} → HTTP ${res.status}${res.finalUrl && res.finalUrl !== url ? ` (→ ${res.finalUrl.replace(/^https:\/\//,'').slice(0,40)})` : ''}`);
+            return onFail();
+          }
           try {
             const items = parseItems(res.responseText);
             if (items.length) cb(items);
-            else onFail();
-          } catch { onFail(); }
+            else {
+              const head = (res.responseText || '').trim().slice(0, 60).replace(/\s+/g, ' ');
+              logStep_(`SC items: 200 but 0 parsed — body starts: "${head}"`);
+              onFail();
+            }
+          } catch (e) {
+            logStep_(`SC items: parse error — ${e.message}`);
+            onFail();
+          }
         },
-        onerror()   { onFail(); },
-        ontimeout() { onFail(); },
+        onerror()   { logStep_(`SC items: network error on ${url.replace(/^https:\/\//,'').slice(0,40)}`); onFail(); },
+        ontimeout() { logStep_('SC items: timeout'); onFail(); },
       });
     }
 
@@ -2731,12 +2741,16 @@
             maybeShowAutoFill(document.getElementById(PANEL_ID));
           };
 
-          if (itemAsins.length) {
-            // SP-API returned items directly (SellerSKU + ASIN already present).
+          // Do we already have Seller SKU(s) from SP-API? (Almost never — items 403.)
+          const haveSellerSku = (data.items || []).some(i => i.SellerSKU);
+
+          if (haveSellerSku) {
             doProductLookup(itemAsins);
-          } else if (data.itemsStatus !== 200) {
-            // SP-API items blocked (the usual case) → Seller Central session returns
-            // ALL items (every SellerSKU + ASIN). Runs regardless of Product Info.
+          } else {
+            // No Seller SKU yet → ALWAYS query the Seller Central session for the full
+            // item list (every SellerSKU + ASIN), regardless of itemsStatus or the
+            // Product Info toggle. Seller SKU is order data the agent needs.
+            logStep_(`Seller SKU: querying Seller Central (itemsStatus=${data.itemsStatus})…`);
             if (!resolvedAsin) {
               const asinValEl = result.querySelector('.sp-row .sp-val');
               if (asinValEl) asinValEl.textContent = 'Seller Central…';
@@ -2744,19 +2758,18 @@
             fetchScItems(orderId, data.order?.SalesChannel, data.address?.CountryCode, scItems => {
               if (_panelSession !== _session || !result.isConnected) return;
               if (scItems && scItems.length) {
+                logStep_(`Seller SKU: SC returned ${scItems.length} item(s) — ${scItems.map(i => i.SellerSKU).filter(Boolean).join(', ') || 'no SKU'}`);
                 lastOrderData.items = scItems;
                 const newAsins = scItems.map(i => i.ASIN).filter(Boolean);
                 if (asinInput && !asinInput.value) asinInput.value = newAsins.join(', ');
                 rerenderOrder(newAsins.join(', ') || resolvedAsin);
-                doProductLookup(newAsins.length ? newAsins : (resolvedAsin ? [resolvedAsin] : []));
+                doProductLookup(newAsins.length ? newAsins : (resolvedAsin ? [resolvedAsin] : itemAsins));
               } else {
                 // SC returned nothing → fall back to any ASIN we already have.
-                doProductLookup(resolvedAsin ? [resolvedAsin] : []);
+                logStep_('Seller SKU: SC returned no items');
+                doProductLookup(resolvedAsin ? [resolvedAsin] : itemAsins);
               }
             });
-          } else {
-            // Items accessible but empty → product lookup from the resolved ASIN if any.
-            doProductLookup(resolvedAsin ? [resolvedAsin] : []);
           }
         } catch (err) {
           setStatus('Parse error: ' + err.message);
