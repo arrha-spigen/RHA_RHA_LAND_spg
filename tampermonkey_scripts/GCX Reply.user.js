@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         GCX Reply
 // @namespace    https://spigen.com/gcx
-// @version      2.15.1
+// @version      2.15.2
 // @description  Amazon order data via GAS web app + Spigen product info + Zendesk auto-fill
 // @author       Spigen GCX
 // @updateURL    https://raw.githubusercontent.com/codingintheusa0402/spigen-gcx-automation/main/tampermonkey_scripts/GCX%20Reply.user.js
@@ -114,7 +114,7 @@
   };
 
   const FULFILLMENT_MAP = { AFN: 'fba', MFN: 'merchant__fbm_' };
-  const SCRIPT_VER = (typeof GM_info !== 'undefined' ? GM_info?.script?.version : null) || '2.15.1';
+  const SCRIPT_VER = (typeof GM_info !== 'undefined' ? GM_info?.script?.version : null) || '2.15.2';
 
   // ── Module state ─────────────────────────────────────────────────────────
   let lastOrderData    = null;
@@ -122,6 +122,7 @@
   let _panelSession    = 0; // incremented on every resetPanel(); guards stale async callbacks
   let _productReady    = false; // true once product lookup finishes (or is determined impossible)
   let _gcrFilledThisTicket = false; // true after Auto-Fill confirmed & submitted on current ticket
+  let _panelEl         = null; // live reference to the panel (survives React detaching it when docked)
 
   // ── UI state persistence ──────────────────────────────────────────────────
   function loadUi() {
@@ -3342,6 +3343,7 @@
     }
 
     const panel = buildPanel();
+    _panelEl = panel;
     document.body.appendChild(panel);
 
     // Restore saved size + position.
@@ -3681,10 +3683,17 @@
   // (Zendesk SPA re-render, slow initial load, etc.) re-run init automatically.
   // typeof guards make this file safe to copy verbatim into GAS (where setInterval/setTimeout are undefined).
   if (typeof setInterval === 'function') setInterval(() => {
+    // Dock mode: Zendesk's React re-render detaches our injected node on ticket
+    // navigation. Keep the SAME panel element and just re-insert it whenever the
+    // Apps panel is available again — never recreate (avoids duplicates + state loss).
+    if (loadUi().dockMode === true && _panelEl) {
+      if (!_panelEl.isConnected) mountDocked_(_panelEl);
+      return;
+    }
     if (!document.getElementById(PANEL_ID) && !document.getElementById('sp-toggle-btn')) {
       init();
     }
-  }, 2000);
+  }, 1500);
 
   if (typeof setTimeout === 'function') setTimeout(init, 800);
 })();
