@@ -24,7 +24,23 @@ Google Apps Script project that copies a large Google Sheet in chunks to a separ
 | `destId` | `1qxwUjuV3-_0HRS1Bsb3Fsua0n8N6r6GzNnqiv9wRU10` |
 | `destSheet` | `RAW` |
 | `chunkSize` | `1000` rows per read-write cycle |
-| `formulaCols` | `[6, 14]` — columns **F** & **N**: never cleared or overwritten |
+| `formulas` | map of column → canonical ARRAYFORMULA, re-applied every run |
+
+---
+
+## Helper formula columns
+
+The `RAW` sheet keeps two computed columns whose canonical formulas live in
+`CONFIG.formulas`. They are the **source of truth** — `mirrorSheet()` skips them
+when clearing/writing mirrored data **and** re-applies the formula to row 1 on
+every run, so they're always correct even if a cell was edited or wiped:
+
+- **F1** — `Brand(상세) Clean` → `={"Brand(상세) Clean";ARRAYFORMULA(REGEXREPLACE(E2:E, "Spigen\((.*?)\)", "$1"))}`
+- **N1** — `Product Name Clean` → `={"Product Name Clean";ARRAYFORMULA(REGEXREPLACE(REGEXREPLACE(IF(ISBLANK(K2:K), L2:L, K2:K), " \(.*?\)", ""), "_.*", ""))}`
+
+> Note: backslashes are **doubled in `Code.js`** (JS escaping); the cell receives single backslashes.
+
+To change a formula, edit `CONFIG.formulas` in `Code.js` — not the cell — so the change survives the next mirror.
 
 ---
 
@@ -32,12 +48,7 @@ Google Apps Script project that copies a large Google Sheet in chunks to a separ
 
 Open the destination spreadsheet → **🔄 Mirror → Mirror now**, or run `mirrorSheet()` directly in the GAS editor.
 
-Each run rewrites the destination from the source, but **preserves the formula columns** listed in `formulaCols`. The `RAW` sheet has ARRAYFORMULAs in:
-
-- **F1** — `Brand(상세) Clean` (derived from column E)
-- **N1** — `Product Name Clean` (derived from columns L/M)
-
-`colSegments_()` splits the columns into contiguous runs around F and N, so the whole-sheet `clearContents()` is replaced by clearing only the non-formula segments, and the chunked write skips F and N. Source data is mirrored by **absolute column position** — the source's own F/N columns are not copied; the destination shows the cleaned formulas instead. Reads/writes in `chunkSize`-row chunks to stay within GAS memory limits.
+`colSegments_()` splits the columns into contiguous runs around the formula columns, so the whole-sheet `clearContents()` is replaced by clearing only the non-formula segments, and the chunked write skips them. Source data is mirrored by **absolute column position** — the source's own F/N columns are not copied; the destination shows the cleaned formulas instead. `applyFormulas_()` then re-applies F1/N1 last, so they spill over the freshly mirrored E / K / L data. Reads/writes in `chunkSize`-row chunks to stay within GAS memory limits.
 
 To automate, set a time-based trigger on `mirrorSheet`.
 

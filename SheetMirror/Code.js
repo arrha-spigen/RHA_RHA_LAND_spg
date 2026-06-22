@@ -4,7 +4,15 @@ const CONFIG = {
   destId:      '1qxwUjuV3-_0HRS1Bsb3Fsua0n8N6r6GzNnqiv9wRU10',
   destSheet:   'RAW',
   chunkSize:   1000,        // rows per read-write cycle
-  formulaCols: [6, 14]      // F & N — ARRAYFORMULA columns: never clear or overwrite
+
+  // Helper ARRAYFORMULA columns. These are NEVER overwritten by mirrored data,
+  // and the canonical formula below is (re)applied to row 1 every run so it
+  // always matches — even if the cell was edited or cleared. Backslashes are
+  // doubled here for JS; the cell receives single backslashes.
+  formulas: {
+    6:  '={"Brand(상세) Clean";ARRAYFORMULA(REGEXREPLACE(E2:E, "Spigen\\((.*?)\\)", "$1"))}',
+    14: '={"Product Name Clean";ARRAYFORMULA(REGEXREPLACE(REGEXREPLACE(IF(ISBLANK(K2:K), L2:L, K2:K), " \\(.*?\\)", ""), "_.*", ""))}'
+  }
 };
 
 function onOpen() {
@@ -31,6 +39,13 @@ function colSegments_(lastCol, skip) {
   return segs;
 }
 
+// (Re)apply the canonical helper formula to row 1 of each formula column.
+function applyFormulas_(dst) {
+  Object.keys(CONFIG.formulas).forEach(col => {
+    dst.getRange(1, Number(col)).setFormula(CONFIG.formulas[col]);
+  });
+}
+
 function mirrorSheet() {
   const src = SpreadsheetApp.openById(CONFIG.sourceId).getSheetByName(CONFIG.sourceSheet);
   const dst = SpreadsheetApp.openById(CONFIG.destId).getSheetByName(CONFIG.destSheet);
@@ -41,16 +56,19 @@ function mirrorSheet() {
   const lastRow = src.getLastRow();
   const lastCol = src.getLastColumn();
 
+  const formulaCols = Object.keys(CONFIG.formulas).map(Number);
+
   // Segments cover the widest of source/dest so old trailing columns get cleared too.
   const widest   = Math.max(lastCol, dst.getLastColumn());
-  const segments = colSegments_(widest, CONFIG.formulaCols);
+  const segments = colSegments_(widest, formulaCols);
 
   // Clear ONLY the non-formula columns (leaves F & N ARRAYFORMULAs untouched).
   const clearRows = dst.getMaxRows();
   segments.forEach(([s, e]) => dst.getRange(1, s, clearRows, e - s + 1).clearContent());
 
   if (lastRow === 0 || lastCol === 0) {
-    Logger.log('Source is empty — non-formula columns cleared, F & N preserved.');
+    applyFormulas_(dst);
+    Logger.log('Source is empty — non-formula columns cleared, F & N formulas (re)applied.');
     return;
   }
 
@@ -75,6 +93,10 @@ function mirrorSheet() {
     SpreadsheetApp.flush();
   }
 
+  // (Re)apply formulas last, so they spill over the freshly mirrored E / K / L data.
+  applyFormulas_(dst);
+  SpreadsheetApp.flush();
+
   Logger.log('Mirror complete: ' + lastRow + ' rows × ' + lastCol +
-             ' cols (F & N formulas preserved) → ' + CONFIG.destSheet);
+             ' cols (F & N formulas re-applied) → ' + CONFIG.destSheet);
 }
