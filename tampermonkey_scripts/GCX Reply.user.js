@@ -31,18 +31,22 @@
     const findNrnBtn_ = () =>
       [...document.querySelectorAll('a[ng-click*="updateNoResponseNeeded"], a.no-select')]
         .find(a => /no response needed/i.test(a.textContent || ''));
-    const isVis_ = el => !!el && getComputedStyle(el).display !== 'none' && el.offsetParent !== null;
+    const shown_ = el => !!el && getComputedStyle(el).display !== 'none';
     // "Actionable" = ChannelReply still shows the "Mark as …" span (not yet marked).
+    // Lenient: only treat as NOT actionable when the "No response needed" (done)
+    // span is the one visible; anything ambiguous defaults to actionable.
     const actionable_ = a => {
       if (!a) return false;
-      const notMarked = a.querySelector('.not-marked-as-no-response-text');
-      const marked    = a.querySelector('.marked-as-no-response-text');
-      if (notMarked || marked) return isVis_(notMarked);
+      const nm = a.querySelector('.not-marked-as-no-response-text');
+      const m  = a.querySelector('.marked-as-no-response-text');
+      if (nm || m) { if (shown_(m) && !shown_(nm)) return false; return true; }
       return a.getAttribute('aria-disabled') !== 'true' && !a.classList.contains('disabled');
     };
     const cascade_ = msg => [...document.querySelectorAll('iframe')].forEach(f => {
       try { f.contentWindow.postMessage(msg, '*'); } catch (_) {}
     });
+    const hello_ = () => { try { window.top.postMessage({ __gcxNRN: 'hello', href: (location.href || '').slice(0, 90), hasBtn: !!findNrnBtn_() }, '*'); } catch (_) {} };
+
     window.addEventListener('message', ev => {
       const d = ev.data;
       if (!d || !d.__gcxNRN) return;
@@ -72,6 +76,9 @@
         })();
       }
     });
+    // Announce presence so the top frame can confirm the bridge is injected here.
+    hello_();
+    [800, 2000, 4000].forEach(ms => setTimeout(hello_, ms));
     return; // never build the floating panel inside an app iframe
   }
 
@@ -118,7 +125,7 @@
   };
 
   const FULFILLMENT_MAP = { AFN: 'fba', MFN: 'merchant__fbm_' };
-  const SCRIPT_VER = (typeof GM_info !== 'undefined' ? GM_info?.script?.version : null) || '2.16.0';
+  const SCRIPT_VER = (typeof GM_info !== 'undefined' ? GM_info?.script?.version : null) || '2.16.1';
 
   // ── Module state ─────────────────────────────────────────────────────────
   let lastOrderData    = null;
@@ -3563,8 +3570,15 @@
     if (!window.__gcxNrnPoll) {
       window.__gcxNrnPoll = true;
       let lastStateAt = 0;
+      let _helloLogged = false;
       window.addEventListener('message', ev => {
-        if (!ev.data || ev.data.__gcxNRN !== 'state') return;
+        if (!ev.data || !ev.data.__gcxNRN) return;
+        if (ev.data.__gcxNRN === 'hello') {
+          // Confirms the bridge is injected inside an app iframe (diagnostic).
+          if (!_helloLogged) { logStep_(`NRN bridge in: ${ev.data.href || '?'} (button: ${ev.data.hasBtn ? 'yes' : 'no'})`); _helloLogged = true; }
+          return;
+        }
+        if (ev.data.__gcxNRN !== 'state') return;
         const b = document.querySelector('#sp-order-panel #sp-nrn-btn');
         if (!b || !ev.data.found) return;
         lastStateAt = Date.now();
