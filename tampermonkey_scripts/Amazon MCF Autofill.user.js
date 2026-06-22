@@ -1,6 +1,6 @@
 // ==UserScript==
 // @name         Amazon MCF Autofill
-// @version      1.3.0
+// @version      1.3.1
 // @updateURL    https://raw.githubusercontent.com/codingintheusa0402/spigen-gcx-automation/main/tampermonkey_scripts/Amazon%20MCF%20Autofill.user.js
 // @downloadURL  https://raw.githubusercontent.com/codingintheusa0402/spigen-gcx-automation/main/tampermonkey_scripts/Amazon%20MCF%20Autofill.user.js
 // @match        https://sellercentral.amazon.*/mcf/orders/create-order*
@@ -782,12 +782,23 @@ async function fetchOrderIdByEmail(email) {
 
   // ── URL 해시 브릿지: Zendesk GCX Reply → MCF 자동입력 ───────────────────
   async function autoFillFromUrlHash() {
+    // window.name bridge: GCX Reply sets window.name = 'spigen_mcf:<encoded>'
+    // immediately after window.open() while the tab is still at about:blank
+    // (same-origin). window.name persists through ALL cross-origin navigations
+    // (Netlify redirect → SC MCF), so we can read it here without any Netlify
+    // page changes. Clear it immediately to avoid re-trigger on refresh.
+    let wnEncoded = '';
+    const wn = window.name || '';
+    if (wn.startsWith('spigen_mcf:')) {
+      wnEncoded = wn.slice('spigen_mcf:'.length);
+      window.name = '';
+    }
+
     const hash = sessionStorage.getItem('_spigen_mcf_hash') || '';
     // NOTE: do NOT removeItem here — keep the entry until fill succeeds so that
     // a page refresh can retry. We remove only after success or definitive timeout.
+    const encoded = (hash.includes('spigen_mcf=') ? hash.split('spigen_mcf=')[1] : '') || wnEncoded;
     try {
-      if (!hash || !hash.includes('spigen_mcf=')) return;
-      const encoded = hash.split('spigen_mcf=')[1];
       if (!encoded) return;
 
       const d = JSON.parse(decodeURIComponent(atob(encoded)));
