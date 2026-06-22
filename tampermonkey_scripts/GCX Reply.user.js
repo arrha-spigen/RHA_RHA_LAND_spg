@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         GCX Reply
 // @namespace    https://spigen.com/gcx
-// @version      2.14.0
+// @version      2.15.0
 // @description  Amazon order data via GAS web app + Spigen product info + Zendesk auto-fill
 // @author       Spigen GCX
 // @updateURL    https://raw.githubusercontent.com/codingintheusa0402/spigen-gcx-automation/main/tampermonkey_scripts/GCX%20Reply.user.js
@@ -89,7 +89,7 @@
   };
 
   const FULFILLMENT_MAP = { AFN: 'fba', MFN: 'merchant__fbm_' };
-  const SCRIPT_VER = (typeof GM_info !== 'undefined' ? GM_info?.script?.version : null) || '2.14.0';
+  const SCRIPT_VER = (typeof GM_info !== 'undefined' ? GM_info?.script?.version : null) || '2.15.0';
 
   // ── Module state ─────────────────────────────────────────────────────────
   let lastOrderData    = null;
@@ -2282,6 +2282,27 @@
     }
     #sp-toggle-btn:hover { background: rgba(74,143,186,0.92); }
 
+    /* ── Docked mode: render inline inside Zendesk's Apps panel ───────────── */
+    #sp-order-panel.sp-docked {
+      position: static !important;
+      width: 100% !important;
+      max-width: 100% !important;
+      height: auto !important;
+      max-height: none !important;
+      left: auto !important; top: auto !important; right: auto !important;
+      margin: 0 0 10px 0;
+      border-radius: 10px;
+      box-shadow: 0 1px 4px rgba(0,0,0,0.08);
+      animation: none !important;
+      z-index: auto;
+    }
+    #sp-order-panel.sp-docked #sp-glass-layer,
+    #sp-order-panel.sp-docked #sp-glass-canvas,
+    #sp-order-panel.sp-docked .sp-re { display: none !important; }
+    #sp-order-panel.sp-docked #sp-panel-header { cursor: default; border-radius: 10px 10px 0 0; }
+    #sp-order-panel.sp-docked #sp-minimize-btn { display: none; }
+    #sp-order-panel.sp-docked #sp-panel-body { max-height: none; overflow: visible; }
+
     #sp-mcf-bar { margin-bottom: 8px; display: none; }
     #sp-mcf-btn {
       background: rgba(255,153,0,0.88);
@@ -3072,6 +3093,80 @@
     });
   }
 
+  // ── Dock mode: mount the panel inside Zendesk's Apps panel ────────────────
+  // Userscripts can't be native ZAF apps, so we DOM-inject. The mount point is
+  // auto-discovered from the installed app iframes (ChannelReply/Trello live on
+  // zdusercontent.com); we inject our panel as the first child of the scroll
+  // container that holds them. A MutationObserver re-mounts after re-renders.
+  let _dockObserver = null;
+
+  function findAppsPanelMount_() {
+    // Prefer explicit container test-ids Zendesk has used for the apps pane.
+    const direct = document.querySelector(
+      '[data-test-id="ticket-apps-pane"], [data-test-id="apps-tray"], ' +
+      '[data-test-id="omnipanel-apps"], [data-test-id="ticket_sidebar"]'
+    );
+    if (direct) return direct;
+    // Derive from an installed app iframe → walk up to its scroll container.
+    const appIframe = [...document.querySelectorAll('iframe')]
+      .find(f => /zdusercontent\.com/.test(f.src || ''));
+    if (appIframe) {
+      let el = appIframe;
+      for (let i = 0; i < 10 && el.parentElement; i++) {
+        el = el.parentElement;
+        const oy = getComputedStyle(el).overflowY;
+        if ((oy === 'auto' || oy === 'scroll') && el.clientHeight > 180) return el;
+      }
+      return appIframe.parentElement; // fallback: the iframe's wrapper
+    }
+    return null;
+  }
+
+  function mountDocked_(panel) {
+    const mount = findAppsPanelMount_();
+    if (!mount) {
+      logStep_('Dock: Apps panel not found — open the Apps tab, then re-toggle. Staying floating.');
+      // Retry shortly in case the Apps panel is still rendering.
+      setTimeout(() => { if (loadUi().dockMode) { const m = findAppsPanelMount_(); if (m) mountDocked_(panel); } }, 1200);
+      return;
+    }
+    if (panel.parentElement !== mount || panel.previousElementSibling) {
+      mount.insertBefore(panel, mount.firstChild);
+    }
+    panel.classList.add('sp-docked');
+    panel.classList.remove('minimized');
+    if (panel._glass) panel._glass.hide();
+    const tgl = document.getElementById('sp-toggle-btn');
+    if (tgl) tgl.style.display = 'none';
+    logStep_('Dock: mounted in Apps panel');
+
+    // Re-mount if Zendesk re-renders the panel and drops our node.
+    if (!_dockObserver) {
+      _dockObserver = new MutationObserver(() => {
+        if (!loadUi().dockMode) return;
+        if (!panel.isConnected) {
+          const m = findAppsPanelMount_();
+          if (m) { m.insertBefore(panel, m.firstChild); panel.classList.add('sp-docked'); }
+        }
+      });
+      _dockObserver.observe(document.body, { childList: true, subtree: true });
+    }
+  }
+
+  function mountFloating_(panel) {
+    if (_dockObserver) { _dockObserver.disconnect(); _dockObserver = null; }
+    panel.classList.remove('sp-docked');
+    if (panel.parentElement !== document.body) document.body.appendChild(panel);
+    // Restore saved floating geometry.
+    const ui = loadUi();
+    panel.style.width  = (ui.w || 330) + 'px';
+    if (ui.h) panel.style.height = ui.h + 'px';
+    if (ui.x != null) { panel.style.left = ui.x + 'px'; panel.style.right = 'auto'; }
+    else { panel.style.left = 'auto'; panel.style.right = '16px'; }
+    panel.style.top = (ui.y != null ? ui.y : 72) + 'px';
+    logStep_('Dock: restored floating panel');
+  }
+
   // ── Settings drawer (Glass toggle + data fetch preferences) ──────────────
   function initSettings_(panel, glass) {
     const btn    = panel.querySelector('#sp-settings-btn');
@@ -3085,9 +3180,13 @@
     drawer.innerHTML = `
       <div class="sp-settings-inner">
         <div style="border-bottom:1px solid rgba(0,0,0,0.06);padding-bottom:8px;margin-bottom:8px;">
-          <label style="display:flex;align-items:center;gap:6px;cursor:pointer;user-select:none;font-size:12px;color:#1c1c1e;margin-bottom:0;">
+          <label style="display:flex;align-items:center;gap:6px;cursor:pointer;user-select:none;font-size:12px;color:#1c1c1e;margin-bottom:5px;">
             <input type="checkbox" id="sp-liquid-glass-chk" ${glassEnabled ? 'checked' : ''}/>
             Liquid Glass
+          </label>
+          <label style="display:flex;align-items:center;gap:6px;cursor:pointer;user-select:none;font-size:12px;color:#1c1c1e;margin-bottom:0;">
+            <input type="checkbox" id="sp-dock-chk" ${uiState.dockMode === true ? 'checked' : ''}/>
+            Dock in Apps panel
           </label>
         </div>
         <div>
@@ -3129,6 +3228,13 @@
         if (glass) glass.hide();
       }
       saveUi({ glassEnabled: glassChk.checked });
+    });
+
+    const dockChk = drawer.querySelector('#sp-dock-chk');
+    if (dockChk) dockChk.addEventListener('change', () => {
+      saveUi({ dockMode: dockChk.checked });
+      if (dockChk.checked) mountDocked_(panel);
+      else mountFloating_(panel);
     });
 
     const fetchOrderChk = drawer.querySelector('#sp-fetch-order-chk');
@@ -3220,6 +3326,9 @@
     // Default OFF — only enabled when the user has explicitly turned it on.
     if (loadUi().glassEnabled !== true) panel.classList.add('sp-glass-disabled');
     initSettings_(panel, glass);
+
+    // Apply saved dock preference (deferred so Zendesk's Apps panel can render).
+    if (loadUi().dockMode === true) setTimeout(() => { if (loadUi().dockMode) mountDocked_(panel); }, 1500);
 
     // Minimize / expand
     panel.querySelector('#sp-minimize-btn').onclick = e => {
