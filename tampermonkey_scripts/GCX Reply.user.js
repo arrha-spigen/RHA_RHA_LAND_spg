@@ -1617,6 +1617,8 @@
 
     _capture() {
       if (typeof html2canvas !== 'function' || !this._prog || this._dead || this._capturing) return;
+      // Glass disabled by user → never capture the background.
+      if (this.panel.classList.contains('sp-glass-disabled')) return;
       this._capturing = true;
       const panel = this.panel;
       // Capture the viewport only (not full body scroll height).
@@ -1714,6 +1716,8 @@
     }
 
     show() {
+      // Glass disabled by user → do nothing (panel stays solid, no distortion).
+      if (this.panel.classList.contains('sp-glass-disabled')) return;
       if (!this._dead) {
         this.panel.classList.add('sp-glass-active');
         if (this._texW === 1) {
@@ -1848,14 +1852,21 @@
     #sp-order-panel.sp-glass-active { background-color: transparent; }
     #sp-order-panel.sp-glass-active #sp-panel-header { background: rgba(255,255,255,0.05); }
 
-    /* Glass disabled: hide glass layer and remove effects */
-    #sp-order-panel.sp-glass-disabled #sp-glass-layer {
-      display: none;
+    /* Glass disabled: kill ALL glass layers + effects, force solid panel.    */
+    /* Hides both the CSS backdrop-blur layer and the WebGL distortion canvas, */
+    /* and overrides the sp-glass-active transparency so content stays opaque. */
+    #sp-order-panel.sp-glass-disabled #sp-glass-layer,
+    #sp-order-panel.sp-glass-disabled #sp-glass-canvas {
+      display: none !important;
     }
-    #sp-order-panel.sp-glass-disabled {
-      background-color: rgba(246,247,255,0.52) !important;
+    #sp-order-panel.sp-glass-disabled,
+    #sp-order-panel.sp-glass-disabled.sp-glass-active {
+      background-color: rgb(244,246,251) !important;
       backdrop-filter: none !important;
       -webkit-backdrop-filter: none !important;
+    }
+    #sp-order-panel.sp-glass-disabled.sp-glass-active #sp-panel-header {
+      background: rgb(236,239,248) !important;
     }
 
     /* ── Header ─────────────────────────────────────────────────────────── */
@@ -2989,10 +3000,18 @@
     const glassChk = drawer.querySelector('#sp-liquid-glass-chk');
     glassChk.addEventListener('change', () => {
       if (glassChk.checked) {
+        // Re-enable: drop the disabled class and restore the CSS backdrop-blur
+        // layer (a prior capture may have set it to inline display:none). The
+        // WebGL distortion canvas stays hidden until the next drag/resize.
         panel.classList.remove('sp-glass-disabled');
-        if (glass) glass.recapture();
+        if (glass) glass.invalidate();
+        const glLayer = panel.querySelector('#sp-glass-layer');
+        if (glLayer) glLayer.style.display = '';
       } else {
+        // Disable: solid panel, kill the WebGL canvas + active state. CSS does
+        // the rest (hides both glass layers, overrides transparency).
         panel.classList.add('sp-glass-disabled');
+        if (glass) glass.hide();
       }
       saveUi({ glassEnabled: glassChk.checked });
     });
@@ -3082,6 +3101,8 @@
     // WebGL liquid glass + settings console
     const glass = new GlassWebGL_(panel);
     panel._glass = glass;
+    // Apply saved glass on/off preference before any drag/resize can fire.
+    if (loadUi().glassEnabled === false) panel.classList.add('sp-glass-disabled');
     initSettings_(panel, glass);
 
     // Minimize / expand
@@ -3108,12 +3129,6 @@
       new ResizeObserver(([e]) => {
         panel.classList.toggle('sp-compact', e.contentRect.width < 260);
       }).observe(panel);
-    }
-
-    // Initialize glass state based on saved preference
-    const uiState = loadUi();
-    if (uiState.glassEnabled === false) {
-      panel.classList.add('sp-glass-disabled');
     }
 
     // Initialize product result visibility based on preferences
