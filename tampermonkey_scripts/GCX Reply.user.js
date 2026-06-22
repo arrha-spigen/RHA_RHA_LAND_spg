@@ -83,6 +83,21 @@
       else block.classList.remove('collapsed');
     });
   }
+
+  // ── Data fetch toggle preferences ──────────────────────────────────────────
+  function getDataFetchPrefs() {
+    try {
+      const prefs = JSON.parse(localStorage.getItem('gcx_data_fetch_prefs') || '{}');
+      return {
+        fetchOrder: prefs.fetchOrder !== false,
+        fetchShipping: prefs.fetchShipping !== false,
+        fetchProduct: prefs.fetchProduct !== false,
+      };
+    } catch { return { fetchOrder: true, fetchShipping: true, fetchProduct: true }; }
+  }
+  function saveDataFetchPrefs(prefs) {
+    try { localStorage.setItem('gcx_data_fetch_prefs', JSON.stringify(prefs)); } catch {}
+  }
   let lastAmazonProduct = null;
   let lastAiReason      = null;
 
@@ -1920,6 +1935,27 @@
     }
     .sp-s-btn:hover { background: rgba(90,130,255,0.26); }
 
+    /* ── Data fetch toggles ────────────────────────────────────────────────── */
+    #sp-data-fetch-toggles {
+      border-top: 1px solid rgba(0,0,0,0.06);
+      padding-top: 8px;
+      margin-top: 8px;
+    }
+    #sp-data-fetch-toggles label {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      margin-bottom: 5px;
+      font-size: 12px;
+      color: #1c1c1e;
+      cursor: pointer;
+      user-select: none;
+    }
+    #sp-data-fetch-toggles input[type="checkbox"] {
+      accent-color: rgba(90,130,255,0.9);
+      cursor: pointer;
+    }
+
     #sp-order-panel.minimized #sp-panel-body { display: none; }
     #sp-order-panel.minimized #sp-settings-drawer { display: none; }
     #sp-order-panel.minimized #sp-panel-header { border-radius: 22px; border-bottom: none; cursor: pointer; }
@@ -2275,6 +2311,11 @@
         <div id="sp-notes-section">
           <div id="sp-notes-content"></div>
         </div>
+        <div id="sp-data-fetch-toggles">
+          <label><input type="checkbox" id="sp-fetch-order-chk" checked> Fetch Order Info</label>
+          <label><input type="checkbox" id="sp-fetch-shipping-chk" checked> Fetch Shipping Address</label>
+          <label><input type="checkbox" id="sp-fetch-product-chk" checked> Fetch Product Info</label>
+        </div>
         <div id="sp-ai-reason-result"></div>
         <div id="sp-result">
           <div id="sp-status">Scanning ticket for order IDs…</div>
@@ -2384,7 +2425,12 @@
   }
 
   // ── Render order data ─────────────────────────────────────────────────────
-  function renderOrder(data, orderId, panelAsin) {
+  function renderOrder(data, orderId, panelAsin, options) {
+    options = options || {};
+    const showOrder = options.showOrder !== false;
+    const showShipping = options.showShipping !== false;
+    const prefs = getDataFetchPrefs();
+
     const o  = data.order   || {};
     const it = data.items   || [];
     const ad = data.address || {};
@@ -2424,6 +2470,22 @@
         ? ` <span style="color:#888;font-size:11px;">(총 ${data.orderCount}건)</span>`
         : '';
 
+    if (!prefs.fetchOrder) {
+      return `${rowReturnAsin(returnAsin, o.SalesChannel, data.itemsStatus)}`;
+    }
+
+    const shippingSection = !prefs.fetchShipping ? '' : `
+          <div class="sp-block collapsed" data-sp-section="shipping">
+            <div class="sp-block-title" style="font-size:12px;">
+              Shipping Address
+              <span class="sp-chevron">▾</span>
+            </div>
+            <div class="sp-block-body">
+              ${row('Amazon Fulfillment Methods', fulfillLabel)}
+              ${addrRows || '<div class="sp-row"><span class="sp-val">—</span></div>'}
+            </div>
+          </div>`;
+
     return `
       ${rowReturnAsin(returnAsin, o.SalesChannel, data.itemsStatus)}
 
@@ -2445,16 +2507,7 @@
           ${row('Delivery Level',   o.ShipmentServiceLevelCategory || o.ShipServiceLevelCategory)}
           ${row('Ship Date',        fmtShipRange(o.EarliestShipDate, o.LatestShipDate))}
 
-          <div class="sp-block collapsed" data-sp-section="shipping">
-            <div class="sp-block-title" style="font-size:12px;">
-              Shipping Address
-              <span class="sp-chevron">▾</span>
-            </div>
-            <div class="sp-block-body">
-              ${row('Amazon Fulfillment Methods', fulfillLabel)}
-              ${addrRows || '<div class="sp-row"><span class="sp-val">—</span></div>'}
-            </div>
-          </div>
+          ${shippingSection}
           ${row('Ship Service Level',  o.ShipServiceLevel)}
           ${row('Buyer Name',          buyerName)}
           ${rowLinked('구매이력 (2yr)',
@@ -2652,53 +2705,60 @@
             });
           }
 
-          if (itemAsins.length) {
-            logStep_(`Product lookup: ${itemAsins.join(', ')}`);
-            renderAllProducts(itemAsins);
-          } else if (resolvedAsin) {
-            logStep_(`Product lookup: ${resolvedAsin}`);
-            renderAllProducts([resolvedAsin]);
-            // SP-API items were blocked → also fetch SC in parallel just to get SellerSKU
-            // (product lookup already started above with the known ASIN — don't block it)
-            if (data.itemsStatus !== 200) {
+          const prefs = getDataFetchPrefs();
+          if (prefs.fetchProduct) {
+            if (itemAsins.length) {
+              logStep_(`Product lookup: ${itemAsins.join(', ')}`);
+              renderAllProducts(itemAsins);
+            } else if (resolvedAsin) {
+              logStep_(`Product lookup: ${resolvedAsin}`);
+              renderAllProducts([resolvedAsin]);
+              // SP-API items were blocked → also fetch SC in parallel just to get SellerSKU
+              // (product lookup already started above with the known ASIN — don't block it)
+              if (data.itemsStatus !== 200) {
+                fetchScItems(orderId, data.order?.SalesChannel, data.address?.CountryCode, scItems => {
+                  if (_panelSession !== _session || !result.isConnected) return;
+                  if (scItems && scItems.length) {
+                    lastOrderData.items = scItems;
+                    result.innerHTML = renderOrder(Object.assign({}, lastOrderData, { items: scItems }), orderId, resolvedAsin);
+                    result.querySelectorAll('.sp-block-title').forEach(t => {
+                      t.addEventListener('click', e => { e.stopPropagation(); t.closest('.sp-block').classList.toggle('collapsed'); });
+                    });
+                    applySectionState(result);
+                    maybeShowAutoFill(document.getElementById(PANEL_ID));
+                  }
+                });
+              }
+            } else if (data.itemsStatus !== 200) {
+              // SP-API items blocked AND no ASIN → query Seller Central for ASIN + SellerSKU
+              const asinValEl = result.querySelector('.sp-row .sp-val');
+              if (asinValEl) asinValEl.textContent = 'Seller Central…';
               fetchScItems(orderId, data.order?.SalesChannel, data.address?.CountryCode, scItems => {
                 if (_panelSession !== _session || !result.isConnected) return;
                 if (scItems && scItems.length) {
                   lastOrderData.items = scItems;
-                  result.innerHTML = renderOrder(Object.assign({}, lastOrderData, { items: scItems }), orderId, resolvedAsin);
+                  const newAsins = scItems.map(i => i.ASIN).filter(Boolean);
+                  if (asinInput && !asinInput.value) asinInput.value = newAsins.join(', ');
+                  result.innerHTML = renderOrder(Object.assign({}, data, { items: scItems }), orderId, newAsins.join(', '));
                   result.querySelectorAll('.sp-block-title').forEach(t => {
                     t.addEventListener('click', e => { e.stopPropagation(); t.closest('.sp-block').classList.toggle('collapsed'); });
                   });
                   applySectionState(result);
+                  renderAllProducts(newAsins); // finish() will set _productReady = true
+                  maybeShowAutoFill(document.getElementById(PANEL_ID));
+                } else {
+                  // SC returned no items → no product lookup possible → enable button now
+                  _productReady = true;
                   maybeShowAutoFill(document.getElementById(PANEL_ID));
                 }
               });
+            } else {
+              // No ASIN detected and items were accessible but empty → no product lookup → enable now
+              _productReady = true;
+              maybeShowAutoFill(document.getElementById(PANEL_ID));
             }
-          } else if (data.itemsStatus !== 200) {
-            // SP-API items blocked AND no ASIN → query Seller Central for ASIN + SellerSKU
-            const asinValEl = result.querySelector('.sp-row .sp-val');
-            if (asinValEl) asinValEl.textContent = 'Seller Central…';
-            fetchScItems(orderId, data.order?.SalesChannel, data.address?.CountryCode, scItems => {
-              if (_panelSession !== _session || !result.isConnected) return;
-              if (scItems && scItems.length) {
-                lastOrderData.items = scItems;
-                const newAsins = scItems.map(i => i.ASIN).filter(Boolean);
-                if (asinInput && !asinInput.value) asinInput.value = newAsins.join(', ');
-                result.innerHTML = renderOrder(Object.assign({}, data, { items: scItems }), orderId, newAsins.join(', '));
-                result.querySelectorAll('.sp-block-title').forEach(t => {
-                  t.addEventListener('click', e => { e.stopPropagation(); t.closest('.sp-block').classList.toggle('collapsed'); });
-                });
-                applySectionState(result);
-                renderAllProducts(newAsins); // finish() will set _productReady = true
-                maybeShowAutoFill(document.getElementById(PANEL_ID));
-              } else {
-                // SC returned no items → no product lookup possible → enable button now
-                _productReady = true;
-                maybeShowAutoFill(document.getElementById(PANEL_ID));
-              }
-            });
           } else {
-            // No ASIN detected and items were accessible but empty → no product lookup → enable now
+            // Product fetch disabled → mark ready immediately
             _productReady = true;
             maybeShowAutoFill(document.getElementById(PANEL_ID));
           }
@@ -3140,6 +3200,51 @@
       if (notesToggle.checked && e.target.matches('[data-test-id="notes-edit-text-area-test-id"]'))
         notesContent.textContent = e.target.value.trim() || '(no notes)';
     });
+
+    // ── Data fetch toggle preferences ──────────────────────────────────────────
+    const fetchOrderChk = panel.querySelector('#sp-fetch-order-chk');
+    const fetchShippingChk = panel.querySelector('#sp-fetch-shipping-chk');
+    const fetchProductChk = panel.querySelector('#sp-fetch-product-chk');
+
+    function initDataFetchToggles() {
+      const prefs = getDataFetchPrefs();
+      fetchOrderChk.checked = prefs.fetchOrder;
+      fetchShippingChk.checked = prefs.fetchShipping;
+      fetchProductChk.checked = prefs.fetchProduct;
+    }
+
+    function onDataFetchToggleChange() {
+      const prefs = {
+        fetchOrder: fetchOrderChk.checked,
+        fetchShipping: fetchShippingChk.checked,
+        fetchProduct: fetchProductChk.checked,
+      };
+      saveDataFetchPrefs(prefs);
+      // Re-render current results if any
+      const result = panel.querySelector('#sp-result');
+      if (result && lastOrderData) {
+        const orderId = panel.querySelector('#sp-order-input')?.value.trim() || '';
+        const panelAsin = panel.querySelector('#sp-asin-input')?.value.trim() || '';
+        result.innerHTML = renderOrder(lastOrderData, orderId, panelAsin);
+        result.querySelectorAll('.sp-block-title').forEach(title => {
+          title.addEventListener('click', e => {
+            e.stopPropagation();
+            title.closest('.sp-block').classList.toggle('collapsed');
+          });
+        });
+        applySectionState(result);
+      }
+      // Conditionally render/hide product info
+      const productResult = panel.querySelector('#sp-product-result');
+      if (productResult) {
+        productResult.style.display = prefs.fetchProduct ? 'block' : 'none';
+      }
+    }
+
+    fetchOrderChk.addEventListener('change', onDataFetchToggleChange);
+    fetchShippingChk.addEventListener('change', onDataFetchToggleChange);
+    fetchProductChk.addEventListener('change', onDataFetchToggleChange);
+    initDataFetchToggles();
 
     // ── Persist section collapse state (capture phase runs before stopPropagation) ──
     panel.addEventListener('click', e => {
