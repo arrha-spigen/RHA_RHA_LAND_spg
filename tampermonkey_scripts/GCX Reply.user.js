@@ -1848,6 +1848,16 @@
     #sp-order-panel.sp-glass-active { background-color: transparent; }
     #sp-order-panel.sp-glass-active #sp-panel-header { background: rgba(255,255,255,0.05); }
 
+    /* Glass disabled: hide glass layer and remove effects */
+    #sp-order-panel.sp-glass-disabled #sp-glass-layer {
+      display: none;
+    }
+    #sp-order-panel.sp-glass-disabled {
+      background-color: rgba(246,247,255,0.52) !important;
+      backdrop-filter: none !important;
+      -webkit-backdrop-filter: none !important;
+    }
+
     /* ── Header ─────────────────────────────────────────────────────────── */
     #sp-panel-header {
       position: relative;
@@ -2946,7 +2956,8 @@
     const drawer = panel.querySelector('#sp-settings-drawer');
     if (!btn || !drawer) return;
 
-    const glassEnabled = !panel.classList.contains('sp-glass-disabled');
+    const uiState = loadUi();
+    const glassEnabled = uiState.glassEnabled !== false;
     const prefs = getDataFetchPrefs();
 
     drawer.innerHTML = `
@@ -3097,6 +3108,12 @@
       new ResizeObserver(([e]) => {
         panel.classList.toggle('sp-compact', e.contentRect.width < 260);
       }).observe(panel);
+    }
+
+    // Initialize glass state based on saved preference
+    const uiState = loadUi();
+    if (uiState.glassEnabled === false) {
+      panel.classList.add('sp-glass-disabled');
     }
 
     // Initialize product result visibility based on preferences
