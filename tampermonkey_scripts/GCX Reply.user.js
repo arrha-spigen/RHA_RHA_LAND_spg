@@ -31,21 +31,46 @@
     const findNrnBtn_ = () =>
       [...document.querySelectorAll('a[ng-click*="updateNoResponseNeeded"], a.no-select')]
         .find(a => /no response needed/i.test(a.textContent || ''));
+    const isVis_ = el => !!el && getComputedStyle(el).display !== 'none' && el.offsetParent !== null;
+    // "Actionable" = ChannelReply still shows the "Mark as …" span (not yet marked).
+    const actionable_ = a => {
+      if (!a) return false;
+      const notMarked = a.querySelector('.not-marked-as-no-response-text');
+      const marked    = a.querySelector('.marked-as-no-response-text');
+      if (notMarked || marked) return isVis_(notMarked);
+      return a.getAttribute('aria-disabled') !== 'true' && !a.classList.contains('disabled');
+    };
+    const cascade_ = msg => [...document.querySelectorAll('iframe')].forEach(f => {
+      try { f.contentWindow.postMessage(msg, '*'); } catch (_) {}
+    });
     window.addEventListener('message', ev => {
-      if (!ev.data || ev.data.__gcxNRN !== 'click') return;
-      [...document.querySelectorAll('iframe')].forEach(f => {
-        try { f.contentWindow.postMessage({ __gcxNRN: 'click' }, '*'); } catch (_) {}
-      });
-      let tries = 0;
-      (function tick() {
-        const btn = findNrnBtn_();
-        if (btn) {
-          btn.click();
-          try { window.top.postMessage({ __gcxNRN: 'done', ok: true }, '*'); } catch (_) {}
-        } else if (++tries < 12) {
-          setTimeout(tick, 200);
-        }
-      })();
+      const d = ev.data;
+      if (!d || !d.__gcxNRN) return;
+
+      if (d.__gcxNRN === 'query') {
+        cascade_({ __gcxNRN: 'query' });
+        const a = findNrnBtn_();
+        if (a) { try { window.top.postMessage({ __gcxNRN: 'state', found: true, actionable: actionable_(a) }, '*'); } catch (_) {} }
+        return;
+      }
+
+      if (d.__gcxNRN === 'click') {
+        cascade_({ __gcxNRN: 'click' });
+        let tries = 0;
+        (function tick() {
+          const a = findNrnBtn_();
+          if (a) {
+            if (actionable_(a)) {
+              a.click();
+              try { window.top.postMessage({ __gcxNRN: 'done', ok: true }, '*'); } catch (_) {}
+            } else {
+              try { window.top.postMessage({ __gcxNRN: 'done', ok: false, reason: 'not-actionable' }, '*'); } catch (_) {}
+            }
+          } else if (++tries < 12) {
+            setTimeout(tick, 200);
+          }
+        })();
+      }
     });
     return; // never build the floating panel inside an app iframe
   }
@@ -89,7 +114,7 @@
   };
 
   const FULFILLMENT_MAP = { AFN: 'fba', MFN: 'merchant__fbm_' };
-  const SCRIPT_VER = (typeof GM_info !== 'undefined' ? GM_info?.script?.version : null) || '2.15.0';
+  const SCRIPT_VER = (typeof GM_info !== 'undefined' ? GM_info?.script?.version : null) || '2.15.1';
 
   // ── Module state ─────────────────────────────────────────────────────────
   let lastOrderData    = null;
@@ -2300,7 +2325,6 @@
     #sp-order-panel.sp-docked #sp-glass-canvas,
     #sp-order-panel.sp-docked .sp-re { display: none !important; }
     #sp-order-panel.sp-docked #sp-panel-header { cursor: default; border-radius: 10px 10px 0 0; }
-    #sp-order-panel.sp-docked #sp-minimize-btn { display: none; }
     #sp-order-panel.sp-docked #sp-panel-body { max-height: none; overflow: visible; }
 
     #sp-mcf-bar { margin-bottom: 8px; display: none; }
@@ -2336,7 +2360,8 @@
       width: 100%;
       backdrop-filter: blur(4px);
     }
-    #sp-nrn-btn:hover { background: rgba(86,94,115,0.96); }
+    #sp-nrn-btn:hover:not(:disabled) { background: rgba(86,94,115,0.96); }
+    #sp-nrn-btn:disabled { background: rgba(160,165,175,0.55); color: rgba(255,255,255,0.8); cursor: not-allowed; }
     #sp-nrn-status {
       display: none;
       font-size: 11px;
@@ -2427,7 +2452,7 @@
           <div id="sp-mcf-status"></div>
         </div>
         <div id="sp-nrn-bar">
-          <button id="sp-nrn-btn">No Response Needed</button>
+          <button id="sp-nrn-btn" disabled title="Waiting for ChannelReply…">No Response Needed</button>
           <div id="sp-nrn-status"></div>
         </div>
         <div id="sp-notes-section">
@@ -3122,6 +3147,20 @@
     return null;
   }
 
+  // The ChannelReply app block (direct child of the apps container) — so we can
+  // dock GCX Reply right beneath it instead of at the very top.
+  function channelReplyBlock_(mount) {
+    // Find the short header element whose text starts with "ChannelReply",
+    // then walk up to the direct child of the apps container.
+    const hit = [...mount.querySelectorAll('*')].find(el => {
+      const t = (el.textContent || '').trim();
+      return /^channelreply\b/i.test(t) && t.length < 30 && el.children.length <= 3;
+    });
+    let el = hit;
+    while (el && el.parentElement && el.parentElement !== mount) el = el.parentElement;
+    return (el && el.parentElement === mount) ? el : null;
+  }
+
   function mountDocked_(panel) {
     const mount = findAppsPanelMount_();
     if (!mount) {
@@ -3130,7 +3169,12 @@
       setTimeout(() => { if (loadUi().dockMode) { const m = findAppsPanelMount_(); if (m) mountDocked_(panel); } }, 1200);
       return;
     }
-    if (panel.parentElement !== mount || panel.previousElementSibling) {
+    // Dock directly beneath the ChannelReply block (both stay visible); else top.
+    const cr = channelReplyBlock_(mount);
+    if (cr) {
+      if (panel !== cr.nextSibling) mount.insertBefore(panel, cr.nextSibling);
+      logStep_('Dock: mounted beneath ChannelReply');
+    } else if (panel.parentElement !== mount || panel.previousElementSibling) {
       mount.insertBefore(panel, mount.firstChild);
     }
     panel.classList.add('sp-docked');
@@ -3138,15 +3182,19 @@
     if (panel._glass) panel._glass.hide();
     const tgl = document.getElementById('sp-toggle-btn');
     if (tgl) tgl.style.display = 'none';
-    logStep_('Dock: mounted in Apps panel');
 
-    // Re-mount if Zendesk re-renders the panel and drops our node.
+    // Re-mount if Zendesk re-renders the apps panel and drops our node.
     if (!_dockObserver) {
       _dockObserver = new MutationObserver(() => {
         if (!loadUi().dockMode) return;
         if (!panel.isConnected) {
           const m = findAppsPanelMount_();
-          if (m) { m.insertBefore(panel, m.firstChild); panel.classList.add('sp-docked'); }
+          if (m) {
+            const cr = channelReplyBlock_(m);
+            if (cr) m.insertBefore(panel, cr.nextSibling);
+            else m.insertBefore(panel, m.firstChild);
+            panel.classList.add('sp-docked');
+          }
         }
       });
       _dockObserver.observe(document.body, { childList: true, subtree: true });
@@ -3392,6 +3440,31 @@
     panel.querySelector('#sp-autofill-btn').onclick = () => autoFillTicket(panel);
     panel.querySelector('#sp-mcf-btn').onclick = () => sendToMCF(panel);
     panel.querySelector('#sp-nrn-btn').onclick = () => markNoResponseNeeded(panel);
+
+    // Mirror ChannelReply's button state: enable our NRN button only while CR's
+    // "Mark as 'No response needed'" is still actionable. Polls the iframe bridge.
+    // Guarded so repeated init() calls don't stack listeners/intervals.
+    if (!window.__gcxNrnPoll) {
+      window.__gcxNrnPoll = true;
+      let lastStateAt = 0;
+      window.addEventListener('message', ev => {
+        if (!ev.data || ev.data.__gcxNRN !== 'state') return;
+        const b = document.querySelector('#sp-order-panel #sp-nrn-btn');
+        if (!b || !ev.data.found) return;
+        lastStateAt = Date.now();
+        b.disabled = !ev.data.actionable;
+        b.title = ev.data.actionable ? '' : 'ChannelReply: already marked / not actionable';
+      });
+      setInterval(() => {
+        const b = document.querySelector('#sp-order-panel #sp-nrn-btn');
+        if (!b) return;
+        [...document.querySelectorAll('iframe')].forEach(f => {
+          try { f.contentWindow.postMessage({ __gcxNRN: 'query' }, '*'); } catch (_) {}
+        });
+        // No state heard recently → ChannelReply not present → keep disabled.
+        if (Date.now() - lastStateAt > 6000) { b.disabled = true; b.title = 'ChannelReply not detected'; }
+      }, 2500);
+    }
 
     const notesToggle  = panel.querySelector('#sp-notes-toggle');
     const notesSection = panel.querySelector('#sp-notes-section');
