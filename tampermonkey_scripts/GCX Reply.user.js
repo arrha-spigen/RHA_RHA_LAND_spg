@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         GCX Reply
 // @namespace    https://spigen.com/gcx
-// @version      2.15.4
+// @version      2.16.0
 // @description  Amazon order data via GAS web app + Spigen product info + Zendesk auto-fill
 // @author       Spigen GCX
 // @updateURL    https://raw.githubusercontent.com/codingintheusa0402/spigen-gcx-automation/main/tampermonkey_scripts/GCX%20Reply.user.js
@@ -82,6 +82,10 @@
   const PANEL_ID   = 'sp-order-panel';
   const SHEET_COLS = ['SKU', '모델명', '브랜드', '제조사명', '기종명', '색상명', '대분류', '생산업체', '원산지정보'];
 
+  // One-click copy button appended to each value row (no drag + Cmd+C needed).
+  const COPY_SVG = '<svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="11" height="11" rx="2"/><path d="M5 15V5a2 2 0 0 1 2-2h10"/></svg>';
+  const COPY_BTN = `<button class="sp-copy" title="Copy" tabindex="-1" aria-label="Copy">${COPY_SVG}</button>`;
+
   // ── Zendesk custom field IDs ─────────────────────────────────────────────
   const ZD = {
     ORDER_ID:      360021934132,
@@ -114,7 +118,7 @@
   };
 
   const FULFILLMENT_MAP = { AFN: 'fba', MFN: 'merchant__fbm_' };
-  const SCRIPT_VER = (typeof GM_info !== 'undefined' ? GM_info?.script?.version : null) || '2.15.4';
+  const SCRIPT_VER = (typeof GM_info !== 'undefined' ? GM_info?.script?.version : null) || '2.16.0';
 
   // ── Module state ─────────────────────────────────────────────────────────
   let lastOrderData    = null;
@@ -1342,12 +1346,12 @@
       : '';
     // Full product page title (Amazon source only) — shown as a "Title" row above SKU.
     const titleRow = product._title
-      ? `<div class="sp-row"><span class="sp-label" style="font-size:11.5px;">Title</span><span class="sp-val" style="font-size:11.5px;line-height:1.35;">${esc(product._title)}</span></div>`
+      ? `<div class="sp-row"><span class="sp-label" style="font-size:11.5px;">Title</span><span class="sp-val" style="font-size:11.5px;line-height:1.35;">${esc(product._title)}</span>${COPY_BTN}</div>`
       : '';
     const fields = SHEET_COLS.map(col => {
       const val = product[col];
       if (!val) return '';
-      return `<div class="sp-row"><span class="sp-label" style="font-size:11.5px;">${esc(col)}</span><span class="sp-val" style="font-size:11.5px;">${esc(val)}</span></div>`;
+      return `<div class="sp-row"><span class="sp-label" style="font-size:11.5px;">${esc(col)}</span><span class="sp-val" style="font-size:11.5px;">${esc(val)}</span>${COPY_BTN}</div>`;
     }).filter(Boolean).join('');
     return `
       <div class="sp-block collapsed" style="margin-top:0;">
@@ -2237,6 +2241,24 @@
     .sp-val   { color: #1c1c1e; font-weight: 500; word-break: break-all; font-size: 12px; }
     .sp-val.link { color: #3a6ea8; text-decoration: underline; cursor: pointer; }
 
+    /* Per-row one-click copy button */
+    .sp-copy {
+      margin-left: auto;
+      align-self: flex-start;
+      flex-shrink: 0;
+      background: none;
+      border: none;
+      padding: 0 2px;
+      cursor: pointer;
+      color: #9aa3b2;
+      opacity: 0.4;
+      line-height: 1;
+      transition: opacity 0.12s, color 0.12s;
+    }
+    .sp-row:hover .sp-copy { opacity: 0.85; }
+    .sp-copy:hover { color: #3a6ea8; opacity: 1; }
+    .sp-copy.copied { color: #27ae60; opacity: 1; font-size: 12px; }
+
     .sp-items-title {
       font-weight: 600;
       font-size: 11.5px;
@@ -2516,9 +2538,11 @@
   }
 
   function row(label, value, isLink) {
+    const has = value != null && value !== '' && value !== '—';
     return `<div class="sp-row">
       <span class="sp-label">${esc(label)}</span>
       <span class="sp-val${isLink ? ' link' : ''}">${esc(value) || '—'}</span>
+      ${has ? COPY_BTN : ''}
     </div>`;
   }
 
@@ -2541,14 +2565,15 @@
       const url = `https://www.${ch}/dp/${asin}`;
       return `<a href="${url}" target="_blank" rel="noopener" style="color:#5ba4cf;text-decoration:underline;">${esc(asin)}</a>`;
     }).join(', ');
-    return `<div class="sp-row"><span class="sp-label">Return ASIN</span><span class="sp-val">${links}</span></div>`;
+    return `<div class="sp-row"><span class="sp-label">Return ASIN</span><span class="sp-val">${links}</span>${COPY_BTN}</div>`;
   }
 
   function rowLinked(label, text, url) {
+    const has = text != null && text !== '' && text !== '—';
     const cell = url
       ? `<a href="${url}" target="_blank" rel="noopener" style="color:#5ba4cf;text-decoration:underline;font-weight:500;">${esc(text)}</a>`
       : `<span class="sp-val">${esc(text) || '—'}</span>`;
-    return `<div class="sp-row"><span class="sp-label">${esc(label)}</span>${cell}</div>`;
+    return `<div class="sp-row"><span class="sp-label">${esc(label)}</span>${cell}${has ? COPY_BTN : ''}</div>`;
   }
 
   // Render selling-marketplace badges from market spreadsheet check
@@ -3462,6 +3487,33 @@
     panel.querySelector('#sp-nrn-btn').onclick = () => markNoResponseNeeded(panel);
 
     // Mirror ChannelReply's button state: enable our NRN button only while CR's
+    // Per-row copy buttons (delegated, guarded once). Copies the row's value text.
+    if (!window.__gcxCopyInit) {
+      window.__gcxCopyInit = true;
+      const copyText_ = text => {
+        if (navigator.clipboard && navigator.clipboard.writeText) return navigator.clipboard.writeText(text);
+        const ta = document.createElement('textarea');
+        ta.value = text; ta.style.position = 'fixed'; ta.style.opacity = '0';
+        document.body.appendChild(ta); ta.focus(); ta.select();
+        try { document.execCommand('copy'); } finally { ta.remove(); }
+        return Promise.resolve();
+      };
+      document.addEventListener('click', e => {
+        const btn = e.target.closest && e.target.closest('.sp-copy');
+        if (!btn) return;
+        e.preventDefault(); e.stopPropagation();
+        const rowEl = btn.closest('.sp-row');
+        const valEl = rowEl && (rowEl.querySelector('.sp-val') || rowEl.querySelector('a'));
+        const text = (valEl ? valEl.textContent : '').trim();
+        if (!text || text === '—') return;
+        copyText_(text).then(() => {
+          btn.classList.add('copied');
+          btn.innerHTML = '✓';
+          setTimeout(() => { btn.classList.remove('copied'); btn.innerHTML = COPY_SVG; }, 1000);
+        }).catch(() => {});
+      }, true);
+    }
+
     // "Mark as 'No response needed'" is still actionable. Polls the iframe bridge.
     // Guarded so repeated init() calls don't stack listeners/intervals.
     if (!window.__gcxNrnPoll) {
