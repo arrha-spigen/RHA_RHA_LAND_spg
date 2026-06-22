@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         GCX Reply
 // @namespace    https://spigen.com/gcx
-// @version      2.13.3
+// @version      2.13.4
 // @description  Amazon order data via GAS web app + Spigen product info + Zendesk auto-fill
 // @author       Spigen GCX
 // @updateURL    https://raw.githubusercontent.com/codingintheusa0402/spigen-gcx-automation/main/tampermonkey_scripts/GCX%20Reply.user.js
@@ -58,7 +58,7 @@
   };
 
   const FULFILLMENT_MAP = { AFN: 'fba', MFN: 'merchant__fbm_' };
-  const SCRIPT_VER = (typeof GM_info !== 'undefined' ? GM_info?.script?.version : null) || '2.13.3';
+  const SCRIPT_VER = (typeof GM_info !== 'undefined' ? GM_info?.script?.version : null) || '2.13.4';
 
   // ── Module state ─────────────────────────────────────────────────────────
   let lastOrderData    = null;
@@ -1923,7 +1923,7 @@
       z-index: 2;
     }
     #sp-settings-drawer.sp-settings-open {
-      max-height: 160px;
+      max-height: 220px;
       border-bottom: 1px solid rgba(255,255,255,0.18);
     }
     .sp-settings-inner {
@@ -2304,9 +2304,6 @@
         <div id="sp-mcf-bar">
           <button id="sp-mcf-btn">→ MCF</button>
           <div id="sp-mcf-status"></div>
-        </div>
-        <div id="sp-notes-bar">
-          <label><input type="checkbox" id="sp-notes-toggle"> Notes</label>
         </div>
         <div id="sp-notes-section">
           <div id="sp-notes-content"></div>
@@ -2968,7 +2965,7 @@
     if (!btn || !drawer) return;
 
     const uiState = loadUi();
-    const glassEnabled = uiState.glassEnabled !== false;
+    const glassEnabled = uiState.glassEnabled === true; // default OFF
     const prefs = getDataFetchPrefs();
 
     drawer.innerHTML = `
@@ -2989,9 +2986,13 @@
             <input type="checkbox" id="sp-fetch-shipping-chk" ${prefs.fetchShipping ? 'checked' : ''}/>
             Shipping Address
           </label>
-          <label style="display:flex;align-items:center;gap:6px;cursor:pointer;user-select:none;font-size:12px;color:#1c1c1e;">
+          <label style="display:flex;align-items:center;gap:6px;cursor:pointer;user-select:none;font-size:12px;color:#1c1c1e;margin-bottom:5px;">
             <input type="checkbox" id="sp-fetch-product-chk" ${prefs.fetchProduct ? 'checked' : ''}/>
             Product Info
+          </label>
+          <label style="display:flex;align-items:center;gap:6px;cursor:pointer;user-select:none;font-size:12px;color:#1c1c1e;">
+            <input type="checkbox" id="sp-notes-toggle"/>
+            Notes
           </label>
         </div>
       </div>
@@ -3102,7 +3103,8 @@
     const glass = new GlassWebGL_(panel);
     panel._glass = glass;
     // Apply saved glass on/off preference before any drag/resize can fire.
-    if (loadUi().glassEnabled === false) panel.classList.add('sp-glass-disabled');
+    // Default OFF — only enabled when the user has explicitly turned it on.
+    if (loadUi().glassEnabled !== true) panel.classList.add('sp-glass-disabled');
     initSettings_(panel, glass);
 
     // Minimize / expand
