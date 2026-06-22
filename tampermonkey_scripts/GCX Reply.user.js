@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         GCX Reply
 // @namespace    https://spigen.com/gcx
-// @version      2.13.7
+// @version      2.13.8
 // @description  Amazon order data via GAS web app + Spigen product info + Zendesk auto-fill
 // @author       Spigen GCX
 // @updateURL    https://raw.githubusercontent.com/codingintheusa0402/spigen-gcx-automation/main/tampermonkey_scripts/GCX%20Reply.user.js
@@ -58,7 +58,7 @@
   };
 
   const FULFILLMENT_MAP = { AFN: 'fba', MFN: 'merchant__fbm_' };
-  const SCRIPT_VER = (typeof GM_info !== 'undefined' ? GM_info?.script?.version : null) || '2.13.7';
+  const SCRIPT_VER = (typeof GM_info !== 'undefined' ? GM_info?.script?.version : null) || '2.13.8';
 
   // ── Module state ─────────────────────────────────────────────────────────
   let lastOrderData    = null;
@@ -1249,11 +1249,9 @@
       ? ` <a href="${esc(linkUrl)}" target="_blank" rel="noopener"
            style="font-size:10px;font-weight:normal;color:#5ba4cf;text-decoration:none;margin-left:4px;">↗</a>`
       : '';
-    // Full product page title (Amazon source only) — shown above the SKU row.
+    // Full product page title (Amazon source only) — shown as a "Title" row above SKU.
     const titleRow = product._title
-      ? `<div class="sp-row" style="display:block;padding:4px 0;">
-           <span class="sp-val" style="font-size:11.5px;font-weight:600;color:#1c1c1e;line-height:1.35;">${esc(product._title)}</span>
-         </div>`
+      ? `<div class="sp-row"><span class="sp-label" style="font-size:11.5px;">Title</span><span class="sp-val" style="font-size:11.5px;line-height:1.35;">${esc(product._title)}</span></div>`
       : '';
     const fields = SHEET_COLS.map(col => {
       const val = product[col];
