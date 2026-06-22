@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         GCX Reply
 // @namespace    https://spigen.com/gcx
-// @version      2.12.6
+// @version      2.12.7
 // @description  Amazon order data via GAS web app + Spigen product info + Zendesk auto-fill
 // @author       Spigen GCX
 // @updateURL    https://raw.githubusercontent.com/codingintheusa0402/spigen-gcx-automation/main/tampermonkey_scripts/GCX%20Reply.user.js
@@ -58,7 +58,7 @@
   };
 
   const FULFILLMENT_MAP = { AFN: 'fba', MFN: 'merchant__fbm_' };
-  const SCRIPT_VER = (typeof GM_info !== 'undefined' ? GM_info?.script?.version : null) || '2.12.6';
+  const SCRIPT_VER = (typeof GM_info !== 'undefined' ? GM_info?.script?.version : null) || '2.12.7';
 
   // ── Module state ─────────────────────────────────────────────────────────
   let lastOrderData    = null;
@@ -1722,6 +1722,16 @@
 
     recapture() { this._capture(); }
 
+    // Mark texture as stale so next show() triggers a fresh capture.
+    // Called on SPA navigation — avoids html2canvas during page load.
+    invalidate() {
+      clearTimeout(this._capTimer);
+      this._texW = 1; this._texH = 1;
+      this.canvas.style.display = 'none';
+      const glLayer = this.panel.querySelector('#sp-glass-layer');
+      if (glLayer) glLayer.style.display = '';
+    }
+
     destroy() {
       this._dead = true;
       if (this._rafId)    cancelAnimationFrame(this._rafId);
@@ -3233,8 +3243,9 @@
           panel.classList.add('minimized');
         }
       }
-      // Recapture glass background after new page content settles
-      if (panel._glass) panel._glass._schedCapture(2000);
+      // Invalidate glass texture on navigation — CSS backdrop-filter fallback
+      // shows instantly; WebGL recaptures lazily on next drag (no page-load lag).
+      if (panel._glass) panel._glass.invalidate();
     }
     const origPush    = history.pushState.bind(history);
     const origReplace = history.replaceState.bind(history);
