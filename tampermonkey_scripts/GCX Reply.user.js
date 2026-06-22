@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         GCX Reply
 // @namespace    https://spigen.com/gcx
-// @version      2.15.2
+// @version      2.15.3
 // @description  Amazon order data via GAS web app + Spigen product info + Zendesk auto-fill
 // @author       Spigen GCX
 // @updateURL    https://raw.githubusercontent.com/codingintheusa0402/spigen-gcx-automation/main/tampermonkey_scripts/GCX%20Reply.user.js
@@ -114,7 +114,7 @@
   };
 
   const FULFILLMENT_MAP = { AFN: 'fba', MFN: 'merchant__fbm_' };
-  const SCRIPT_VER = (typeof GM_info !== 'undefined' ? GM_info?.script?.version : null) || '2.15.2';
+  const SCRIPT_VER = (typeof GM_info !== 'undefined' ? GM_info?.script?.version : null) || '2.15.3';
 
   // ── Module state ─────────────────────────────────────────────────────────
   let lastOrderData    = null;
@@ -3280,11 +3280,19 @@
     });
 
     const dockChk = drawer.querySelector('#sp-dock-chk');
+    // Liquid Glass is meaningless when docked → grey it out while dock is on.
+    const syncGlassEnabled_ = () => {
+      const lbl = glassChk.closest('label');
+      glassChk.disabled = !!(dockChk && dockChk.checked);
+      if (lbl) { lbl.style.opacity = glassChk.disabled ? '0.4' : ''; lbl.style.cursor = glassChk.disabled ? 'not-allowed' : 'pointer'; }
+    };
     if (dockChk) dockChk.addEventListener('change', () => {
       saveUi({ dockMode: dockChk.checked });
       if (dockChk.checked) mountDocked_(panel);
       else mountFloating_(panel);
+      syncGlassEnabled_();
     });
+    syncGlassEnabled_();
 
     const fetchOrderChk = drawer.querySelector('#sp-fetch-order-chk');
     const fetchShippingChk = drawer.querySelector('#sp-fetch-shipping-chk');
@@ -3344,21 +3352,27 @@
 
     const panel = buildPanel();
     _panelEl = panel;
-    document.body.appendChild(panel);
-
-    // Restore saved size + position.
-    // Only soft-clamp to ensure ≥50px of the panel header is visible so the
-    // user can always grab it — allow any other off-screen position.
     const _savedUi = loadUi();
-    if (_savedUi.w) panel.style.width  = _savedUi.w + 'px';
-    if (_savedUi.h) panel.style.height = _savedUi.h + 'px';
-    if (_savedUi.x != null) {
-      panel.style.left  = _savedUi.x + 'px';
-      panel.style.right = 'auto';
-    }
-    if (_savedUi.y != null) {
-      // Only keep the top clamp so the drag handle stays reachable
-      panel.style.top = Math.max(-panel.offsetHeight + 50, _savedUi.y) + 'px';
+    const _startDocked = _savedUi.dockMode === true;
+
+    if (_startDocked) {
+      // Dock mode: never show the floating popup first. Mark docked immediately and
+      // mount into the Apps panel below; until then the node stays detached (hidden),
+      // so it never flashes as a floating window.
+      panel.classList.add('sp-docked');
+    } else {
+      document.body.appendChild(panel);
+      // Restore saved size + position (floating only).
+      // Soft-clamp so ≥50px of the header stays grabbable; any other off-screen ok.
+      if (_savedUi.w) panel.style.width  = _savedUi.w + 'px';
+      if (_savedUi.h) panel.style.height = _savedUi.h + 'px';
+      if (_savedUi.x != null) {
+        panel.style.left  = _savedUi.x + 'px';
+        panel.style.right = 'auto';
+      }
+      if (_savedUi.y != null) {
+        panel.style.top = Math.max(-panel.offsetHeight + 50, _savedUi.y) + 'px';
+      }
     }
 
     // Start minimized on filter/list pages; expanded on ticket pages
@@ -3377,8 +3391,9 @@
     if (loadUi().glassEnabled !== true) panel.classList.add('sp-glass-disabled');
     initSettings_(panel, glass);
 
-    // Apply saved dock preference (deferred so Zendesk's Apps panel can render).
-    if (loadUi().dockMode === true) setTimeout(() => { if (loadUi().dockMode) mountDocked_(panel); }, 1500);
+    // Dock from the start (no floating flash). mountDocked_ retries internally
+    // (and the heartbeat re-mounts) until the Apps panel is available.
+    if (_startDocked) mountDocked_(panel);
 
     // Minimize / expand
     panel.querySelector('#sp-minimize-btn').onclick = e => {
