@@ -2,8 +2,9 @@ const CONFIG = {
   sourceId:    '1sjcCj_P4DRD8rywkmYJhbsrzwFfgiJQuF9nIKwCiKlc',
   sourceSheet: '26년 전체문의',
   destId:      '1qxwUjuV3-_0HRS1Bsb3Fsua0n8N6r6GzNnqiv9wRU10',
-  destSheet:   'Sheet1',
-  chunkSize:   1000   // rows per read-write cycle
+  destSheet:   'RAW',
+  chunkSize:   1000,        // rows per read-write cycle
+  formulaCols: [6, 14]      // F & N — ARRAYFORMULA columns: never clear or overwrite
 };
 
 function onOpen() {
@@ -11,6 +12,23 @@ function onOpen() {
     .createMenu('🔄 Mirror')
     .addItem('Mirror now', 'mirrorSheet')
     .addToUi();
+}
+
+// Break columns 1..lastCol into contiguous runs, excluding the protected columns.
+// e.g. lastCol=20, skip=[6,14]  →  [[1,5],[7,13],[15,20]]
+function colSegments_(lastCol, skip) {
+  const skipSet = new Set(skip);
+  const segs = [];
+  let start = null;
+  for (let c = 1; c <= lastCol; c++) {
+    if (skipSet.has(c)) {
+      if (start !== null) { segs.push([start, c - 1]); start = null; }
+    } else if (start === null) {
+      start = c;
+    }
+  }
+  if (start !== null) segs.push([start, lastCol]);
+  return segs;
 }
 
 function mirrorSheet() {
@@ -23,10 +41,16 @@ function mirrorSheet() {
   const lastRow = src.getLastRow();
   const lastCol = src.getLastColumn();
 
-  dst.clearContents();
+  // Segments cover the widest of source/dest so old trailing columns get cleared too.
+  const widest   = Math.max(lastCol, dst.getLastColumn());
+  const segments = colSegments_(widest, CONFIG.formulaCols);
+
+  // Clear ONLY the non-formula columns (leaves F & N ARRAYFORMULAs untouched).
+  const clearRows = dst.getMaxRows();
+  segments.forEach(([s, e]) => dst.getRange(1, s, clearRows, e - s + 1).clearContent());
 
   if (lastRow === 0 || lastCol === 0) {
-    Logger.log('Source is empty — destination cleared.');
+    Logger.log('Source is empty — non-formula columns cleared, F & N preserved.');
     return;
   }
 
@@ -38,13 +62,19 @@ function mirrorSheet() {
     dst.insertColumnsAfter(dst.getMaxColumns(), lastCol - dst.getMaxColumns());
   }
 
-  // Read and write in chunks to stay within GAS memory/time limits
+  // Read in chunks; write each chunk per segment so F & N are skipped.
   for (let row = 1; row <= lastRow; row += CONFIG.chunkSize) {
     const numRows = Math.min(CONFIG.chunkSize, lastRow - row + 1);
     const data = src.getRange(row, 1, numRows, lastCol).getValues();
-    dst.getRange(row, 1, numRows, lastCol).setValues(data);
+    segments.forEach(([s, e]) => {
+      if (s > lastCol) return;                       // segment is past source data
+      const segEnd = Math.min(e, lastCol);
+      const block  = data.map(r => r.slice(s - 1, segEnd));   // cols s..segEnd
+      dst.getRange(row, s, numRows, segEnd - s + 1).setValues(block);
+    });
     SpreadsheetApp.flush();
   }
 
-  Logger.log('Mirror complete: ' + lastRow + ' rows × ' + lastCol + ' cols → ' + CONFIG.destSheet);
+  Logger.log('Mirror complete: ' + lastRow + ' rows × ' + lastCol +
+             ' cols (F & N formulas preserved) → ' + CONFIG.destSheet);
 }
