@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         GCX Reply
 // @namespace    https://spigen.com/gcx
-// @version      2.15.3
+// @version      2.15.4
 // @description  Amazon order data via GAS web app + Spigen product info + Zendesk auto-fill
 // @author       Spigen GCX
 // @updateURL    https://raw.githubusercontent.com/codingintheusa0402/spigen-gcx-automation/main/tampermonkey_scripts/GCX%20Reply.user.js
@@ -114,7 +114,7 @@
   };
 
   const FULFILLMENT_MAP = { AFN: 'fba', MFN: 'merchant__fbm_' };
-  const SCRIPT_VER = (typeof GM_info !== 'undefined' ? GM_info?.script?.version : null) || '2.15.3';
+  const SCRIPT_VER = (typeof GM_info !== 'undefined' ? GM_info?.script?.version : null) || '2.15.4';
 
   // ── Module state ─────────────────────────────────────────────────────────
   let lastOrderData    = null;
@@ -2327,7 +2327,9 @@
     #sp-order-panel.sp-docked #sp-glass-canvas,
     #sp-order-panel.sp-docked .sp-re { display: none !important; }
     #sp-order-panel.sp-docked #sp-panel-header { cursor: default; border-radius: 10px 10px 0 0; }
-    #sp-order-panel.sp-docked #sp-panel-body { max-height: none; overflow: visible; }
+    /* Scroll internally so content is always reachable, regardless of whether the
+       Apps-panel mount point is itself a scroll container. */
+    #sp-order-panel.sp-docked #sp-panel-body { max-height: 65vh; overflow-y: auto; }
 
     #sp-mcf-bar { margin-bottom: 8px; display: none; }
     #sp-mcf-btn {
