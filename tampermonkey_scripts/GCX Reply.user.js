@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         GCX Reply
 // @namespace    https://spigen.com/gcx
-// @version      2.13.9
+// @version      2.14.0
 // @description  Amazon order data via GAS web app + Spigen product info + Zendesk auto-fill
 // @author       Spigen GCX
 // @updateURL    https://raw.githubusercontent.com/codingintheusa0402/spigen-gcx-automation/main/tampermonkey_scripts/GCX%20Reply.user.js
@@ -9,6 +9,7 @@
 // @match        https://spigenhelp.zendesk.com/agent/tickets/*
 // @match        https://spigenhelp.zendesk.com/agent/filters
 // @match        https://spigenhelp.zendesk.com/agent/filters/*
+// @match        https://*.zdusercontent.com/*
 // @grant        GM_xmlhttpRequest
 // @grant        GM_addStyle
 // @run-at       document-idle
@@ -18,6 +19,36 @@
 
 (function () {
   'use strict';
+
+  // ── ChannelReply bridge (TEMPORARY) ────────────────────────────────────────
+  // The "No response needed" button lives in ChannelReply's cross-origin app
+  // iframe (*.zdusercontent.com), so the panel on the Zendesk page can't click
+  // it directly. This script also loads inside that iframe; here (any non-top
+  // frame) we listen for the panel's postMessage and click the real button,
+  // re-broadcasting down the frame tree so nested app frames are reached too.
+  // TODO: replace with a direct SP-API/SC status change once a path is found.
+  if (window.top !== window.self) {
+    const findNrnBtn_ = () =>
+      [...document.querySelectorAll('a[ng-click*="updateNoResponseNeeded"], a.no-select')]
+        .find(a => /no response needed/i.test(a.textContent || ''));
+    window.addEventListener('message', ev => {
+      if (!ev.data || ev.data.__gcxNRN !== 'click') return;
+      [...document.querySelectorAll('iframe')].forEach(f => {
+        try { f.contentWindow.postMessage({ __gcxNRN: 'click' }, '*'); } catch (_) {}
+      });
+      let tries = 0;
+      (function tick() {
+        const btn = findNrnBtn_();
+        if (btn) {
+          btn.click();
+          try { window.top.postMessage({ __gcxNRN: 'done', ok: true }, '*'); } catch (_) {}
+        } else if (++tries < 12) {
+          setTimeout(tick, 200);
+        }
+      })();
+    });
+    return; // never build the floating panel inside an app iframe
+  }
 
   const GAS_URL    = 'https://script.google.com/macros/s/AKfycbw2Vdwk197LXB6oUAzuHS8sKamD5uqKZJDLvcHzbftWJk-M65XV1fAnTqiZo7ZEm4hk/exec';
   const SHEET_URL  = 'https://docs.google.com/spreadsheets/d/1fx9K4r2T9SeZK076zy9kMHoLzAKDgmlRp-C2VtnTKVo/edit?gid=0#gid=0';
@@ -58,7 +89,7 @@
   };
 
   const FULFILLMENT_MAP = { AFN: 'fba', MFN: 'merchant__fbm_' };
-  const SCRIPT_VER = (typeof GM_info !== 'undefined' ? GM_info?.script?.version : null) || '2.13.9';
+  const SCRIPT_VER = (typeof GM_info !== 'undefined' ? GM_info?.script?.version : null) || '2.14.0';
 
   // ── Module state ─────────────────────────────────────────────────────────
   let lastOrderData    = null;
@@ -767,6 +798,39 @@
       status.style.display = 'block';
       setTimeout(() => { status.style.display = 'none'; }, 4000);
     }
+  }
+
+  // ── No Response Needed: click ChannelReply's button via the iframe bridge ──
+  // TEMPORARY: postMessage cascades down every frame; the bridge (top of file)
+  // running inside the ChannelReply app iframe finds and clicks the real button.
+  function markNoResponseNeeded(panel) {
+    const status = panel.querySelector('#sp-nrn-status');
+    const show = (msg, color) => {
+      if (!status) return;
+      status.textContent = msg;
+      status.style.color = color || '#27ae60';
+      status.style.display = 'block';
+    };
+    let acked = false;
+    const onAck = ev => {
+      if (!ev.data || ev.data.__gcxNRN !== 'done' || !ev.data.ok) return;
+      acked = true;
+      window.removeEventListener('message', onAck);
+      show('✓ Marked as "No response needed"');
+      logStep_('No Response Needed: ChannelReply marked');
+    };
+    window.addEventListener('message', onAck);
+
+    [...document.querySelectorAll('iframe')].forEach(f => {
+      try { f.contentWindow.postMessage({ __gcxNRN: 'click' }, '*'); } catch (_) {}
+    });
+    show('Marking…', '#888');
+    logStep_('No Response Needed: dispatching to ChannelReply iframe…');
+
+    setTimeout(() => {
+      window.removeEventListener('message', onAck);
+      if (!acked) show('✗ ChannelReply button not found', '#c0392b');
+    }, 3000);
   }
 
   // ── Auto-fill: PUT all fields to Zendesk API, fill text fields in DOM ────
@@ -2239,6 +2303,27 @@
       text-align: center;
     }
 
+    #sp-nrn-bar { margin-top: 6px; }
+    #sp-nrn-btn {
+      background: rgba(108,117,140,0.90);
+      color: #fff;
+      border: none;
+      border-radius: 8px;
+      padding: 5px 0;
+      cursor: pointer;
+      font-size: 12px;
+      width: 100%;
+      backdrop-filter: blur(4px);
+    }
+    #sp-nrn-btn:hover { background: rgba(86,94,115,0.96); }
+    #sp-nrn-status {
+      display: none;
+      font-size: 11px;
+      color: #27ae60;
+      margin-top: 4px;
+      text-align: center;
+    }
+
     #sp-notes-bar {
       margin-bottom: 6px;
     }
@@ -2319,6 +2404,10 @@
         <div id="sp-mcf-bar">
           <button id="sp-mcf-btn">→ MCF</button>
           <div id="sp-mcf-status"></div>
+        </div>
+        <div id="sp-nrn-bar">
+          <button id="sp-nrn-btn">No Response Needed</button>
+          <div id="sp-nrn-status"></div>
         </div>
         <div id="sp-notes-section">
           <div id="sp-notes-content"></div>
@@ -3193,6 +3282,7 @@
 
     panel.querySelector('#sp-autofill-btn').onclick = () => autoFillTicket(panel);
     panel.querySelector('#sp-mcf-btn').onclick = () => sendToMCF(panel);
+    panel.querySelector('#sp-nrn-btn').onclick = () => markNoResponseNeeded(panel);
 
     const notesToggle  = panel.querySelector('#sp-notes-toggle');
     const notesSection = panel.querySelector('#sp-notes-section');
