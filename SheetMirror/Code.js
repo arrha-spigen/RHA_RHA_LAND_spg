@@ -10,8 +10,8 @@ const CONFIG = {
   // always matches — even if the cell was edited or cleared. Backslashes are
   // doubled here for JS; the cell receives single backslashes.
   formulas: {
-    6:  '={"Brand(상세) Clean";ARRAYFORMULA(REGEXREPLACE(E2:E, "Spigen\\((.*?)\\)", "$1"))}',
-    14: '={"Product Name Clean";ARRAYFORMULA(REGEXREPLACE(REGEXREPLACE(IF(ISBLANK(K2:K), L2:L, K2:K), " \\(.*?\\)", ""), "_.*", ""))}'
+    55:  '={"Brand(상세) Clean";ARRAYFORMULA(REGEXREPLACE(E2:E, "Spigen\\((.*?)\\)", "$1"))}',
+    56: `={"Product Name Clean";ARRAYFORMULA(REGEXREPLACE(REGEXREPLACE(REGEXREPLACE(IF(ISBLANK(J2:J),K2:K,J2:J),"^\(.*?\)_","")," \(.*?\)",""),"_.*",""))}`
   }
 };
 
