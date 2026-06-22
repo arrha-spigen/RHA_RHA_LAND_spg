@@ -1902,7 +1902,7 @@
       z-index: 2;
     }
     #sp-settings-drawer.sp-settings-open {
-      max-height: 340px;
+      max-height: 160px;
       border-bottom: 1px solid rgba(255,255,255,0.18);
     }
     .sp-settings-inner {
@@ -1934,27 +1934,6 @@
       transition: background 0.13s;
     }
     .sp-s-btn:hover { background: rgba(90,130,255,0.26); }
-
-    /* ── Data fetch toggles ────────────────────────────────────────────────── */
-    #sp-data-fetch-toggles {
-      border-top: 1px solid rgba(0,0,0,0.06);
-      padding-top: 8px;
-      margin-top: 8px;
-    }
-    #sp-data-fetch-toggles label {
-      display: flex;
-      align-items: center;
-      gap: 6px;
-      margin-bottom: 5px;
-      font-size: 12px;
-      color: #1c1c1e;
-      cursor: pointer;
-      user-select: none;
-    }
-    #sp-data-fetch-toggles input[type="checkbox"] {
-      accent-color: rgba(90,130,255,0.9);
-      cursor: pointer;
-    }
 
     #sp-order-panel.minimized #sp-panel-body { display: none; }
     #sp-order-panel.minimized #sp-settings-drawer { display: none; }
@@ -2310,11 +2289,6 @@
         </div>
         <div id="sp-notes-section">
           <div id="sp-notes-content"></div>
-        </div>
-        <div id="sp-data-fetch-toggles">
-          <label><input type="checkbox" id="sp-fetch-order-chk" checked> Fetch Order Info</label>
-          <label><input type="checkbox" id="sp-fetch-shipping-chk" checked> Fetch Shipping Address</label>
-          <label><input type="checkbox" id="sp-fetch-product-chk" checked> Fetch Product Info</label>
         </div>
         <div id="sp-ai-reason-result"></div>
         <div id="sp-result">
@@ -2966,109 +2940,85 @@
     });
   }
 
-  // ── Settings drawer (Glass console) ──────────────────────────────────────
+  // ── Settings drawer (Glass toggle + data fetch preferences) ──────────────
   function initSettings_(panel, glass) {
     const btn    = panel.querySelector('#sp-settings-btn');
     const drawer = panel.querySelector('#sp-settings-drawer');
     if (!btn || !drawer) return;
 
-    const sliders = [
-      { key:'blurRadius',    label:'Blur',      min:2,     max:12,   step:0.1,   dec:1 },
-      { key:'tintOpacity',   label:'Tint',      min:0.1,   max:0.8,  step:0.01,  dec:2 },
-      { key:'edgeIntensity', label:'Edge',      min:0.005, max:0.03, step:0.001, dec:3 },
-      { key:'rimIntensity',  label:'Rim',       min:0.02,  max:0.15, step:0.001, dec:3 },
-      { key:'baseIntensity', label:'Base',      min:0.005, max:0.03, step:0.001, dec:3 },
-      { key:'edgeDistance',  label:'Edge Dist', min:0.1,   max:0.4,  step:0.005, dec:3 },
-      { key:'rimDistance',   label:'Rim Dist',  min:0.3,   max:1.5,  step:0.01,  dec:2 },
-      { key:'baseDistance',  label:'Base Dist', min:0.08,  max:0.25, step:0.005, dec:3 },
-      { key:'cornerBoost',   label:'Corner',    min:0.01,  max:0.06, step:0.001, dec:3 },
-      { key:'rippleEffect',  label:'Ripple',    min:0.05,  max:0.3,  step:0.005, dec:3 },
-    ];
-
-    const fmt = (v, dec) => parseFloat(v).toFixed(dec);
-    const p = glass ? glass.params : Object.assign({}, SP_GLASS_DEFAULTS_);
+    const glassEnabled = !panel.classList.contains('sp-glass-disabled');
+    const prefs = getDataFetchPrefs();
 
     drawer.innerHTML = `
       <div class="sp-settings-inner">
-        <div class="sp-settings-sliders">
-          ${sliders.map(s => `
-            <div class="sp-s-row">
-              <label>${s.label}</label>
-              <input type="range" class="sp-s-range" data-key="${s.key}"
-                min="${s.min}" max="${s.max}" step="${s.step}" value="${p[s.key]}"/>
-              <span class="sp-s-val" data-key="${s.key}">${fmt(p[s.key], s.dec)}</span>
-            </div>
-          `).join('')}
-          <div class="sp-s-row">
-            <label>Warp</label>
-            <input type="checkbox" class="sp-s-warp" ${p.warp ? 'checked' : ''}/>
-            <span class="sp-s-val"></span>
-          </div>
+        <div style="border-bottom:1px solid rgba(0,0,0,0.06);padding-bottom:8px;margin-bottom:8px;">
+          <label style="display:flex;align-items:center;gap:6px;cursor:pointer;user-select:none;font-size:12px;color:#1c1c1e;margin-bottom:0;">
+            <input type="checkbox" id="sp-liquid-glass-chk" ${glassEnabled ? 'checked' : ''}/>
+            Liquid Glass
+          </label>
         </div>
-        <div class="sp-settings-btns">
-          <button class="sp-s-btn" id="sp-s-recapture">Recapture</button>
-          <button class="sp-s-btn" id="sp-s-randomize">Randomize</button>
-          <button class="sp-s-btn" id="sp-s-reset">Reset</button>
+        <div>
+          <div style="font-size:11px;color:#888;margin-bottom:6px;font-weight:500;">Data Fetch</div>
+          <label style="display:flex;align-items:center;gap:6px;cursor:pointer;user-select:none;font-size:12px;color:#1c1c1e;margin-bottom:5px;">
+            <input type="checkbox" id="sp-fetch-order-chk" ${prefs.fetchOrder ? 'checked' : ''}/>
+            Order Info
+          </label>
+          <label style="display:flex;align-items:center;gap:6px;cursor:pointer;user-select:none;font-size:12px;color:#1c1c1e;margin-bottom:5px;">
+            <input type="checkbox" id="sp-fetch-shipping-chk" ${prefs.fetchShipping ? 'checked' : ''}/>
+            Shipping Address
+          </label>
+          <label style="display:flex;align-items:center;gap:6px;cursor:pointer;user-select:none;font-size:12px;color:#1c1c1e;">
+            <input type="checkbox" id="sp-fetch-product-chk" ${prefs.fetchProduct ? 'checked' : ''}/>
+            Product Info
+          </label>
         </div>
       </div>
     `;
 
-    drawer.querySelectorAll('.sp-s-range').forEach(inp => {
-      const key = inp.dataset.key;
-      const cfg = sliders.find(s => s.key === key);
-      inp.addEventListener('input', () => {
-        const v = parseFloat(inp.value);
-        const el = drawer.querySelector(`.sp-s-val[data-key="${key}"]`);
-        if (el) el.textContent = fmt(v, cfg.dec);
-        if (glass) glass.setParam(key, v);
-      });
+    const glassChk = drawer.querySelector('#sp-liquid-glass-chk');
+    glassChk.addEventListener('change', () => {
+      if (glassChk.checked) {
+        panel.classList.remove('sp-glass-disabled');
+        if (glass) glass.recapture();
+      } else {
+        panel.classList.add('sp-glass-disabled');
+      }
+      saveUi({ glassEnabled: glassChk.checked });
     });
 
-    const warpCb = drawer.querySelector('.sp-s-warp');
-    if (warpCb) warpCb.addEventListener('change', () => {
-      if (glass) glass.setParam('warp', warpCb.checked);
-    });
+    const fetchOrderChk = drawer.querySelector('#sp-fetch-order-chk');
+    const fetchShippingChk = drawer.querySelector('#sp-fetch-shipping-chk');
+    const fetchProductChk = drawer.querySelector('#sp-fetch-product-chk');
 
-    drawer.querySelector('#sp-s-recapture')?.addEventListener('click', () => {
-      if (glass) glass.recapture();
-    });
-
-    drawer.querySelector('#sp-s-randomize')?.addEventListener('click', () => {
-      const rand = {
-        edgeIntensity: 0.005 + Math.random() * 0.025,
-        rimIntensity:  0.02  + Math.random() * 0.13,
-        baseIntensity: 0.005 + Math.random() * 0.025,
-        edgeDistance:  0.1   + Math.random() * 0.3,
-        rimDistance:   0.3   + Math.random() * 1.2,
-        baseDistance:  0.08  + Math.random() * 0.17,
-        cornerBoost:   0.01  + Math.random() * 0.05,
-        rippleEffect:  0.05  + Math.random() * 0.25,
-        blurRadius:    2     + Math.random() * 10,
-        tintOpacity:   0.1   + Math.random() * 0.7,
-        warp:          Math.random() < 0.3,
+    function onDataFetchToggleChange() {
+      const prefs = {
+        fetchOrder: fetchOrderChk.checked,
+        fetchShipping: fetchShippingChk.checked,
+        fetchProduct: fetchProductChk.checked,
       };
-      sliders.forEach(s => {
-        const v = rand[s.key];
-        const i = drawer.querySelector(`input[data-key="${s.key}"]`);
-        const e = drawer.querySelector(`.sp-s-val[data-key="${s.key}"]`);
-        if (i) i.value = v;
-        if (e) e.textContent = fmt(v, s.dec);
-        if (glass) glass.setParam(s.key, v);
-      });
-      if (warpCb) { warpCb.checked = rand.warp; if (glass) glass.setParam('warp', rand.warp); }
-    });
+      saveDataFetchPrefs(prefs);
+      const result = panel.querySelector('#sp-result');
+      if (result && lastOrderData) {
+        const orderId = panel.querySelector('#sp-order-input')?.value.trim() || '';
+        const panelAsin = panel.querySelector('#sp-asin-input')?.value.trim() || '';
+        result.innerHTML = renderOrder(lastOrderData, orderId, panelAsin);
+        result.querySelectorAll('.sp-block-title').forEach(title => {
+          title.addEventListener('click', e => {
+            e.stopPropagation();
+            title.closest('.sp-block').classList.toggle('collapsed');
+          });
+        });
+        applySectionState(result);
+      }
+      const productResult = panel.querySelector('#sp-product-result');
+      if (productResult) {
+        productResult.style.display = prefs.fetchProduct ? 'block' : 'none';
+      }
+    }
 
-    drawer.querySelector('#sp-s-reset')?.addEventListener('click', () => {
-      const d = SP_GLASS_DEFAULTS_;
-      sliders.forEach(s => {
-        const i = drawer.querySelector(`input[data-key="${s.key}"]`);
-        const e = drawer.querySelector(`.sp-s-val[data-key="${s.key}"]`);
-        if (i) i.value = d[s.key];
-        if (e) e.textContent = fmt(d[s.key], s.dec);
-        if (glass) glass.setParam(s.key, d[s.key]);
-      });
-      if (warpCb) { warpCb.checked = d.warp; if (glass) glass.setParam('warp', d.warp); }
-    });
+    fetchOrderChk.addEventListener('change', onDataFetchToggleChange);
+    fetchShippingChk.addEventListener('change', onDataFetchToggleChange);
+    fetchProductChk.addEventListener('change', onDataFetchToggleChange);
 
     btn.addEventListener('click', e => {
       e.stopPropagation();
@@ -3149,6 +3099,13 @@
       }).observe(panel);
     }
 
+    // Initialize product result visibility based on preferences
+    const prefs = getDataFetchPrefs();
+    const productResult = panel.querySelector('#sp-product-result');
+    if (productResult) {
+      productResult.style.display = prefs.fetchProduct ? 'block' : 'none';
+    }
+
     panel.querySelector('#sp-panel-close').onclick = () => {
       panel.remove();
       toggleBtn.style.display = 'block';
@@ -3200,51 +3157,6 @@
       if (notesToggle.checked && e.target.matches('[data-test-id="notes-edit-text-area-test-id"]'))
         notesContent.textContent = e.target.value.trim() || '(no notes)';
     });
-
-    // ── Data fetch toggle preferences ──────────────────────────────────────────
-    const fetchOrderChk = panel.querySelector('#sp-fetch-order-chk');
-    const fetchShippingChk = panel.querySelector('#sp-fetch-shipping-chk');
-    const fetchProductChk = panel.querySelector('#sp-fetch-product-chk');
-
-    function initDataFetchToggles() {
-      const prefs = getDataFetchPrefs();
-      fetchOrderChk.checked = prefs.fetchOrder;
-      fetchShippingChk.checked = prefs.fetchShipping;
-      fetchProductChk.checked = prefs.fetchProduct;
-    }
-
-    function onDataFetchToggleChange() {
-      const prefs = {
-        fetchOrder: fetchOrderChk.checked,
-        fetchShipping: fetchShippingChk.checked,
-        fetchProduct: fetchProductChk.checked,
-      };
-      saveDataFetchPrefs(prefs);
-      // Re-render current results if any
-      const result = panel.querySelector('#sp-result');
-      if (result && lastOrderData) {
-        const orderId = panel.querySelector('#sp-order-input')?.value.trim() || '';
-        const panelAsin = panel.querySelector('#sp-asin-input')?.value.trim() || '';
-        result.innerHTML = renderOrder(lastOrderData, orderId, panelAsin);
-        result.querySelectorAll('.sp-block-title').forEach(title => {
-          title.addEventListener('click', e => {
-            e.stopPropagation();
-            title.closest('.sp-block').classList.toggle('collapsed');
-          });
-        });
-        applySectionState(result);
-      }
-      // Conditionally render/hide product info
-      const productResult = panel.querySelector('#sp-product-result');
-      if (productResult) {
-        productResult.style.display = prefs.fetchProduct ? 'block' : 'none';
-      }
-    }
-
-    fetchOrderChk.addEventListener('change', onDataFetchToggleChange);
-    fetchShippingChk.addEventListener('change', onDataFetchToggleChange);
-    fetchProductChk.addEventListener('change', onDataFetchToggleChange);
-    initDataFetchToggles();
 
     // ── Persist section collapse state (capture phase runs before stopPropagation) ──
     panel.addEventListener('click', e => {
@@ -3316,7 +3228,10 @@
           if (ai && !ai.value) {
             ai.value = detectedAsin;
             const _asinOnly = !orderId && (!bodyIds || !bodyIds.length);
-            renderAllProducts([detectedAsin], false, _asinOnly);
+            const _prefs = getDataFetchPrefs();
+            if (_prefs.fetchProduct) {
+              renderAllProducts([detectedAsin], false, _asinOnly);
+            }
           }
         }
       });
