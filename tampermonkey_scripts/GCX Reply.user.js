@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         GCX Reply
 // @namespace    https://spigen.com/gcx
-// @version      2.16.1
+// @version      2.16.2
 // @description  Amazon order data via GAS web app + Spigen product info + Zendesk auto-fill
 // @author       Spigen GCX
 // @updateURL    https://raw.githubusercontent.com/codingintheusa0402/spigen-gcx-automation/main/tampermonkey_scripts/GCX%20Reply.user.js
@@ -125,7 +125,7 @@
   };
 
   const FULFILLMENT_MAP = { AFN: 'fba', MFN: 'merchant__fbm_' };
-  const SCRIPT_VER = (typeof GM_info !== 'undefined' ? GM_info?.script?.version : null) || '2.16.1';
+  const SCRIPT_VER = (typeof GM_info !== 'undefined' ? GM_info?.script?.version : null) || '2.16.2';
 
   // ── Module state ─────────────────────────────────────────────────────────
   let lastOrderData    = null;
@@ -2399,10 +2399,26 @@
     #sp-order-panel.sp-docked #sp-glass-layer,
     #sp-order-panel.sp-docked #sp-glass-canvas,
     #sp-order-panel.sp-docked .sp-re { display: none !important; }
-    #sp-order-panel.sp-docked #sp-panel-header { cursor: default; border-radius: 10px 10px 0 0; }
+    /* Native Zendesk app-section chrome look (matches ChannelReply's block). */
+    #sp-order-panel.sp-docked {
+      border: 1px solid #e9ebed;
+      box-shadow: none;
+      background: #fff !important;
+    }
+    #sp-order-panel.sp-docked #sp-panel-header {
+      cursor: default;
+      border-radius: 9px 9px 0 0;
+      background: #fff;
+      color: #2f3941;
+      border-bottom: 1px solid #e9ebed;
+      font-size: 14px;
+      font-weight: 700;
+      padding: 11px 14px;
+    }
+    #sp-order-panel.sp-docked #sp-panel-header svg:first-of-type { width: 16px; height: 16px; }
     /* Scroll internally so content is always reachable, regardless of whether the
        Apps-panel mount point is itself a scroll container. */
-    #sp-order-panel.sp-docked #sp-panel-body { max-height: 65vh; overflow-y: auto; }
+    #sp-order-panel.sp-docked #sp-panel-body { max-height: 65vh; overflow-y: auto; background: #fff; }
 
     #sp-mcf-bar { margin-bottom: 8px; display: none; }
     #sp-mcf-btn {
@@ -3227,20 +3243,6 @@
     return null;
   }
 
-  // The ChannelReply app block (direct child of the apps container) — so we can
-  // dock GCX Reply right beneath it instead of at the very top.
-  function channelReplyBlock_(mount) {
-    // Find the short header element whose text starts with "ChannelReply",
-    // then walk up to the direct child of the apps container.
-    const hit = [...mount.querySelectorAll('*')].find(el => {
-      const t = (el.textContent || '').trim();
-      return /^channelreply\b/i.test(t) && t.length < 30 && el.children.length <= 3;
-    });
-    let el = hit;
-    while (el && el.parentElement && el.parentElement !== mount) el = el.parentElement;
-    return (el && el.parentElement === mount) ? el : null;
-  }
-
   function mountDocked_(panel) {
     const mount = findAppsPanelMount_();
     if (!mount) {
@@ -3249,13 +3251,10 @@
       setTimeout(() => { if (loadUi().dockMode) { const m = findAppsPanelMount_(); if (m) mountDocked_(panel); } }, 1200);
       return;
     }
-    // Dock directly beneath the ChannelReply block (both stay visible); else top.
-    const cr = channelReplyBlock_(mount);
-    if (cr) {
-      if (panel !== cr.nextSibling) mount.insertBefore(panel, cr.nextSibling);
-      logStep_('Dock: mounted beneath ChannelReply');
-    } else if (panel.parentElement !== mount || panel.previousElementSibling) {
+    // Standalone block at the top of the Apps panel — independent of ChannelReply.
+    if (panel.parentElement !== mount || panel.previousElementSibling) {
       mount.insertBefore(panel, mount.firstChild);
+      logStep_('Dock: mounted as standalone block in Apps panel');
     }
     panel.classList.add('sp-docked');
     panel.classList.remove('minimized');
@@ -3269,12 +3268,7 @@
         if (!loadUi().dockMode) return;
         if (!panel.isConnected) {
           const m = findAppsPanelMount_();
-          if (m) {
-            const cr = channelReplyBlock_(m);
-            if (cr) m.insertBefore(panel, cr.nextSibling);
-            else m.insertBefore(panel, m.firstChild);
-            panel.classList.add('sp-docked');
-          }
+          if (m) { m.insertBefore(panel, m.firstChild); panel.classList.add('sp-docked'); }
         }
       });
       _dockObserver.observe(document.body, { childList: true, subtree: true });
