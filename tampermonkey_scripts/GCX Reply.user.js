@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         GCX Reply
 // @namespace    https://spigen.com/gcx
-// @version      2.16.2
+// @version      2.16.3
 // @description  Amazon order data via GAS web app + Spigen product info + Zendesk auto-fill
 // @author       Spigen GCX
 // @updateURL    https://raw.githubusercontent.com/codingintheusa0402/spigen-gcx-automation/main/tampermonkey_scripts/GCX%20Reply.user.js
@@ -28,9 +28,18 @@
   // re-broadcasting down the frame tree so nested app frames are reached too.
   // TODO: replace with a direct SP-API/SC status change once a path is found.
   if (window.top !== window.self) {
-    const findNrnBtn_ = () =>
-      [...document.querySelectorAll('a[ng-click*="updateNoResponseNeeded"], a.no-select')]
-        .find(a => /no response needed/i.test(a.textContent || ''));
+    const findNrnBtn_ = () => {
+      // ChannelReply Angular attribute selectors (standard tickets)
+      const byAttr = [...document.querySelectorAll(
+        'a[ng-click*="noResponse"], a[ng-click*="NoResponse"], ' +
+        'a[ng-click*="updateNoResponseNeeded"], a[ng-click*="updateNoResponse"], ' +
+        'a.no-select, [ng-click*="noResponse"], [ng-click*="NoResponse"]'
+      )].find(el => /no.?response.?needed/i.test((el.textContent || '').trim()));
+      if (byAttr) return byAttr;
+      // Text-based fallback — catches ABM and other ChannelReply button variants
+      return [...document.querySelectorAll('a, button, [role="button"], li, [class*="action"]')]
+        .find(el => /no.?response.?needed/i.test((el.textContent || '').trim()));
+    };
     const shown_ = el => !!el && getComputedStyle(el).display !== 'none';
     // "Actionable" = ChannelReply still shows the "Mark as …" span (not yet marked).
     // Lenient: only treat as NOT actionable when the "No response needed" (done)
@@ -40,7 +49,14 @@
       const nm = a.querySelector('.not-marked-as-no-response-text');
       const m  = a.querySelector('.marked-as-no-response-text');
       if (nm || m) { if (shown_(m) && !shown_(nm)) return false; return true; }
-      return a.getAttribute('aria-disabled') !== 'true' && !a.classList.contains('disabled');
+      if (a.getAttribute('aria-disabled') === 'true' || a.classList.contains('disabled')) return false;
+      // ABM/generic: check if a sibling "marked" state indicator is visible
+      const container = a.closest('[class*="action"], [class*="response"], li, td');
+      if (container) {
+        const marked = container.querySelector('[class*="marked"], [class*="completed"], [class*="done"]');
+        if (marked && shown_(marked)) return false;
+      }
+      return true;
     };
     const cascade_ = msg => [...document.querySelectorAll('iframe')].forEach(f => {
       try { f.contentWindow.postMessage(msg, '*'); } catch (_) {}
@@ -125,7 +141,8 @@
   };
 
   const FULFILLMENT_MAP = { AFN: 'fba', MFN: 'merchant__fbm_' };
-  const SCRIPT_VER = (typeof GM_info !== 'undefined' ? GM_info?.script?.version : null) || '2.16.2';
+  const SCRIPT_VER = (typeof GM_info !== 'undefined' ? GM_info?.script?.version : null) || '2.16.3';
+  const sleep = ms => new Promise(r => setTimeout(r, ms));
 
   // ── Module state ─────────────────────────────────────────────────────────
   let lastOrderData    = null;
@@ -2416,8 +2433,11 @@
       padding: 11px 14px;
     }
     #sp-order-panel.sp-docked #sp-panel-header svg:first-of-type { width: 16px; height: 16px; }
-    /* Scroll internally so content is always reachable, regardless of whether the
-       Apps-panel mount point is itself a scroll container. */
+    /* Hide floating-only controls when docked */
+    #sp-order-panel.sp-docked #sp-minimize-btn,
+    #sp-order-panel.sp-docked #sp-panel-close { display: none !important; }
+    #sp-order-panel.sp-docked #sp-settings-btn { margin-left: auto; }
+    /* Scroll internally so content is always reachable */
     #sp-order-panel.sp-docked #sp-panel-body { max-height: 65vh; overflow-y: auto; background: #fff; }
 
     #sp-mcf-bar { margin-bottom: 8px; display: none; }
@@ -2545,7 +2565,7 @@
           <div id="sp-mcf-status"></div>
         </div>
         <div id="sp-nrn-bar">
-          <button id="sp-nrn-btn" disabled title="Waiting for ChannelReply…">No Response Needed</button>
+          <button id="sp-nrn-btn" disabled title="Waiting for ChannelReply…">Mark as NRN</button>
           <div id="sp-nrn-status"></div>
         </div>
         <div id="sp-notes-section">
@@ -3225,22 +3245,35 @@
     // Prefer explicit container test-ids Zendesk has used for the apps pane.
     const direct = document.querySelector(
       '[data-test-id="ticket-apps-pane"], [data-test-id="apps-tray"], ' +
-      '[data-test-id="omnipanel-apps"], [data-test-id="ticket_sidebar"]'
+      '[data-test-id="omnipanel-apps"], [data-test-id="ticket_sidebar"], ' +
+      '[data-test-id="apps-container"], [data-test-id="sidebar-apps"]'
     );
     if (direct) return direct;
-    // Derive from an installed app iframe → walk up to its scroll container.
-    const appIframe = [...document.querySelectorAll('iframe')]
-      .find(f => /zdusercontent\.com/.test(f.src || ''));
-    if (appIframe) {
+
+    // Walk up from ALL zdusercontent iframes, collect every scroll container found,
+    // then return the TALLEST one. This is the outer apps sidebar — not ChannelReply's
+    // inner collapsible content area. Mounting here makes GCX Reply a sibling of
+    // ChannelReply's app block, so it is always visible regardless of whether
+    // ChannelReply is expanded or collapsed.
+    const iframes = [...document.querySelectorAll('iframe')]
+      .filter(f => /zdusercontent\.com/.test(f.src || ''));
+    if (!iframes.length) return null;
+
+    const scrollEls = [];
+    for (const appIframe of iframes) {
       let el = appIframe;
-      for (let i = 0; i < 10 && el.parentElement; i++) {
+      for (let i = 0; i < 18 && el.parentElement && el !== document.body; i++) {
         el = el.parentElement;
         const oy = getComputedStyle(el).overflowY;
-        if ((oy === 'auto' || oy === 'scroll') && el.clientHeight > 180) return el;
+        if ((oy === 'auto' || oy === 'scroll') && el.clientHeight > 100) scrollEls.push(el);
       }
-      return appIframe.parentElement; // fallback: the iframe's wrapper
     }
-    return null;
+
+    if (scrollEls.length) {
+      // The tallest scroll container is the apps sidebar, not an inner app content div.
+      return scrollEls.reduce((best, el) => el.clientHeight > best.clientHeight ? el : best);
+    }
+    return iframes[0].parentElement;
   }
 
   function mountDocked_(panel) {
@@ -3808,10 +3841,11 @@
   // typeof guards make this file safe to copy verbatim into GAS (where setInterval/setTimeout are undefined).
   if (typeof setInterval === 'function') setInterval(() => {
     // Dock mode: Zendesk's React re-render detaches our injected node on ticket
-    // navigation. Keep the SAME panel element and just re-insert it whenever the
-    // Apps panel is available again — never recreate (avoids duplicates + state loss).
+    // navigation. Keep the SAME panel element and re-insert whenever needed.
+    // Also remount if the panel is connected but invisible (offsetHeight === 0),
+    // which happens when it ends up inside a collapsed ChannelReply section.
     if (loadUi().dockMode === true && _panelEl) {
-      if (!_panelEl.isConnected) mountDocked_(_panelEl);
+      if (!_panelEl.isConnected || _panelEl.offsetHeight === 0) mountDocked_(_panelEl);
       return;
     }
     if (!document.getElementById(PANEL_ID) && !document.getElementById('sp-toggle-btn')) {
