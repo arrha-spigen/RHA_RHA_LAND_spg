@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         GCX Reply
 // @namespace    https://spigen.com/gcx
-// @version      2.17.9
+// @version      2.17.10
 // @description  Amazon order data via GAS web app + Spigen product info + Zendesk auto-fill
 // @author       Spigen GCX
 // @updateURL    https://raw.githubusercontent.com/codingintheusa0402/spigen-gcx-automation/main/tampermonkey_scripts/GCX%20Reply.user.js
@@ -901,6 +901,34 @@
 
   // ── No Response Needed: click ChannelReply's button via the iframe bridge ──
   // TEMPORARY: postMessage cascades down every frame; the bridge (top of file)
+  // Locate the "Mark as No response needed" anchor in the MAIN page DOM.
+  // New Zendesk renders ChannelReply content directly (no iframe), so the button
+  // is accessible without postMessage.
+  function findNrnBtnDirect_() {
+    const cands = [...document.querySelectorAll(
+      '.button-no-response-needed a.no-select, ' +
+      'a[ng-click*="updateNoResponseNeeded"], ' +
+      '[ng-click*="updateNoResponseNeeded"]'
+    )].filter(el => /no.?response.?needed/i.test((el.textContent || '').trim()));
+    if (cands.length) return cands[0];
+    // Text-only fallback (catches any variant label)
+    return [...document.querySelectorAll('a, [role="button"], button')]
+      .find(el => !el.closest('#sp-order-panel') &&
+                  /mark.+no.?response.?needed/i.test((el.textContent || '').trim()));
+  }
+  function isNrnActionableDirect_(a) {
+    if (!a) return false;
+    const wrap = a.closest('[class*="button-no-response"], [class*="no-response"]');
+    if (wrap && wrap.classList.contains('marked-as-no-response')) return false;
+    const nm = a.querySelector('.not-marked-as-no-response-text');
+    const m  = a.querySelector('.marked-as-no-response-text');
+    if (nm || m) {
+      const vis = el => el && getComputedStyle(el).display !== 'none';
+      if (vis(m) && !vis(nm)) return false;
+    }
+    return true;
+  }
+
   // running inside the ChannelReply app iframe finds and clicks the real button.
   function markNoResponseNeeded(panel) {
     const status = panel.querySelector('#sp-nrn-status');
@@ -910,22 +938,35 @@
       status.style.color = color || '#27ae60';
       status.style.display = 'block';
     };
+    // Try direct click first (new Zendesk renders ChannelReply in main page DOM)
+    const directBtn = findNrnBtnDirect_();
+    if (directBtn) {
+      if (isNrnActionableDirect_(directBtn)) {
+        directBtn.click();
+        show('✓ Marked as "No response needed"');
+        logStep_('No Response Needed: clicked directly in page DOM');
+      } else {
+        show('Already marked', '#888');
+        logStep_('No Response Needed: already marked (direct DOM check)');
+      }
+      return;
+    }
+
+    // Fallback: iframe bridge (old Zendesk with CR in zdusercontent.com iframe)
     let acked = false;
     const onAck = ev => {
       if (!ev.data || ev.data.__gcxNRN !== 'done' || !ev.data.ok) return;
       acked = true;
       window.removeEventListener('message', onAck);
       show('✓ Marked as "No response needed"');
-      logStep_('No Response Needed: ChannelReply marked');
+      logStep_('No Response Needed: ChannelReply marked via iframe');
     };
     window.addEventListener('message', onAck);
-
     [...document.querySelectorAll('iframe')].forEach(f => {
       try { f.contentWindow.postMessage({ __gcxNRN: 'click' }, '*'); } catch (_) {}
     });
     show('Marking…', '#888');
     logStep_('No Response Needed: dispatching to ChannelReply iframe…');
-
     setTimeout(() => {
       window.removeEventListener('message', onAck);
       if (!acked) show('✗ ChannelReply button not found', '#c0392b');
@@ -2414,6 +2455,7 @@
       max-width: 100% !important;
       height: auto;
       max-height: none !important;
+      flex-shrink: 0 !important;
       left: auto !important; top: auto !important; right: auto !important;
       margin: 0 0 10px 0;
       border-radius: 10px;
@@ -3252,8 +3294,6 @@
         // In docked mode use offsetHeight (unclipped CSS height) not BCR height
         // which is capped to the mount's visible area and causes wrong startH.
         const startH = isDocked ? panel.offsetHeight : r.height;
-        // Capture mount for scroll-compensation during docked resize
-        const mountEl = isDocked ? panel.parentElement : null;
 
         const onMove = ev => {
           const dx = ev.clientX - startX;
@@ -3276,12 +3316,9 @@
           if (h.bottom) {
             const newH = Math.max(MIN_H, startH + dy);
             panel.style.height = newH + 'px';
-            // Docked: the panel grows inside a scrollable mount. Scroll the mount
-            // so the resize handle stays visible under the cursor (1:1 tracking).
-            if (isDocked && mountEl) {
-              const overflow = newH - mountEl.clientHeight;
-              mountEl.scrollTop = overflow > 0 ? overflow : 0;
-            }
+            // Docked: scroll the nearest scrollable ancestor so the resize grip
+            // stays visible under the cursor regardless of which container clips.
+            if (isDocked) el.scrollIntoView({ block: 'end', behavior: 'instant' });
           }
           if (panel._glass) { panel._glass.show(); panel._glass._resize(); }
         };
@@ -3931,10 +3968,19 @@
       setInterval(() => {
         const b = document.querySelector('#sp-order-panel #sp-nrn-btn');
         if (!b) return;
+        // Direct DOM check first (new Zendesk renders CR without iframes)
+        const directBtn = findNrnBtnDirect_();
+        if (directBtn) {
+          lastStateAt = Date.now();
+          const ok = isNrnActionableDirect_(directBtn);
+          b.disabled = !ok;
+          b.title = ok ? '' : 'Already marked as No Response Needed';
+          return;
+        }
+        // Fallback: iframe bridge
         [...document.querySelectorAll('iframe')].forEach(f => {
           try { f.contentWindow.postMessage({ __gcxNRN: 'query' }, '*'); } catch (_) {}
         });
-        // No state heard recently → ChannelReply not present → keep disabled.
         if (Date.now() - lastStateAt > 6000) { b.disabled = true; b.title = 'ChannelReply not detected'; }
       }, 2500);
     }
@@ -4167,6 +4213,9 @@
       // Don't remount when GCX Reply is intentionally hidden because the user
       // has switched to a different omnipanel section (Customer Context, etc.).
       const hiddenBySection = _panelEl._gcxHiddenBySection === true;
+      // Always re-mount when disconnected (detached from DOM), regardless of
+      // hiddenBySection — the panel must be in the mount to be shown when the
+      // user switches back to the Apps section.
       if (!_panelEl.isConnected || (!hiddenBySection && _panelEl.offsetHeight === 0) || inFloatingFallback) {
         mountDocked_(_panelEl);
       }
