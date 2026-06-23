@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         GCX Reply
 // @namespace    https://spigen.com/gcx
-// @version      2.17.3
+// @version      2.17.4
 // @description  Amazon order data via GAS web app + Spigen product info + Zendesk auto-fill
 // @author       Spigen GCX
 // @updateURL    https://raw.githubusercontent.com/codingintheusa0402/spigen-gcx-automation/main/tampermonkey_scripts/GCX%20Reply.user.js
@@ -3279,7 +3279,10 @@
     console.group('[GCX] findAppsPanelMount_ W=' + W + ' H=' + H);
 
     // 1. Explicit Zendesk data-test-id selectors.
+    // "omnipanel-pane-wrapper-apps" is confirmed by console diagnostics as the
+    // correct Apps panel container in the new Zendesk navigation layout.
     const direct = document.querySelector(
+      '[data-test-id="omnipanel-pane-wrapper-apps"], ' +
       '[data-test-id="ticket-apps-pane"], [data-test-id="apps-tray"], ' +
       '[data-test-id="omnipanel-apps"], [data-test-id="ticket_sidebar"], ' +
       '[data-test-id="apps-container"], [data-test-id="sidebar-apps"]'
@@ -3481,12 +3484,17 @@
     }
     panel.classList.add('sp-docked');
 
-    // Enable native scrolling on the apps panel container so the dock scrolls
-    // when GCX Reply + other apps (ChannelReply, Trello) exceed the visible height.
-    // Walk up from mount; if any ancestor has overflow-y:hidden, switch to auto.
+    // The new Zendesk omnipanel-pane-wrapper-apps container uses flex-direction:row,
+    // which places GCX Reply and ChannelReply side-by-side instead of stacked.
+    // Force column layout so apps stack vertically and the panel scrolls correctly.
+    mount.style.flexDirection = 'column';
+    mount.style.overflowY = 'auto';
+    mount.style.overflowX = 'hidden';
+
+    // Also walk up and fix any hidden-overflow ancestor that clips the scroll.
     (function enableDockScroll_() {
-      let el = mount;
-      for (let i = 0; i < 6 && el && el !== document.body; i++) {
+      let el = mount.parentElement;
+      for (let i = 0; i < 4 && el && el !== document.body; i++) {
         const oy = getComputedStyle(el).overflowY;
         if (oy === 'auto' || oy === 'scroll') break;
         if (oy === 'hidden') { el.style.overflowY = 'auto'; break; }
