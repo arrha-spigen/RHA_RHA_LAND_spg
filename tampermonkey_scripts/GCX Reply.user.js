@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         GCX Reply
 // @namespace    https://spigen.com/gcx
-// @version      2.16.3
+// @version      2.16.4
 // @description  Amazon order data via GAS web app + Spigen product info + Zendesk auto-fill
 // @author       Spigen GCX
 // @updateURL    https://raw.githubusercontent.com/codingintheusa0402/spigen-gcx-automation/main/tampermonkey_scripts/GCX%20Reply.user.js
@@ -141,7 +141,7 @@
   };
 
   const FULFILLMENT_MAP = { AFN: 'fba', MFN: 'merchant__fbm_' };
-  const SCRIPT_VER = (typeof GM_info !== 'undefined' ? GM_info?.script?.version : null) || '2.16.3';
+  const SCRIPT_VER = (typeof GM_info !== 'undefined' ? GM_info?.script?.version : null) || '2.16.4';
   const sleep = ms => new Promise(r => setTimeout(r, ms));
 
   // ── Module state ─────────────────────────────────────────────────────────
@@ -3242,7 +3242,7 @@
   let _dockObserver = null;
 
   function findAppsPanelMount_() {
-    // Prefer explicit container test-ids Zendesk has used for the apps pane.
+    // 1. Explicit Zendesk data-test-id selectors.
     const direct = document.querySelector(
       '[data-test-id="ticket-apps-pane"], [data-test-id="apps-tray"], ' +
       '[data-test-id="omnipanel-apps"], [data-test-id="ticket_sidebar"], ' +
@@ -3250,30 +3250,48 @@
     );
     if (direct) return direct;
 
-    // Walk up from ALL zdusercontent iframes, collect every scroll container found,
-    // then return the TALLEST one. This is the outer apps sidebar — not ChannelReply's
-    // inner collapsible content area. Mounting here makes GCX Reply a sibling of
-    // ChannelReply's app block, so it is always visible regardless of whether
-    // ChannelReply is expanded or collapsed.
-    const iframes = [...document.querySelectorAll('iframe')]
-      .filter(f => /zdusercontent\.com/.test(f.src || ''));
-    if (!iframes.length) return null;
+    // 2. data-app-id: Zendesk wraps each installed app in a container with this attr.
+    //    Its parent is the apps-list — exactly what we want.
+    const appById = document.querySelector('[data-app-id]');
+    if (appById && appById.parentElement) return appById.parentElement;
 
+    const appIframe = [...document.querySelectorAll('iframe')]
+      .find(f => /zdusercontent\.com/.test(f.src || ''));
+    if (!appIframe) return null;
+
+    // 3. Walk up from the ChannelReply iframe to find the ChannelReply APP BLOCK —
+    //    the element whose direct children include BOTH:
+    //      a) the iframe-branch (content area), AND
+    //      b) a non-iframe sibling (the app header row: "ChannelReply 3" + collapse btn).
+    //    That element's PARENT is the apps-panel container.
+    //
+    //    Our own panel is excluded from child checks so a previously wrong-mounted
+    //    GCX Reply div doesn't create a false "non-iframe sibling" match.
+    let el = appIframe;
+    let appBlock = null;
+    for (let i = 0; i < 22 && el.parentElement && el !== document.body; i++) {
+      el = el.parentElement;
+      const children = [...el.children].filter(c => c.id !== PANEL_ID);
+      if (children.length < 2) continue;
+      const hasIframeBranch = children.some(c => c === appIframe || c.contains(appIframe));
+      const hasOtherBranch  = children.some(c => !c.contains(appIframe) && c.getBoundingClientRect().height > 0);
+      if (hasIframeBranch && hasOtherBranch) { appBlock = el; break; }
+    }
+    if (appBlock && appBlock.parentElement) {
+      logStep_('Dock: app-block found at depth ' + [...document.body.querySelectorAll('*')].indexOf(appBlock));
+      return appBlock.parentElement;
+    }
+
+    // 4. Fallback: tallest scroll container found while walking up.
+    el = appIframe;
     const scrollEls = [];
-    for (const appIframe of iframes) {
-      let el = appIframe;
-      for (let i = 0; i < 18 && el.parentElement && el !== document.body; i++) {
-        el = el.parentElement;
-        const oy = getComputedStyle(el).overflowY;
-        if ((oy === 'auto' || oy === 'scroll') && el.clientHeight > 100) scrollEls.push(el);
-      }
+    for (let i = 0; i < 18 && el.parentElement && el !== document.body; i++) {
+      el = el.parentElement;
+      const oy = getComputedStyle(el).overflowY;
+      if ((oy === 'auto' || oy === 'scroll') && el.clientHeight > 100) scrollEls.push(el);
     }
-
-    if (scrollEls.length) {
-      // The tallest scroll container is the apps sidebar, not an inner app content div.
-      return scrollEls.reduce((best, el) => el.clientHeight > best.clientHeight ? el : best);
-    }
-    return iframes[0].parentElement;
+    if (scrollEls.length) return scrollEls.reduce((best, c) => c.clientHeight > best.clientHeight ? c : best);
+    return appIframe.parentElement;
   }
 
   function mountDocked_(panel) {
@@ -3287,7 +3305,8 @@
     // Standalone block at the top of the Apps panel — independent of ChannelReply.
     if (panel.parentElement !== mount || panel.previousElementSibling) {
       mount.insertBefore(panel, mount.firstChild);
-      logStep_('Dock: mounted as standalone block in Apps panel');
+      const mountTag = mount.tagName + (mount.className ? '.' + mount.className.toString().trim().split(/\s+/)[0] : '');
+      logStep_('Dock: mounted in ' + mountTag + ' (kids=' + mount.children.length + ')');
     }
     panel.classList.add('sp-docked');
     panel.classList.remove('minimized');
