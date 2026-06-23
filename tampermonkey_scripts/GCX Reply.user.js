@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         GCX Reply
 // @namespace    https://spigen.com/gcx
-// @version      2.17.8
+// @version      2.17.9
 // @description  Amazon order data via GAS web app + Spigen product info + Zendesk auto-fill
 // @author       Spigen GCX
 // @updateURL    https://raw.githubusercontent.com/codingintheusa0402/spigen-gcx-automation/main/tampermonkey_scripts/GCX%20Reply.user.js
@@ -2361,7 +2361,12 @@
       font-weight: 500;
       word-break: break-word;
       line-height: 1.45;
+      display: flex;
+      align-items: flex-start;
+      gap: 4px;
     }
+    .sp-item-name .sp-copy { opacity: 0; flex-shrink: 0; margin-top: 1px; }
+    .sp-item-card:hover .sp-item-name .sp-copy { opacity: 0.85; }
 
     /* ── Step log ───────────────────────────────────────────────────────── */
     #sp-load-log {
@@ -2408,10 +2413,7 @@
       width: 100% !important;
       max-width: 100% !important;
       height: auto;
-      /* Cap the docked panel at ~90% of the viewport so #sp-panel-body can
-         scroll within it — same mechanism as floating mode. Without this, the
-         panel grows to full content height and nothing overflows. */
-      max-height: calc(100vh - 120px) !important;
+      max-height: none !important;
       left: auto !important; top: auto !important; right: auto !important;
       margin: 0 0 10px 0;
       border-radius: 10px;
@@ -2773,7 +2775,7 @@
       return `<div class="sp-item-card">
         <div class="sp-item-asin" title="${esc(asin)}">${esc(asin)}</div>
         ${sku ? `<div class="sp-item-sku" title="${esc(sku)}">${esc(sku)}</div>` : ''}
-        <div class="sp-item-name">${esc(qty)}× ${esc(title)}</div>
+        <div class="sp-item-name"><span>${esc(qty)}× ${esc(title)}</span><button class="sp-copy" data-copy="${esc(title)}" title="Copy" tabindex="-1" aria-label="Copy">${COPY_SVG}</button></div>
       </div>`;
     }).join('');
 
@@ -3246,7 +3248,12 @@
 
         const startX = e.clientX, startY = e.clientY;
         const startLeft = r.left, startTop = r.top;
-        const startW = r.width,   startH   = r.height;
+        const startW = r.width;
+        // In docked mode use offsetHeight (unclipped CSS height) not BCR height
+        // which is capped to the mount's visible area and causes wrong startH.
+        const startH = isDocked ? panel.offsetHeight : r.height;
+        // Capture mount for scroll-compensation during docked resize
+        const mountEl = isDocked ? panel.parentElement : null;
 
         const onMove = ev => {
           const dx = ev.clientX - startX;
@@ -3266,7 +3273,16 @@
             }
           }
           // Bottom-drag resizes height in both floating and docked modes
-          if (h.bottom) panel.style.height = Math.max(MIN_H, startH + dy) + 'px';
+          if (h.bottom) {
+            const newH = Math.max(MIN_H, startH + dy);
+            panel.style.height = newH + 'px';
+            // Docked: the panel grows inside a scrollable mount. Scroll the mount
+            // so the resize handle stays visible under the cursor (1:1 tracking).
+            if (isDocked && mountEl) {
+              const overflow = newH - mountEl.clientHeight;
+              mountEl.scrollTop = overflow > 0 ? overflow : 0;
+            }
+          }
           if (panel._glass) { panel._glass.show(); panel._glass._resize(); }
         };
 
@@ -3876,9 +3892,13 @@
         const btn = e.target.closest && e.target.closest('.sp-copy');
         if (!btn) return;
         e.preventDefault(); e.stopPropagation();
-        const rowEl = btn.closest('.sp-row');
-        const valEl = rowEl && (rowEl.querySelector('.sp-val') || rowEl.querySelector('a'));
-        const text = (valEl ? valEl.textContent : '').trim();
+        // data-copy attribute wins (used by item-name buttons that aren't in .sp-row)
+        let text = btn.dataset.copy ? btn.dataset.copy.trim() : '';
+        if (!text) {
+          const rowEl = btn.closest('.sp-row');
+          const valEl = rowEl && (rowEl.querySelector('.sp-val') || rowEl.querySelector('a'));
+          text = (valEl ? valEl.textContent : '').trim();
+        }
         if (!text || text === '—') return;
         copyText_(text).then(() => {
           btn.classList.add('copied');
