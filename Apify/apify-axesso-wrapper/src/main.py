@@ -4,22 +4,14 @@ Accepts the SAME input format as the Axesso actor directly
 (an `input` array of {asin, domainCode, filterByStar, ...} objects),
 passes it straight to Axesso, filters penalty/invalid rows, and pushes
 clean reviews to this actor's own dataset.
-
-ownerToken: caller's own Apify API token used for the Axesso sub-actor call.
-Required because Apify restricts the platform-injected token from calling
-PAY_PER_EVENT actors on behalf of other accounts.
 """
 import asyncio
-import os
 
-import httpx
 from apify import Actor
-from apify_client import ApifyClientAsync
 
 AXESSO_ACTOR_ID = 'ZebkvH3nVOrafqr5T'
 _PENALTY_PREFIX = 'NO_REVIEWS_PENALTY'
 _PAGE_LIMIT = 50_000
-_POLL_INTERVAL = 10
 
 
 def _is_valid(item: dict, filter_mode: str) -> bool:
@@ -32,35 +24,6 @@ def _is_valid(item: dict, filter_mode: str) -> bool:
     return True
 
 
-async def _call_axesso_and_wait(run_input: dict, token: str) -> dict:
-    async with httpx.AsyncClient(timeout=30) as client:
-        resp = await client.post(
-            f'https://api.apify.com/v2/acts/{AXESSO_ACTOR_ID}/runs',
-            params={'token': token},
-            json=run_input,
-        )
-        resp.raise_for_status()
-        run = resp.json()['data']
-        run_id = run['id']
-        Actor.log.info('Axesso run started: %s', run_id)
-
-    async with httpx.AsyncClient(timeout=30) as client:
-        while True:
-            await asyncio.sleep(_POLL_INTERVAL)
-            r = await client.get(
-                f'https://api.apify.com/v2/actor-runs/{run_id}',
-                params={'token': token},
-            )
-            r.raise_for_status()
-            run = r.json()['data']
-            status = run.get('status', '')
-            Actor.log.info('Axesso run %s: %s', run_id, status)
-            if status in ('SUCCEEDED', 'FAILED', 'ABORTED', 'TIMED-OUT'):
-                break
-
-    return run
-
-
 async def main():
     async with Actor:
         inp = await Actor.get_input() or {}
@@ -69,25 +32,15 @@ async def main():
             input_entries: list[dict] = inp
             filter_mode: str = 'strict'
             max_budget_usd: float | None = None
-            owner_token: str | None = None
         else:
             input_entries: list[dict] = inp.get('input', [])
             filter_mode: str = inp.get('filterMode', 'strict')
             max_budget_usd: float | None = inp.get('maxBudgetUsd')
-            owner_token: str | None = inp.get('ownerToken')
 
         if not input_entries:
             Actor.log.error(
                 'No input entries found. Provide an "input" array of '
                 '{asin, domainCode, filterByStar, ...} objects.'
-            )
-            await Actor.fail(exit_code=1)
-            return
-
-        token = owner_token or os.environ.get('APIFY_TOKEN', '')
-        if not token:
-            Actor.log.error(
-                'No API token found. Provide "ownerToken" in the input with your Apify API token.'
             )
             await Actor.fail(exit_code=1)
             return
@@ -102,31 +55,28 @@ async def main():
             axesso_input['maxTotalChargeUsd'] = float(max_budget_usd)
 
         try:
-            run = await _call_axesso_and_wait(axesso_input, token)
-        except httpx.HTTPStatusError as exc:
-            Actor.log.error('Axesso HTTP error %s: %s', exc.response.status_code, exc.response.text)
-            await Actor.fail(exit_code=1)
-            return
+            run = await Actor.call(
+                actor_id=AXESSO_ACTOR_ID,
+                run_input=axesso_input,
+            )
         except Exception as exc:
             Actor.log.error('Axesso call failed: %s', exc)
             await Actor.fail(exit_code=1)
             return
 
-        status = run.get('status', 'unknown')
-        if status != 'SUCCEEDED':
+        if run is None or run.get('status') != 'SUCCEEDED':
+            status = run.get('status', 'unknown') if run else 'unknown'
             Actor.log.error('Axesso run ended with status=%s', status)
             await Actor.fail(exit_code=1)
             return
 
         await Actor.set_status_message('Fetching and filtering results…')
 
-        client = ApifyClientAsync(token=token)
+        src_dataset = await Actor.open_dataset(run['defaultDatasetId'])
         raw: list[dict] = []
         offset = 0
         while True:
-            page = await client.dataset(run['defaultDatasetId']).list_items(
-                limit=_PAGE_LIMIT, offset=offset
-            )
+            page = await src_dataset.get_data(limit=_PAGE_LIMIT, offset=offset)
             raw.extend(page.items)
             if len(page.items) < _PAGE_LIMIT:
                 break
