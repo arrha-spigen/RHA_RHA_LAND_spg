@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         GCX Reply
 // @namespace    https://spigen.com/gcx
-// @version      2.17.6
+// @version      2.17.7
 // @description  Amazon order data via GAS web app + Spigen product info + Zendesk auto-fill
 // @author       Spigen GCX
 // @updateURL    https://raw.githubusercontent.com/codingintheusa0402/spigen-gcx-automation/main/tampermonkey_scripts/GCX%20Reply.user.js
@@ -2365,19 +2365,49 @@
 
     /* ── Step log ───────────────────────────────────────────────────────── */
     #sp-load-log {
+      flex-shrink: 0;
+      position: relative;
+      z-index: 2;
+      border-top: 1px solid rgba(0,0,0,0.07);
+    }
+    #sp-load-log:not(:has(#sp-log-entries > *)) { display: none; }
+    #sp-log-header {
+      display: flex;
+      align-items: center;
+      padding: 2px 14px 2px 10px;
+      gap: 6px;
+      cursor: pointer;
+      user-select: none;
+    }
+    #sp-log-header:hover { background: rgba(0,0,0,0.03); }
+    #sp-log-label {
+      font-size: 9.5px;
+      font-weight: 600;
+      letter-spacing: 0.06em;
+      color: #a0a8b0;
+      flex: 1;
+    }
+    #sp-log-toggle {
+      font-size: 9px;
+      color: #b0b8c0;
+      background: none;
+      border: none;
+      cursor: pointer;
+      padding: 0;
+      line-height: 1;
+    }
+    #sp-log-entries {
       font-size: 10px;
       color: #6e6e73;
-      padding: 3px 14px 4px;
-      border-top: 1px solid rgba(0,0,0,0.07);
+      padding: 2px 14px 4px;
       max-height: 56px;
       overflow-y: auto;
       font-family: monospace;
       line-height: 1.6;
-      flex-shrink: 0;
-      position: relative;
-      z-index: 2;
     }
-    #sp-load-log:empty { display: none; }
+    #sp-load-log.sp-log-collapsed #sp-log-entries { display: none; }
+    #sp-load-log.sp-log-collapsed #sp-log-toggle::after { content: '▼ show'; }
+    #sp-load-log:not(.sp-log-collapsed) #sp-log-toggle::after { content: '▲ hide'; }
 
     /* ── Toggle button (shown when panel is closed) ──────────────────────── */
     #sp-toggle-btn {
@@ -2401,7 +2431,7 @@
 
     /* ── Docked mode: render inline inside Zendesk's Apps panel ───────────── */
     #sp-order-panel.sp-docked {
-      position: static !important;
+      position: relative !important;
       width: 100% !important;
       max-width: 100% !important;
       height: auto !important;
@@ -2417,8 +2447,19 @@
       z-index: auto;
     }
     #sp-order-panel.sp-docked #sp-glass-layer,
-    #sp-order-panel.sp-docked #sp-glass-canvas,
-    #sp-order-panel.sp-docked .sp-re { display: none !important; }
+    #sp-order-panel.sp-docked #sp-glass-canvas { display: none !important; }
+    /* In docked mode, hide all resize grips except the south (bottom-drag) one */
+    #sp-order-panel.sp-docked .sp-re:not(.sp-re-s) { display: none !important; }
+    #sp-order-panel.sp-docked .sp-re-s {
+      display: block;
+      height: 8px;
+      cursor: row-resize;
+      background: transparent;
+      border-radius: 0 0 10px 10px;
+      transition: background 0.15s;
+    }
+    #sp-order-panel.sp-docked .sp-re-s:hover { background: rgba(0,0,0,0.07); }
+    #sp-order-panel.sp-docked.minimized .sp-re-s { display: none !important; }
     /* Native Zendesk app-section chrome look (matches ChannelReply's block). */
     #sp-order-panel.sp-docked {
       border: 1px solid #e9ebed;
@@ -2614,7 +2655,13 @@
         </div>
         <div id="sp-product-result"></div>
       </div>
-      <div id="sp-load-log"></div>
+      <div id="sp-load-log">
+        <div id="sp-log-header">
+          <span id="sp-log-label">LOG</span>
+          <button id="sp-log-toggle"></button>
+        </div>
+        <div id="sp-log-entries"></div>
+      </div>
     `;
     return d;
   }
@@ -3098,13 +3145,13 @@
   }
 
   function logStep_(msg) {
-    const el = document.getElementById('sp-load-log');
-    if (!el) return;
+    const entries = document.getElementById('sp-log-entries');
+    if (!entries) return;
     const t    = new Date().toLocaleTimeString('en-US', { hour12: false, hour: '2-digit', minute: '2-digit', second: '2-digit' });
     const line = document.createElement('div');
     line.textContent = `${t}  ${msg}`;
-    el.appendChild(line);
-    el.scrollTop = el.scrollHeight;
+    entries.appendChild(line);
+    entries.scrollTop = entries.scrollHeight;
   }
 
   // ── Auto-detect order IDs from visible ticket text ─────────────────────
@@ -3220,11 +3267,15 @@
         e.preventDefault();
         e.stopPropagation();
 
-        // Normalize to left/top anchor so all resize math is consistent
+        const isDocked = panel.classList.contains('sp-docked');
+
         const r = panel.getBoundingClientRect();
-        panel.style.left  = r.left + 'px';
-        panel.style.right = 'auto';
-        panel.style.top   = r.top  + 'px';
+        if (!isDocked) {
+          // Normalize to left/top anchor so all resize math is consistent
+          panel.style.left  = r.left + 'px';
+          panel.style.right = 'auto';
+          panel.style.top   = r.top  + 'px';
+        }
 
         const startX = e.clientX, startY = e.clientY;
         const startLeft = r.left, startTop = r.top;
@@ -3233,30 +3284,37 @@
         const onMove = ev => {
           const dx = ev.clientX - startX;
           const dy = ev.clientY - startY;
-          if (h.right) panel.style.width  = Math.max(MIN_W, Math.min(MAX_W, startW + dx)) + 'px';
-          if (h.left) {
-            const nw = Math.max(MIN_W, Math.min(MAX_W, startW - dx));
-            panel.style.width = nw + 'px';
-            panel.style.left  = (startLeft + startW - nw) + 'px';
-            panel.style.right = 'auto';
+          if (!isDocked) {
+            if (h.right) panel.style.width  = Math.max(MIN_W, Math.min(MAX_W, startW + dx)) + 'px';
+            if (h.left) {
+              const nw = Math.max(MIN_W, Math.min(MAX_W, startW - dx));
+              panel.style.width = nw + 'px';
+              panel.style.left  = (startLeft + startW - nw) + 'px';
+              panel.style.right = 'auto';
+            }
+            if (h.top) {
+              const nh = Math.max(MIN_H, startH - dy);
+              panel.style.height = nh + 'px';
+              panel.style.top    = (startTop + startH - nh) + 'px';
+            }
           }
+          // Bottom-drag resizes height in both floating and docked modes
           if (h.bottom) panel.style.height = Math.max(MIN_H, startH + dy) + 'px';
-          if (h.top) {
-            const nh = Math.max(MIN_H, startH - dy);
-            panel.style.height = nh + 'px';
-            panel.style.top    = (startTop + startH - nh) + 'px';
-          }
           if (panel._glass) { panel._glass.show(); panel._glass._resize(); }
         };
 
         const onUp = () => {
           if (panel._glass) panel._glass.hide();
-          saveUi({
-            x: panel.style.left ? parseInt(panel.style.left) : null,
-            y: panel.style.top  ? parseInt(panel.style.top)  : null,
-            w: panel.offsetWidth,
-            h: panel.offsetHeight,
-          });
+          if (isDocked) {
+            saveUi({ dockH: panel.offsetHeight });
+          } else {
+            saveUi({
+              x: panel.style.left ? parseInt(panel.style.left) : null,
+              y: panel.style.top  ? parseInt(panel.style.top)  : null,
+              w: panel.offsetWidth,
+              h: panel.offsetHeight,
+            });
+          }
           document.body.style.cursor     = '';
           document.body.style.userSelect = '';
           document.removeEventListener('mousemove', onMove);
@@ -3493,6 +3551,10 @@
     }
     panel.classList.add('sp-docked');
 
+    // Restore user-set docked height (from bottom-drag resize)
+    const savedDockH = loadUi().dockH;
+    if (savedDockH && savedDockH > 80) panel.style.height = savedDockH + 'px';
+
     // The new Zendesk omnipanel-pane-wrapper-apps container uses flex-direction:row,
     // which places GCX Reply and ChannelReply side-by-side instead of stacked.
     // Force column layout so apps stack vertically.
@@ -3673,6 +3735,18 @@
       e.stopPropagation();
       drawer.classList.toggle('sp-settings-open');
     });
+
+    // Log section toggle (▲ hide / ▼ show)
+    const logWrap = panel.querySelector('#sp-load-log');
+    const logHeader = panel.querySelector('#sp-log-header');
+    if (logWrap && logHeader) {
+      const ui = loadUi();
+      if (ui.logCollapsed) logWrap.classList.add('sp-log-collapsed');
+      logHeader.addEventListener('click', () => {
+        const collapsed = logWrap.classList.toggle('sp-log-collapsed');
+        saveUi({ logCollapsed: collapsed });
+      });
+    }
   }
 
   // ── Init ──────────────────────────────────────────────────────────────────
@@ -3938,8 +4012,8 @@
       if (notesToggleEl) notesToggleEl.checked = false;
       const notesSectionEl = panel.querySelector('#sp-notes-section');
       if (notesSectionEl) notesSectionEl.style.display = 'none';
-      const logEl = document.getElementById('sp-load-log');
-      if (logEl) logEl.innerHTML = '';
+      const logEntries = document.getElementById('sp-log-entries');
+      if (logEntries) logEntries.innerHTML = '';
       setFillStatus(panel, '');
       _panelSession++;
     }
