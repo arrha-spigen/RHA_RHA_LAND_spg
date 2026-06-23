@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         GCX Reply
 // @namespace    https://spigen.com/gcx
-// @version      2.17.10
+// @version      2.17.11
 // @description  Amazon order data via GAS web app + Spigen product info + Zendesk auto-fill
 // @author       Spigen GCX
 // @updateURL    https://raw.githubusercontent.com/codingintheusa0402/spigen-gcx-automation/main/tampermonkey_scripts/GCX%20Reply.user.js
@@ -3548,13 +3548,26 @@
   }
 
   function mountDocked_(panel) {
+    // Set up the DOM-watch observer BEFORE any early return so it is always
+    // active — even when the Apps pane isn't rendered yet (Zendesk lazy-renders
+    // it; we need to catch the moment it appears in the DOM).
+    if (!_dockObserver) {
+      _dockObserver = new MutationObserver(() => {
+        if (!loadUi().dockMode || panel.isConnected) return;
+        // Quick guard: only proceed when the Apps pane wrapper is now present.
+        if (document.querySelector('[data-test-id="omnipanel-pane-wrapper-apps"]')) {
+          mountDocked_(panel);
+        }
+      });
+      _dockObserver.observe(document.body, { childList: true, subtree: true });
+    }
+
     const mount = findAppsPanelMount_();
     if (!mount) {
       if (!panel.isConnected) {
         if (loadUi().dockMode) {
-          // Dock mode: keep panel detached (hidden) so it never shows as floating.
-          // The heartbeat will call mountDocked_() again once the Apps panel loads.
-          logStep_('Dock: mount not found — staying detached, heartbeat will retry.');
+          // Dock mode: keep panel detached; observer + heartbeat will retry.
+          logStep_('Dock: mount not found — staying detached, observer + heartbeat will retry.');
         } else {
           panel.classList.remove('sp-docked');
           document.body.appendChild(panel);
@@ -3591,6 +3604,8 @@
     // New Zendesk omnipanel: the content area is shared across sections
     // (Apps, Customer Context, Knowledge, etc.). Sync GCX Reply's visibility
     // with the Apps icon button so it only shows when Apps section is active.
+    // Always re-attach to the *current* Apps icon DOM element — Zendesk
+    // replaces this element on every SPA navigation, making the old observer stale.
     const appsIconBtn_ = document.querySelector('[data-test-id="omnipanel-selector-item-apps"]');
     if (appsIconBtn_) {
       const syncSectionVis_ = () => {
@@ -3608,18 +3623,6 @@
       panel._gcxHiddenBySection = false;
       panel.style.display = '';
       if (panel._sectionObserver) { panel._sectionObserver.disconnect(); panel._sectionObserver = null; }
-    }
-
-    // Re-mount if Zendesk re-renders the apps panel and drops our node.
-    if (!_dockObserver) {
-      _dockObserver = new MutationObserver(() => {
-        if (!loadUi().dockMode) return;
-        if (!panel.isConnected) {
-          const m = findAppsPanelMount_();
-          if (m) { m.insertBefore(panel, m.firstChild); panel.classList.add('sp-docked'); }
-        }
-      });
-      _dockObserver.observe(document.body, { childList: true, subtree: true });
     }
   }
 
@@ -4089,6 +4092,7 @@
 
     let lastTicketId = location.pathname.match(/\/tickets\/(\d+)/)?.[1];
     let navTimer = null;
+    let _mountNavTimer = null;
     function onNav() {
       const newId = location.pathname.match(/\/tickets\/(\d+)/)?.[1];
       if (newId) {
@@ -4102,6 +4106,14 @@
           resetPanel();
           clearTimeout(navTimer);
           navTimer = setTimeout(autoDetectAll, 1500);
+          // Re-run mountDocked_() after each ticket navigation so that the section
+          // observer re-attaches to the fresh DOM elements Zendesk creates on SPA
+          // render. Without this, the stale observer never fires when the user
+          // clicks the Apps icon after a ticket switch, leaving the panel hidden.
+          if (loadUi().dockMode) {
+            clearTimeout(_mountNavTimer);
+            _mountNavTimer = setTimeout(() => mountDocked_(panel), 500);
+          }
         }
       } else {
         // Left ticket pages (filters, views, etc.) — always collapse
@@ -4224,7 +4236,7 @@
     if (!document.getElementById(PANEL_ID) && !document.getElementById('sp-toggle-btn')) {
       init();
     }
-  }, 1500);
+  }, 600);
 
   if (typeof setTimeout === 'function') setTimeout(init, 800);
 })();
