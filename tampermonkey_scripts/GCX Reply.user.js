@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         GCX Reply
 // @namespace    https://spigen.com/gcx
-// @version      2.16.9
+// @version      2.17.0
 // @description  Amazon order data via GAS web app + Spigen product info + Zendesk auto-fill
 // @author       Spigen GCX
 // @updateURL    https://raw.githubusercontent.com/codingintheusa0402/spigen-gcx-automation/main/tampermonkey_scripts/GCX%20Reply.user.js
@@ -3308,11 +3308,6 @@
     }
     console.log('Step2: no [data-app-id] matched center-X threshold');
 
-    // 3. Walk up from any zdusercontent iframe (ChannelReply or any sidebar app).
-    //    Only runs if step 2 failed (e.g. no apps loaded / ChannelReply iframe absent).
-    const appIframe = [...document.querySelectorAll('iframe')]
-      .find(f => /zdusercontent\.com/.test(f.src || ''));
-
     // 3. zdusercontent iframe walk-up
     const allIframes = [...document.querySelectorAll('iframe')];
     console.log('Step3: iframes total=' + allIframes.length);
@@ -3396,14 +3391,12 @@
   function mountDocked_(panel) {
     const mount = findAppsPanelMount_();
     if (!mount) {
-      // Ensure the panel is at least visible as floating while we retry —
-      // a detached panel is completely invisible, which is worse than floating.
+      // Ensure the panel is visible as floating while heartbeat retries docking.
       if (!panel.isConnected) {
         panel.classList.remove('sp-docked');
         document.body.appendChild(panel);
-        logStep_('Dock: mount not found — showing floating, will retry.');
+        logStep_('Dock: mount not found — showing floating, heartbeat will retry.');
       }
-      setTimeout(() => { if (loadUi().dockMode) { const m = findAppsPanelMount_(); if (m) mountDocked_(panel); } }, 1200);
       return;
     }
     // Standalone block at the top of the Apps panel — independent of ChannelReply.
@@ -3980,10 +3973,15 @@
   if (typeof setInterval === 'function') setInterval(() => {
     // Dock mode: Zendesk's React re-render detaches our injected node on ticket
     // navigation. Keep the SAME panel element and re-insert whenever needed.
-    // Also remount if the panel is connected but invisible (offsetHeight === 0),
-    // which happens when it ends up inside a collapsed ChannelReply section.
+    // Also retry from floating-fallback (panel on body while dockMode=true) in
+    // case the Apps panel flyout was closed when we first tried to mount.
     if (loadUi().dockMode === true && _panelEl) {
-      if (!_panelEl.isConnected || _panelEl.offsetHeight === 0) mountDocked_(_panelEl);
+      const inFloatingFallback = _panelEl.isConnected &&
+        _panelEl.parentElement === document.body &&
+        !_panelEl.classList.contains('sp-docked');
+      if (!_panelEl.isConnected || _panelEl.offsetHeight === 0 || inFloatingFallback) {
+        mountDocked_(_panelEl);
+      }
       return;
     }
     if (!document.getElementById(PANEL_ID) && !document.getElementById('sp-toggle-btn')) {
