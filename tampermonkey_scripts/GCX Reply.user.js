@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         GCX Reply
 // @namespace    https://spigen.com/gcx
-// @version      2.16.8
+// @version      2.16.9
 // @description  Amazon order data via GAS web app + Spigen product info + Zendesk auto-fill
 // @author       Spigen GCX
 // @updateURL    https://raw.githubusercontent.com/codingintheusa0402/spigen-gcx-automation/main/tampermonkey_scripts/GCX%20Reply.user.js
@@ -141,7 +141,7 @@
   };
 
   const FULFILLMENT_MAP = { AFN: 'fba', MFN: 'merchant__fbm_' };
-  const SCRIPT_VER = (typeof GM_info !== 'undefined' ? GM_info?.script?.version : null) || '2.16.8';
+  const SCRIPT_VER = (typeof GM_info !== 'undefined' ? GM_info?.script?.version : null) || '2.16.9';
   const sleep = ms => new Promise(r => setTimeout(r, ms));
 
   // ── Module state ─────────────────────────────────────────────────────────
@@ -3269,33 +3269,59 @@
   let _dockObserver = null;
 
   function findAppsPanelMount_() {
+    const W = window.innerWidth, H = window.innerHeight;
+    console.group('[GCX] findAppsPanelMount_ W=' + W + ' H=' + H);
+
     // 1. Explicit Zendesk data-test-id selectors.
     const direct = document.querySelector(
       '[data-test-id="ticket-apps-pane"], [data-test-id="apps-tray"], ' +
       '[data-test-id="omnipanel-apps"], [data-test-id="ticket_sidebar"], ' +
       '[data-test-id="apps-container"], [data-test-id="sidebar-apps"]'
     );
-    if (direct) return direct;
+    if (direct) { console.log('Step1 HIT:', direct); console.groupEnd(); return direct; }
+    console.log('Step1: no data-test-id match');
 
     // 2. [data-app-id] filtered by CENTER position — Zendesk adds this attribute to
     //    each installed app wrapper (ChannelReply block, etc.). Using center-X instead
     //    of left edge is robust across different window widths. Center X > 60% of
     //    viewport means the element sits in the right portion of the page (Apps panel),
     //    not in the center ticket-editor area.
-    const sidebarApp = [...document.querySelectorAll('[data-app-id]')].find(el => {
+    const allAppIds = [...document.querySelectorAll('[data-app-id]')];
+    console.log('Step2: [data-app-id] count =', allAppIds.length);
+    allAppIds.forEach(el => {
+      const r = el.getBoundingClientRect();
+      console.log('  data-app-id', el.getAttribute('data-app-id'),
+        'tag=' + el.tagName, 'left=' + Math.round(r.left), 'w=' + Math.round(r.width),
+        'centerX=' + Math.round(r.left + r.width/2), 'h=' + Math.round(r.height),
+        '60%threshold=' + Math.round(W * 0.6));
+    });
+    const sidebarApp = allAppIds.find(el => {
       const r = el.getBoundingClientRect();
       if (r.width === 0 || r.height === 0) return false;
-      return (r.left + r.width / 2) > window.innerWidth * 0.6;
+      return (r.left + r.width / 2) > W * 0.6;
     });
     if (sidebarApp?.parentElement) {
+      console.log('Step2 HIT:', sidebarApp, '→ parent:', sidebarApp.parentElement);
+      console.groupEnd();
       logStep_('Dock: data-app-id found');
       return sidebarApp.parentElement;
     }
+    console.log('Step2: no [data-app-id] matched center-X threshold');
 
     // 3. Walk up from any zdusercontent iframe (ChannelReply or any sidebar app).
     //    Only runs if step 2 failed (e.g. no apps loaded / ChannelReply iframe absent).
     const appIframe = [...document.querySelectorAll('iframe')]
       .find(f => /zdusercontent\.com/.test(f.src || ''));
+
+    // 3. zdusercontent iframe walk-up
+    const allIframes = [...document.querySelectorAll('iframe')];
+    console.log('Step3: iframes total=' + allIframes.length);
+    allIframes.forEach(f => {
+      const r = f.getBoundingClientRect();
+      console.log('  iframe src=' + (f.src||'').slice(0,60), 'display=' + getComputedStyle(f).display, 'left=' + Math.round(r.left), 'w=' + Math.round(r.width));
+    });
+    const appIframe = allIframes.find(f => /zdusercontent\.com/.test(f.src || ''));
+    console.log('Step3: zdusercontent iframe', appIframe ? 'FOUND src=' + appIframe.src.slice(0,60) : 'NOT FOUND');
 
     if (appIframe) {
       let el = appIframe;
@@ -3309,6 +3335,8 @@
         if (hasIframeBranch && hasOtherBranch) { appBlock = el; break; }
       }
       if (appBlock?.parentElement) {
+        console.log('Step3 HIT app-block:', appBlock, '→ parent:', appBlock.parentElement);
+        console.groupEnd();
         logStep_('Dock: app-block found');
         return appBlock.parentElement;
       }
@@ -3319,35 +3347,49 @@
         const oy = getComputedStyle(el).overflowY;
         if ((oy === 'auto' || oy === 'scroll') && el.clientHeight > 100) scrollEls.push(el);
       }
-      if (scrollEls.length) return scrollEls.reduce((best, c) => c.clientHeight > best.clientHeight ? c : best);
+      if (scrollEls.length) {
+        const best = scrollEls.reduce((b, c) => c.clientHeight > b.clientHeight ? c : b);
+        console.log('Step3 scroll fallback:', best);
+        console.groupEnd();
+        return best;
+      }
+      console.log('Step3 iframe.parentElement fallback:', appIframe.parentElement);
+      console.groupEnd();
       return appIframe.parentElement;
     }
 
     // 4. Semantic: <aside> or complementary role on the right side.
     const aside = [...document.querySelectorAll('aside, [role="complementary"]')].find(el => {
       const r = el.getBoundingClientRect();
-      return r.left > window.innerWidth * 0.4 && r.height > window.innerHeight * 0.3;
+      return r.left > W * 0.4 && r.height > H * 0.3;
     });
-    if (aside) return aside;
+    if (aside) { console.log('Step4 aside HIT:', aside); console.groupEnd(); return aside; }
+    console.log('Step4: no aside/complementary on right side');
 
     // 5. "Apps" heading text — Zendesk always renders this in the apps panel header.
-    //    Search broadly; use center-X and loose y-threshold to handle different layouts.
     const appsHeading = [...document.querySelectorAll('h1,h2,h3,h4,strong,b,span,label,div')]
       .find(el => {
         if (el.children.length > 0) return false;
         if (el.textContent.trim() !== 'Apps') return false;
         const r = el.getBoundingClientRect();
-        return (r.left + r.width / 2) > window.innerWidth * 0.4 && r.top < window.innerHeight * 0.4;
+        return (r.left + r.width / 2) > W * 0.4 && r.top < H * 0.4;
       });
+    console.log('Step5: "Apps" heading', appsHeading ? 'FOUND' : 'NOT FOUND', appsHeading || '');
     if (appsHeading) {
       let el = appsHeading.parentElement;
       for (let i = 0; i < 15 && el && el !== document.body; i++) {
         const r = el.getBoundingClientRect();
-        if (r.height > window.innerHeight * 0.4 && el.children.length >= 1) return el;
+        if (r.height > H * 0.4 && el.children.length >= 1) {
+          console.log('Step5 HIT:', el);
+          console.groupEnd();
+          return el;
+        }
         el = el.parentElement;
       }
     }
 
+    console.log('ALL STEPS FAILED — returning null');
+    console.groupEnd();
     return null;
   }
 
