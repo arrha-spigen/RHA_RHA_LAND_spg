@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         GCX Reply
 // @namespace    https://spigen.com/gcx
-// @version      2.16.5
+// @version      2.16.6
 // @description  Amazon order data via GAS web app + Spigen product info + Zendesk auto-fill
 // @author       Spigen GCX
 // @updateURL    https://raw.githubusercontent.com/codingintheusa0402/spigen-gcx-automation/main/tampermonkey_scripts/GCX%20Reply.user.js
@@ -141,7 +141,7 @@
   };
 
   const FULFILLMENT_MAP = { AFN: 'fba', MFN: 'merchant__fbm_' };
-  const SCRIPT_VER = (typeof GM_info !== 'undefined' ? GM_info?.script?.version : null) || '2.16.5';
+  const SCRIPT_VER = (typeof GM_info !== 'undefined' ? GM_info?.script?.version : null) || '2.16.6';
   const sleep = ms => new Promise(r => setTimeout(r, ms));
 
   // ── Module state ─────────────────────────────────────────────────────────
@@ -3277,48 +3277,57 @@
     );
     if (direct) return direct;
 
-    // 2. data-app-id: Zendesk wraps each installed app in a container with this attr.
-    //    Its parent is the apps-list — exactly what we want.
-    const appById = document.querySelector('[data-app-id]');
-    if (appById && appById.parentElement) return appById.parentElement;
-
+    // 2. Walk up from any zdusercontent iframe (ChannelReply or any sidebar app).
+    //    NOTE: data-app-id CANNOT be used without position-filtering — Zendesk also puts
+    //    data-app-id on ticket-editor apps in the center content area, so an unfiltered
+    //    querySelector would mount our panel in the wrong location on non-ABM tickets.
     const appIframe = [...document.querySelectorAll('iframe')]
       .find(f => /zdusercontent\.com/.test(f.src || ''));
-    if (!appIframe) return null;
 
-    // 3. Walk up from the ChannelReply iframe to find the ChannelReply APP BLOCK —
-    //    the element whose direct children include BOTH:
-    //      a) the iframe-branch (content area), AND
-    //      b) a non-iframe sibling (the app header row: "ChannelReply 3" + collapse btn).
-    //    That element's PARENT is the apps-panel container.
-    //
-    //    Our own panel is excluded from child checks so a previously wrong-mounted
-    //    GCX Reply div doesn't create a false "non-iframe sibling" match.
-    let el = appIframe;
-    let appBlock = null;
-    for (let i = 0; i < 22 && el.parentElement && el !== document.body; i++) {
-      el = el.parentElement;
-      const children = [...el.children].filter(c => c.id !== PANEL_ID);
-      if (children.length < 2) continue;
-      const hasIframeBranch = children.some(c => c === appIframe || c.contains(appIframe));
-      const hasOtherBranch  = children.some(c => !c.contains(appIframe) && c.getBoundingClientRect().height > 0);
-      if (hasIframeBranch && hasOtherBranch) { appBlock = el; break; }
-    }
-    if (appBlock && appBlock.parentElement) {
-      logStep_('Dock: app-block found at depth ' + [...document.body.querySelectorAll('*')].indexOf(appBlock));
-      return appBlock.parentElement;
+    if (appIframe) {
+      // Find the app BLOCK: element whose children include both the iframe branch
+      // AND a non-iframe sibling (app header). Its parent is the apps-panel list.
+      let el = appIframe;
+      let appBlock = null;
+      for (let i = 0; i < 22 && el.parentElement && el !== document.body; i++) {
+        el = el.parentElement;
+        const children = [...el.children].filter(c => c.id !== PANEL_ID);
+        if (children.length < 2) continue;
+        const hasIframeBranch = children.some(c => c === appIframe || c.contains(appIframe));
+        const hasOtherBranch  = children.some(c => !c.contains(appIframe) && c.getBoundingClientRect().height > 0);
+        if (hasIframeBranch && hasOtherBranch) { appBlock = el; break; }
+      }
+      if (appBlock?.parentElement) {
+        logStep_('Dock: app-block found');
+        return appBlock.parentElement;
+      }
+      // Fallback: tallest scroll container walking up from the iframe.
+      el = appIframe;
+      const scrollEls = [];
+      for (let i = 0; i < 18 && el.parentElement && el !== document.body; i++) {
+        el = el.parentElement;
+        const oy = getComputedStyle(el).overflowY;
+        if ((oy === 'auto' || oy === 'scroll') && el.clientHeight > 100) scrollEls.push(el);
+      }
+      if (scrollEls.length) return scrollEls.reduce((best, c) => c.clientHeight > best.clientHeight ? c : best);
+      return appIframe.parentElement;
     }
 
-    // 4. Fallback: tallest scroll container found while walking up.
-    el = appIframe;
-    const scrollEls = [];
-    for (let i = 0; i < 18 && el.parentElement && el !== document.body; i++) {
-      el = el.parentElement;
-      const oy = getComputedStyle(el).overflowY;
-      if ((oy === 'auto' || oy === 'scroll') && el.clientHeight > 100) scrollEls.push(el);
-    }
-    if (scrollEls.length) return scrollEls.reduce((best, c) => c.clientHeight > best.clientHeight ? c : best);
-    return appIframe.parentElement;
+    // 3. No iframe: find a right-side data-app-id block (sidebar apps, position-filtered).
+    const sidebarApp = [...document.querySelectorAll('[data-app-id]')].find(el => {
+      const r = el.getBoundingClientRect();
+      return r.width > 0 && r.height > 0 && r.left > window.innerWidth * 0.55;
+    });
+    if (sidebarApp?.parentElement) return sidebarApp.parentElement;
+
+    // 4. Semantic: <aside> or complementary role on the right side of the viewport.
+    const aside = [...document.querySelectorAll('aside, [role="complementary"]')].find(el => {
+      const r = el.getBoundingClientRect();
+      return r.left > window.innerWidth * 0.5 && r.height > window.innerHeight * 0.3;
+    });
+    if (aside) return aside;
+
+    return null;
   }
 
   function mountDocked_(panel) {
