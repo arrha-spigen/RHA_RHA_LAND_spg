@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         GCX Reply
 // @namespace    https://spigen.com/gcx
-// @version      2.17.7
+// @version      2.17.8
 // @description  Amazon order data via GAS web app + Spigen product info + Zendesk auto-fill
 // @author       Spigen GCX
 // @updateURL    https://raw.githubusercontent.com/codingintheusa0402/spigen-gcx-automation/main/tampermonkey_scripts/GCX%20Reply.user.js
@@ -2368,46 +2368,19 @@
       flex-shrink: 0;
       position: relative;
       z-index: 2;
-      border-top: 1px solid rgba(0,0,0,0.07);
     }
     #sp-load-log:not(:has(#sp-log-entries > *)) { display: none; }
-    #sp-log-header {
-      display: flex;
-      align-items: center;
-      padding: 2px 14px 2px 10px;
-      gap: 6px;
-      cursor: pointer;
-      user-select: none;
-    }
-    #sp-log-header:hover { background: rgba(0,0,0,0.03); }
-    #sp-log-label {
-      font-size: 9.5px;
-      font-weight: 600;
-      letter-spacing: 0.06em;
-      color: #a0a8b0;
-      flex: 1;
-    }
-    #sp-log-toggle {
-      font-size: 9px;
-      color: #b0b8c0;
-      background: none;
-      border: none;
-      cursor: pointer;
-      padding: 0;
-      line-height: 1;
-    }
     #sp-log-entries {
       font-size: 10px;
       color: #6e6e73;
-      padding: 2px 14px 4px;
+      padding: 3px 14px 4px;
+      border-top: 1px solid rgba(0,0,0,0.07);
       max-height: 56px;
       overflow-y: auto;
       font-family: monospace;
       line-height: 1.6;
     }
-    #sp-load-log.sp-log-collapsed #sp-log-entries { display: none; }
-    #sp-load-log.sp-log-collapsed #sp-log-toggle::after { content: '▼ show'; }
-    #sp-load-log:not(.sp-log-collapsed) #sp-log-toggle::after { content: '▲ hide'; }
+    #sp-load-log.sp-log-collapsed { display: none; }
 
     /* ── Toggle button (shown when panel is closed) ──────────────────────── */
     #sp-toggle-btn {
@@ -2434,7 +2407,7 @@
       position: relative !important;
       width: 100% !important;
       max-width: 100% !important;
-      height: auto !important;
+      height: auto;
       /* Cap the docked panel at ~90% of the viewport so #sp-panel-body can
          scroll within it — same mechanism as floating mode. Without this, the
          panel grows to full content height and nothing overflows. */
@@ -2655,13 +2628,7 @@
         </div>
         <div id="sp-product-result"></div>
       </div>
-      <div id="sp-load-log">
-        <div id="sp-log-header">
-          <span id="sp-log-label">LOG</span>
-          <button id="sp-log-toggle"></button>
-        </div>
-        <div id="sp-log-entries"></div>
-      </div>
+      <div id="sp-load-log"><div id="sp-log-entries"></div></div>
     `;
     return d;
   }
@@ -3551,9 +3518,10 @@
     }
     panel.classList.add('sp-docked');
 
-    // Restore user-set docked height (from bottom-drag resize)
+    // Restore user-set docked height, or apply a tall default so the panel
+    // doesn't look cramped before any order data is loaded.
     const savedDockH = loadUi().dockH;
-    if (savedDockH && savedDockH > 80) panel.style.height = savedDockH + 'px';
+    panel.style.height = (savedDockH > 80 ? savedDockH : 500) + 'px';
 
     // The new Zendesk omnipanel-pane-wrapper-apps container uses flex-direction:row,
     // which places GCX Reply and ChannelReply side-by-side instead of stacked.
@@ -3655,9 +3623,13 @@
             <input type="checkbox" id="sp-fetch-product-chk" ${prefs.fetchProduct ? 'checked' : ''}/>
             Product Info
           </label>
-          <label style="display:flex;align-items:center;gap:6px;cursor:pointer;user-select:none;font-size:12px;color:#1c1c1e;">
+          <label style="display:flex;align-items:center;gap:6px;cursor:pointer;user-select:none;font-size:12px;color:#1c1c1e;margin-bottom:5px;">
             <input type="checkbox" id="sp-notes-toggle"/>
             Notes
+          </label>
+          <label style="display:flex;align-items:center;gap:6px;cursor:pointer;user-select:none;font-size:12px;color:#1c1c1e;">
+            <input type="checkbox" id="sp-show-log-chk" ${!uiState.logCollapsed ? 'checked' : ''}/>
+            Debug log
           </label>
         </div>
       </div>
@@ -3736,15 +3708,15 @@
       drawer.classList.toggle('sp-settings-open');
     });
 
-    // Log section toggle (▲ hide / ▼ show)
+    // Apply saved log-collapsed state on open
     const logWrap = panel.querySelector('#sp-load-log');
-    const logHeader = panel.querySelector('#sp-log-header');
-    if (logWrap && logHeader) {
-      const ui = loadUi();
-      if (ui.logCollapsed) logWrap.classList.add('sp-log-collapsed');
-      logHeader.addEventListener('click', () => {
-        const collapsed = logWrap.classList.toggle('sp-log-collapsed');
-        saveUi({ logCollapsed: collapsed });
+    if (logWrap && uiState.logCollapsed) logWrap.classList.add('sp-log-collapsed');
+
+    const showLogChk = drawer.querySelector('#sp-show-log-chk');
+    if (showLogChk && logWrap) {
+      showLogChk.addEventListener('change', () => {
+        logWrap.classList.toggle('sp-log-collapsed', !showLogChk.checked);
+        saveUi({ logCollapsed: !showLogChk.checked });
       });
     }
   }
