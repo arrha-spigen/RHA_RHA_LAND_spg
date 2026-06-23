@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         GCX Reply
 // @namespace    https://spigen.com/gcx
-// @version      2.17.2
+// @version      2.17.3
 // @description  Amazon order data via GAS web app + Spigen product info + Zendesk auto-fill
 // @author       Spigen GCX
 // @updateURL    https://raw.githubusercontent.com/codingintheusa0402/spigen-gcx-automation/main/tampermonkey_scripts/GCX%20Reply.user.js
@@ -3311,7 +3311,34 @@
         if (selW > 120) continue; // icon bar must be narrow
         const contentBranch = visKids.find(c => c !== selBranch && c.getBoundingClientRect().width > 80);
         if (contentBranch) {
-          console.log('Step1.5 HIT selW=' + Math.round(selW) + ' → content:', contentBranch);
+          console.log('Step1.5: contentBranch found selW=' + Math.round(selW), contentBranch);
+          // Go deeper: the contentBranch may be a wrapper with multiple sections
+          // in a flex-row layout. Find the apps-specific child where [data-app-id]
+          // or zdusercontent iframes live so we mount at the same level as ChannelReply.
+          const deepApp = contentBranch.querySelector('[data-app-id]');
+          if (deepApp?.parentElement && deepApp.parentElement !== contentBranch) {
+            const dm = deepApp.parentElement;
+            console.log('Step1.5 HIT (deep data-app-id):', dm);
+            console.groupEnd();
+            logStep_('Dock: apps list found');
+            return dm;
+          }
+          const deepIframe = [...contentBranch.querySelectorAll('iframe')]
+            .find(f => /zdusercontent\.com/.test(f.src || ''));
+          if (deepIframe) {
+            let iEl = deepIframe;
+            for (let j = 0; j < 8 && iEl.parentElement && iEl !== contentBranch; j++) {
+              iEl = iEl.parentElement;
+              if (iEl.parentElement === contentBranch) break;
+            }
+            if (iEl !== contentBranch) {
+              console.log('Step1.5 HIT (deep iframe):', iEl.parentElement || iEl);
+              console.groupEnd();
+              logStep_('Dock: apps iframe parent found');
+              return iEl.parentElement || iEl;
+            }
+          }
+          console.log('Step1.5 HIT (contentBranch fallback):', contentBranch);
           console.groupEnd();
           logStep_('Dock: omnipanel content found');
           return contentBranch;
@@ -3453,6 +3480,19 @@
       logStep_('Dock: mounted in ' + mountTag + ' (kids=' + mount.children.length + ')');
     }
     panel.classList.add('sp-docked');
+
+    // Enable native scrolling on the apps panel container so the dock scrolls
+    // when GCX Reply + other apps (ChannelReply, Trello) exceed the visible height.
+    // Walk up from mount; if any ancestor has overflow-y:hidden, switch to auto.
+    (function enableDockScroll_() {
+      let el = mount;
+      for (let i = 0; i < 6 && el && el !== document.body; i++) {
+        const oy = getComputedStyle(el).overflowY;
+        if (oy === 'auto' || oy === 'scroll') break;
+        if (oy === 'hidden') { el.style.overflowY = 'auto'; break; }
+        el = el.parentElement;
+      }
+    })();
     panel.classList.remove('minimized');
     if (panel._glass) panel._glass.hide();
     const tgl = document.getElementById('sp-toggle-btn');
