@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         GCX Reply
 // @namespace    https://spigen.com/gcx
-// @version      2.17.11
+// @version      2.17.12
 // @description  Amazon order data via GAS web app + Spigen product info + Zendesk auto-fill
 // @author       Spigen GCX
 // @updateURL    https://raw.githubusercontent.com/codingintheusa0402/spigen-gcx-automation/main/tampermonkey_scripts/GCX%20Reply.user.js
@@ -3355,10 +3355,11 @@
   // zdusercontent.com); we inject our panel as the first child of the scroll
   // container that holds them. A MutationObserver re-mounts after re-renders.
   let _dockObserver = null;
+  let _dockObserverDebounce = null;
 
   function findAppsPanelMount_() {
     const W = window.innerWidth, H = window.innerHeight;
-    console.group('[GCX] findAppsPanelMount_ W=' + W + ' H=' + H);
+    console.log('[GCX] findAppsPanelMount_ W=' + W + ' H=' + H);
 
     // 1. Explicit Zendesk data-test-id selectors.
     // "omnipanel-pane-wrapper-apps" is confirmed by console diagnostics as the
@@ -3369,7 +3370,7 @@
       '[data-test-id="omnipanel-apps"], [data-test-id="ticket_sidebar"], ' +
       '[data-test-id="apps-container"], [data-test-id="sidebar-apps"]'
     );
-    if (direct) { console.log('Step1 HIT:', direct); console.groupEnd(); return direct; }
+    if (direct) { console.log('Step1 HIT:', direct);  return direct; }
     console.log('Step1: no data-test-id match');
 
     // 1.5. New Zendesk omnipanel — find the Apps content area.
@@ -3404,7 +3405,7 @@
           if (deepApp?.parentElement && deepApp.parentElement !== contentBranch) {
             const dm = deepApp.parentElement;
             console.log('Step1.5 HIT (deep data-app-id):', dm);
-            console.groupEnd();
+            
             logStep_('Dock: apps list found');
             return dm;
           }
@@ -3418,13 +3419,13 @@
             }
             if (iEl !== contentBranch) {
               console.log('Step1.5 HIT (deep iframe):', iEl.parentElement || iEl);
-              console.groupEnd();
+              
               logStep_('Dock: apps iframe parent found');
               return iEl.parentElement || iEl;
             }
           }
           console.log('Step1.5 HIT (contentBranch fallback):', contentBranch);
-          console.groupEnd();
+          
           logStep_('Dock: omnipanel content found');
           return contentBranch;
         }
@@ -3455,7 +3456,7 @@
     });
     if (sidebarApp?.parentElement) {
       console.log('Step2 HIT:', sidebarApp, '→ parent:', sidebarApp.parentElement);
-      console.groupEnd();
+      
       logStep_('Dock: data-app-id found');
       return sidebarApp.parentElement;
     }
@@ -3484,7 +3485,7 @@
       }
       if (appBlock?.parentElement) {
         console.log('Step3 HIT app-block:', appBlock, '→ parent:', appBlock.parentElement);
-        console.groupEnd();
+        
         logStep_('Dock: app-block found');
         return appBlock.parentElement;
       }
@@ -3498,11 +3499,11 @@
       if (scrollEls.length) {
         const best = scrollEls.reduce((b, c) => c.clientHeight > b.clientHeight ? c : b);
         console.log('Step3 scroll fallback:', best);
-        console.groupEnd();
+        
         return best;
       }
       console.log('Step3 iframe.parentElement fallback:', appIframe.parentElement);
-      console.groupEnd();
+      
       return appIframe.parentElement;
     }
 
@@ -3517,7 +3518,7 @@
       const r = el.getBoundingClientRect();
       return r.left > W * 0.4 && r.height > H * 0.3;
     });
-    if (aside) { console.log('Step4 aside HIT:', aside); console.groupEnd(); return aside; }
+    if (aside) { console.log('Step4 aside HIT:', aside);  return aside; }
     console.log('Step4: no aside/complementary on right side');
 
     // 5. "Apps" heading text — Zendesk always renders this in the apps panel header.
@@ -3535,7 +3536,7 @@
         const r = el.getBoundingClientRect();
         if (r.height > H * 0.4 && el.children.length >= 1) {
           console.log('Step5 HIT:', el);
-          console.groupEnd();
+          
           return el;
         }
         el = el.parentElement;
@@ -3543,21 +3544,35 @@
     }
 
     console.log('ALL STEPS FAILED — returning null');
-    console.groupEnd();
+    
     return null;
   }
 
   function mountDocked_(panel) {
     // Set up the DOM-watch observer BEFORE any early return so it is always
-    // active — even when the Apps pane isn't rendered yet (Zendesk lazy-renders
-    // it; we need to catch the moment it appears in the DOM).
+    // active — even when the Apps pane isn't rendered yet.
+    // Debounced at 80ms to avoid calling mountDocked_() hundreds of times
+    // per second when Zendesk is doing complex React re-renders.
     if (!_dockObserver) {
       _dockObserver = new MutationObserver(() => {
         if (!loadUi().dockMode || panel.isConnected) return;
-        // Quick guard: only proceed when the Apps pane wrapper is now present.
-        if (document.querySelector('[data-test-id="omnipanel-pane-wrapper-apps"]')) {
-          mountDocked_(panel);
-        }
+        clearTimeout(_dockObserverDebounce);
+        _dockObserverDebounce = setTimeout(() => {
+          if (!loadUi().dockMode || panel.isConnected) return;
+          if (document.querySelector('[data-test-id="omnipanel-pane-wrapper-apps"]')) {
+            // Apps pane is now in the DOM — mount.
+            mountDocked_(panel);
+          } else if (!panel._autoClickedAppsBtn) {
+            // Apps pane not rendered — Apps section may be inactive.
+            // Click the Apps icon once to activate it and cause the pane to render.
+            const appsBtn = document.querySelector('[data-test-id="omnipanel-selector-item-apps"]');
+            if (appsBtn && appsBtn.getAttribute('aria-pressed') !== 'true') {
+              panel._autoClickedAppsBtn = true;
+              logStep_('Dock: clicking Apps icon to activate section');
+              appsBtn.click();
+            }
+          }
+        }, 80);
       });
       _dockObserver.observe(document.body, { childList: true, subtree: true });
     }
@@ -3782,6 +3797,7 @@
   function isFiltersPage_() { return !!location.pathname.match(/\/agent\/filters/); }
 
   function init() {
+    if (_panelEl) return; // heartbeat may call init() before setTimeout(init,800) fires — block double-init
     if (!isTicketPage_() && !isFiltersPage_()) return;
     if (document.getElementById(PANEL_ID)) return;
 
@@ -4111,6 +4127,9 @@
           // render. Without this, the stale observer never fires when the user
           // clicks the Apps icon after a ticket switch, leaving the panel hidden.
           if (loadUi().dockMode) {
+            // Reset auto-click flag so the observer can click the Apps icon
+            // once on this new ticket if the Apps section isn't the default.
+            panel._autoClickedAppsBtn = false;
             clearTimeout(_mountNavTimer);
             _mountNavTimer = setTimeout(() => mountDocked_(panel), 500);
           }
