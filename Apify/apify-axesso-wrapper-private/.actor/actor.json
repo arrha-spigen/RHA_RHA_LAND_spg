@@ -1,0 +1,16 @@
+{
+  "actorSpecification": 1,
+  "name": "axesso-wrapper-private",
+  "title": "Amazon Reviews Scraper (Axesso) — Private",
+  "description": "Private copy of the Axesso wrapper. Filters penalty rows and returns only clean verified reviews.",
+  "version": "0.1",
+  "buildTag": "latest",
+  "defaultMemoryMbytes": 256,
+  "readme": "../ACTOR.md",
+  "dockerfile": "../Dockerfile",
+  "input": "./input_schema.json",
+  "output": "./output_schema.json",
+  "storages": {
+    "dataset": "./dataset_schema.json"
+  }
+}
