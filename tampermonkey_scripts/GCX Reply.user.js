@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         GCX Reply
 // @namespace    https://spigen.com/gcx
-// @version      2.16.4
+// @version      2.16.5
 // @description  Amazon order data via GAS web app + Spigen product info + Zendesk auto-fill
 // @author       Spigen GCX
 // @updateURL    https://raw.githubusercontent.com/codingintheusa0402/spigen-gcx-automation/main/tampermonkey_scripts/GCX%20Reply.user.js
@@ -141,7 +141,7 @@
   };
 
   const FULFILLMENT_MAP = { AFN: 'fba', MFN: 'merchant__fbm_' };
-  const SCRIPT_VER = (typeof GM_info !== 'undefined' ? GM_info?.script?.version : null) || '2.16.4';
+  const SCRIPT_VER = (typeof GM_info !== 'undefined' ? GM_info?.script?.version : null) || '2.16.5';
   const sleep = ms => new Promise(r => setTimeout(r, ms));
 
   // ── Module state ─────────────────────────────────────────────────────────
@@ -2136,7 +2136,7 @@
 
     #sp-order-panel.minimized #sp-panel-body { display: none; }
     #sp-order-panel.minimized #sp-settings-drawer { display: none; }
-    #sp-order-panel.minimized #sp-panel-header { border-radius: 22px; border-bottom: none; cursor: pointer; }
+    #sp-order-panel.minimized:not(.sp-docked) #sp-panel-header { border-radius: 22px; border-bottom: none; cursor: pointer; }
 
     /* ── Edge-resize grips (invisible overlay divs, bypass scrollbar) ────── */
     .sp-re { position: absolute; z-index: 9998; pointer-events: auto; }
@@ -2423,7 +2423,7 @@
       background: #fff !important;
     }
     #sp-order-panel.sp-docked #sp-panel-header {
-      cursor: default;
+      cursor: pointer;
       border-radius: 9px 9px 0 0;
       background: #fff;
       color: #2f3941;
@@ -2432,13 +2432,35 @@
       font-weight: 700;
       padding: 11px 14px;
     }
+    #sp-order-panel.sp-docked.minimized #sp-panel-header { border-radius: 9px; }
     #sp-order-panel.sp-docked #sp-panel-header svg:first-of-type { width: 16px; height: 16px; }
     /* Hide floating-only controls when docked */
     #sp-order-panel.sp-docked #sp-minimize-btn,
     #sp-order-panel.sp-docked #sp-panel-close { display: none !important; }
     #sp-order-panel.sp-docked #sp-settings-btn { margin-left: auto; }
-    /* Scroll internally so content is always reachable */
-    #sp-order-panel.sp-docked #sp-panel-body { max-height: 65vh; overflow-y: auto; background: #fff; }
+    /* Use the dock's native scroll — no inner scroll in docked mode */
+    #sp-order-panel.sp-docked #sp-panel-body { overflow: visible !important; max-height: none !important; flex: none !important; background: #fff; }
+    /* Collapse/expand toggle button (only visible when docked) */
+    #sp-dock-collapse-btn {
+      display: none;
+      align-items: center;
+      justify-content: center;
+      width: 30px;
+      height: 30px;
+      background: transparent;
+      border: 1px solid transparent;
+      border-radius: 4px;
+      cursor: pointer;
+      color: #68737d;
+      padding: 0;
+      flex-shrink: 0;
+      position: relative;
+      z-index: 10000;
+    }
+    #sp-dock-collapse-btn:hover { background: rgba(0,0,0,0.05); border-color: #d8dcde; }
+    #sp-dock-collapse-btn svg { transform: rotate(180deg); transition: transform 0.18s; }
+    #sp-order-panel.sp-docked #sp-dock-collapse-btn { display: inline-flex; }
+    #sp-order-panel.sp-docked.minimized #sp-dock-collapse-btn svg { transform: rotate(0deg); }
 
     #sp-mcf-bar { margin-bottom: 8px; display: none; }
     #sp-mcf-btn {
@@ -2544,6 +2566,11 @@
         <span id="sp-settings-btn" title="Glass Settings">⚙</span>
         <span id="sp-minimize-btn" title="Minimize">─</span>
         <span id="sp-panel-close" title="Close">✕</span>
+        <button id="sp-dock-collapse-btn" type="button" aria-label="Collapse section" data-garden-id="buttons.icon_button" data-garden-version="9.14.2">
+          <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 16 16" aria-hidden="true" focusable="false" data-garden-id="buttons.icon" data-garden-version="9.14.2">
+            <path fill="currentColor" d="M12.688 5.61a.5.5 0 0 1 .69.718l-.066.062-5 4a.5.5 0 0 1-.542.054l-.082-.054-5-4a.5.5 0 0 1 .55-.83l.074.05L8 9.359l4.688-3.75z"/>
+          </svg>
+        </button>
       </div>
       <div id="sp-settings-drawer"></div>
       <div id="sp-panel-body">
@@ -3531,9 +3558,22 @@
         panel.style.height = panel.dataset.savedH;
       }
     };
-    header.addEventListener('click', () => {
+
+    // Docked collapse/expand button (Garden-style chevron)
+    const dockCollapseBtn = panel.querySelector('#sp-dock-collapse-btn');
+    dockCollapseBtn.onclick = e => {
+      e.stopPropagation();
+      const collapsed = panel.classList.toggle('minimized');
+      dockCollapseBtn.setAttribute('aria-label', collapsed ? 'Expand section' : 'Collapse section');
+    };
+
+    header.addEventListener('click', e => {
       if (header._dragMoved) { header._dragMoved = false; return; }
-      if (panel.classList.contains('minimized')) {
+      if (e.target.closest('#sp-settings-btn, #sp-minimize-btn, #sp-panel-close, #sp-dock-collapse-btn, button')) return;
+      if (panel.classList.contains('sp-docked')) {
+        const collapsed = panel.classList.toggle('minimized');
+        dockCollapseBtn.setAttribute('aria-label', collapsed ? 'Expand section' : 'Collapse section');
+      } else if (panel.classList.contains('minimized')) {
         panel.classList.remove('minimized');
         if (panel.dataset.savedH) panel.style.height = panel.dataset.savedH;
       }
