@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         GCX Reply
 // @namespace    https://spigen.com/gcx
-// @version      2.17.5
+// @version      2.17.6
 // @description  Amazon order data via GAS web app + Spigen product info + Zendesk auto-fill
 // @author       Spigen GCX
 // @updateURL    https://raw.githubusercontent.com/codingintheusa0402/spigen-gcx-automation/main/tampermonkey_scripts/GCX%20Reply.user.js
@@ -2405,7 +2405,10 @@
       width: 100% !important;
       max-width: 100% !important;
       height: auto !important;
-      max-height: none !important;
+      /* Cap the docked panel at ~90% of the viewport so #sp-panel-body can
+         scroll within it — same mechanism as floating mode. Without this, the
+         panel grows to full content height and nothing overflows. */
+      max-height: calc(100vh - 120px) !important;
       left: auto !important; top: auto !important; right: auto !important;
       margin: 0 0 10px 0;
       border-radius: 10px;
@@ -2444,8 +2447,9 @@
       max-height: 280px;
     }
     #sp-order-panel.sp-docked .sp-settings-inner { background: #f8f9fa; }
-    /* Use the dock's native scroll — no inner scroll in docked mode */
-    #sp-order-panel.sp-docked #sp-panel-body { overflow: visible !important; max-height: none !important; flex: none !important; background: #fff; }
+    /* Panel body scrolls within the docked panel (same as floating mode).
+       The panel itself is capped at max-height above, so overflow activates. */
+    #sp-order-panel.sp-docked #sp-panel-body { overflow-y: auto !important; max-height: none !important; flex: 1 !important; min-height: 0 !important; background: #fff; }
     /* Collapse/expand toggle button (only visible when docked) */
     #sp-dock-collapse-btn {
       display: none;
@@ -3468,11 +3472,16 @@
   function mountDocked_(panel) {
     const mount = findAppsPanelMount_();
     if (!mount) {
-      // Ensure the panel is visible as floating while heartbeat retries docking.
       if (!panel.isConnected) {
-        panel.classList.remove('sp-docked');
-        document.body.appendChild(panel);
-        logStep_('Dock: mount not found — showing floating, heartbeat will retry.');
+        if (loadUi().dockMode) {
+          // Dock mode: keep panel detached (hidden) so it never shows as floating.
+          // The heartbeat will call mountDocked_() again once the Apps panel loads.
+          logStep_('Dock: mount not found — staying detached, heartbeat will retry.');
+        } else {
+          panel.classList.remove('sp-docked');
+          document.body.appendChild(panel);
+          logStep_('Dock: mount not found — showing floating, heartbeat will retry.');
+        }
       }
       return;
     }
@@ -3487,20 +3496,10 @@
     // The new Zendesk omnipanel-pane-wrapper-apps container uses flex-direction:row,
     // which places GCX Reply and ChannelReply side-by-side instead of stacked.
     // Force column layout so apps stack vertically.
+    // Scroll is handled by #sp-panel-body inside the panel (same as floating mode),
+    // so we do not need a max-height or overflow on the mount itself.
     mount.style.flexDirection = 'column';
     mount.style.overflowX = 'hidden';
-
-    // Give the mount a viewport-relative max-height so overflow-y:auto can trigger
-    // a scrollbar. Without a height constraint the container has height:auto and
-    // grows to fit all children — nothing ever overflows, no scrollbar appears.
-    (function constrainMountHeight_() {
-      const rect = mount.getBoundingClientRect();
-      const topOffset = rect.top > 50 ? rect.top : 80; // fallback if not yet in view
-      const maxH = Math.max(300, window.innerHeight - topOffset - 8);
-      mount.style.maxHeight = maxH + 'px';
-      mount.style.overflowY = 'auto';
-      logStep_('Dock: mount maxH=' + maxH + 'px (viewportH=' + window.innerHeight + ', mountTop=' + Math.round(rect.top) + ')');
-    })();
     panel.classList.remove('minimized');
     if (panel._glass) panel._glass.hide();
     const tgl = document.getElementById('sp-toggle-btn');
