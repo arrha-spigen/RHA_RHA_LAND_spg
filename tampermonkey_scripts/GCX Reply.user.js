@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         GCX Reply
 // @namespace    https://spigen.com/gcx
-// @version      2.16.6
+// @version      2.16.7
 // @description  Amazon order data via GAS web app + Spigen product info + Zendesk auto-fill
 // @author       Spigen GCX
 // @updateURL    https://raw.githubusercontent.com/codingintheusa0402/spigen-gcx-automation/main/tampermonkey_scripts/GCX%20Reply.user.js
@@ -141,7 +141,7 @@
   };
 
   const FULFILLMENT_MAP = { AFN: 'fba', MFN: 'merchant__fbm_' };
-  const SCRIPT_VER = (typeof GM_info !== 'undefined' ? GM_info?.script?.version : null) || '2.16.6';
+  const SCRIPT_VER = (typeof GM_info !== 'undefined' ? GM_info?.script?.version : null) || '2.16.7';
   const sleep = ms => new Promise(r => setTimeout(r, ms));
 
   // ── Module state ─────────────────────────────────────────────────────────
@@ -3327,14 +3327,37 @@
     });
     if (aside) return aside;
 
+    // 5. "Apps" heading text in the right half — Zendesk always shows this label
+    //    in the apps panel header even when no apps are installed.
+    const appsHeading = [...document.querySelectorAll('h1,h2,h3,h4,button,span,label')]
+      .find(el => {
+        if (el.children.length > 0) return false;
+        if (el.textContent.trim() !== 'Apps') return false;
+        const r = el.getBoundingClientRect();
+        return r.left > window.innerWidth * 0.5 && r.top < window.innerHeight * 0.25;
+      });
+    if (appsHeading) {
+      let el = appsHeading.parentElement;
+      for (let i = 0; i < 15 && el && el !== document.body; i++) {
+        const r = el.getBoundingClientRect();
+        if (r.height > window.innerHeight * 0.4 && el.children.length >= 1) return el;
+        el = el.parentElement;
+      }
+    }
+
     return null;
   }
 
   function mountDocked_(panel) {
     const mount = findAppsPanelMount_();
     if (!mount) {
-      logStep_('Dock: Apps panel not found — open the Apps tab, then re-toggle. Staying floating.');
-      // Retry shortly in case the Apps panel is still rendering.
+      // Ensure the panel is at least visible as floating while we retry —
+      // a detached panel is completely invisible, which is worse than floating.
+      if (!panel.isConnected) {
+        panel.classList.remove('sp-docked');
+        document.body.appendChild(panel);
+        logStep_('Dock: mount not found — showing floating, will retry.');
+      }
       setTimeout(() => { if (loadUi().dockMode) { const m = findAppsPanelMount_(); if (m) mountDocked_(panel); } }, 1200);
       return;
     }
