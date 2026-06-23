@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         GCX Reply
 // @namespace    https://spigen.com/gcx
-// @version      2.17.1
+// @version      2.17.2
 // @description  Amazon order data via GAS web app + Spigen product info + Zendesk auto-fill
 // @author       Spigen GCX
 // @updateURL    https://raw.githubusercontent.com/codingintheusa0402/spigen-gcx-automation/main/tampermonkey_scripts/GCX%20Reply.user.js
@@ -2438,6 +2438,12 @@
     #sp-order-panel.sp-docked #sp-minimize-btn,
     #sp-order-panel.sp-docked #sp-panel-close { display: none !important; }
     #sp-order-panel.sp-docked #sp-settings-btn { margin-left: auto; }
+    /* Settings drawer: override glass-mode colors for the white docked background */
+    #sp-order-panel.sp-docked #sp-settings-drawer.sp-settings-open {
+      border-bottom: 1px solid #e9ebed;
+      max-height: 280px;
+    }
+    #sp-order-panel.sp-docked .sp-settings-inner { background: #f8f9fa; }
     /* Use the dock's native scroll — no inner scroll in docked mode */
     #sp-order-panel.sp-docked #sp-panel-body { overflow: visible !important; max-height: none !important; flex: none !important; background: #fff; }
     /* Collapse/expand toggle button (only visible when docked) */
@@ -3281,6 +3287,41 @@
     if (direct) { console.log('Step1 HIT:', direct); console.groupEnd(); return direct; }
     console.log('Step1: no data-test-id match');
 
+    // 1.5. New Zendesk omnipanel — find the Apps content area.
+    // The new Zendesk right panel has a narrow icon bar (~64px, contains
+    // data-test-id="omnipanel-selector-item-*" buttons) and a wider content area
+    // as its sibling. Walk up from the Apps icon button; at the first ancestor
+    // where the icon bar (narrow ≤120px) and a wider content sibling both exist,
+    // return the content sibling as the mount point.
+    const omnipanelAppsBtn = document.querySelector('[data-test-id="omnipanel-selector-item-apps"]');
+    if (omnipanelAppsBtn) {
+      console.log('Step1.5: omnipanel Apps button found, walking up...');
+      let el15 = omnipanelAppsBtn;
+      for (let d = 0; d < 10 && el15.parentElement && el15 !== document.body; d++) {
+        el15 = el15.parentElement;
+        const visKids = [...el15.children].filter(c => {
+          if (c.id === PANEL_ID) return false;
+          const r = c.getBoundingClientRect();
+          return r.width > 0 && r.height > 0;
+        });
+        if (visKids.length < 2) continue;
+        const selBranch = visKids.find(c => c.contains(omnipanelAppsBtn));
+        if (!selBranch) continue;
+        const selW = selBranch.getBoundingClientRect().width;
+        if (selW > 120) continue; // icon bar must be narrow
+        const contentBranch = visKids.find(c => c !== selBranch && c.getBoundingClientRect().width > 80);
+        if (contentBranch) {
+          console.log('Step1.5 HIT selW=' + Math.round(selW) + ' → content:', contentBranch);
+          console.groupEnd();
+          logStep_('Dock: omnipanel content found');
+          return contentBranch;
+        }
+      }
+      console.log('Step1.5: walked up but no content sibling detected');
+    } else {
+      console.log('Step1.5: no omnipanel-selector-item-apps in DOM');
+    }
+
     // 2. [data-app-id] filtered by CENTER position — Zendesk adds this attribute to
     //    each installed app wrapper (ChannelReply block, etc.). Using center-X instead
     //    of left edge is robust across different window widths. Center X > 60% of
@@ -3417,6 +3458,28 @@
     const tgl = document.getElementById('sp-toggle-btn');
     if (tgl) tgl.style.display = 'none';
 
+    // New Zendesk omnipanel: the content area is shared across sections
+    // (Apps, Customer Context, Knowledge, etc.). Sync GCX Reply's visibility
+    // with the Apps icon button so it only shows when Apps section is active.
+    const appsIconBtn_ = document.querySelector('[data-test-id="omnipanel-selector-item-apps"]');
+    if (appsIconBtn_) {
+      const syncSectionVis_ = () => {
+        const inApps = appsIconBtn_.getAttribute('aria-pressed') === 'true';
+        panel._gcxHiddenBySection = !inApps;
+        panel.style.display = inApps ? '' : 'none';
+      };
+      syncSectionVis_();
+      if (!panel._sectionObserver) {
+        panel._sectionObserver = new MutationObserver(syncSectionVis_);
+      }
+      panel._sectionObserver.disconnect();
+      panel._sectionObserver.observe(appsIconBtn_, { attributes: true, attributeFilter: ['aria-pressed'] });
+    } else {
+      panel._gcxHiddenBySection = false;
+      panel.style.display = '';
+      if (panel._sectionObserver) { panel._sectionObserver.disconnect(); panel._sectionObserver = null; }
+    }
+
     // Re-mount if Zendesk re-renders the apps panel and drops our node.
     if (!_dockObserver) {
       _dockObserver = new MutationObserver(() => {
@@ -3432,6 +3495,9 @@
 
   function mountFloating_(panel) {
     if (_dockObserver) { _dockObserver.disconnect(); _dockObserver = null; }
+    if (panel._sectionObserver) { panel._sectionObserver.disconnect(); panel._sectionObserver = null; }
+    panel._gcxHiddenBySection = false;
+    panel.style.display = '';
     panel.classList.remove('sp-docked');
     if (panel.parentElement !== document.body) document.body.appendChild(panel);
     // Restore saved floating geometry.
@@ -3985,7 +4051,10 @@
       const inFloatingFallback = _panelEl.isConnected &&
         _panelEl.parentElement === document.body &&
         !_panelEl.classList.contains('sp-docked');
-      if (!_panelEl.isConnected || _panelEl.offsetHeight === 0 || inFloatingFallback) {
+      // Don't remount when GCX Reply is intentionally hidden because the user
+      // has switched to a different omnipanel section (Customer Context, etc.).
+      const hiddenBySection = _panelEl._gcxHiddenBySection === true;
+      if (!_panelEl.isConnected || (!hiddenBySection && _panelEl.offsetHeight === 0) || inFloatingFallback) {
         mountDocked_(_panelEl);
       }
       return;
