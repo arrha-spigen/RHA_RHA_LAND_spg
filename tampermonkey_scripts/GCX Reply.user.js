@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         GCX Reply
 // @namespace    https://spigen.com/gcx
-// @version      2.17.0
+// @version      2.17.1
 // @description  Amazon order data via GAS web app + Spigen product info + Zendesk auto-fill
 // @author       Spigen GCX
 // @updateURL    https://raw.githubusercontent.com/codingintheusa0402/spigen-gcx-automation/main/tampermonkey_scripts/GCX%20Reply.user.js
@@ -3354,7 +3354,13 @@
     }
 
     // 4. Semantic: <aside> or complementary role on the right side.
+    //    Exclude modal dialogs (onboarding, announcements) and aria-hidden overlays —
+    //    the new Zendesk navigation renders a data-test-id="onboarding-panel" aside
+    //    on the right side that is hidden (aria-hidden=true, role=dialog).
     const aside = [...document.querySelectorAll('aside, [role="complementary"]')].find(el => {
+      if (el.getAttribute('role') === 'dialog') return false;
+      if (el.getAttribute('aria-hidden') === 'true') return false;
+      if (el.hasAttribute('aria-modal')) return false;
       const r = el.getBoundingClientRect();
       return r.left > W * 0.4 && r.height > H * 0.3;
     });
