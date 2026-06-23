@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         GCX Reply
 // @namespace    https://spigen.com/gcx
-// @version      2.16.7
+// @version      2.16.8
 // @description  Amazon order data via GAS web app + Spigen product info + Zendesk auto-fill
 // @author       Spigen GCX
 // @updateURL    https://raw.githubusercontent.com/codingintheusa0402/spigen-gcx-automation/main/tampermonkey_scripts/GCX%20Reply.user.js
@@ -141,7 +141,7 @@
   };
 
   const FULFILLMENT_MAP = { AFN: 'fba', MFN: 'merchant__fbm_' };
-  const SCRIPT_VER = (typeof GM_info !== 'undefined' ? GM_info?.script?.version : null) || '2.16.7';
+  const SCRIPT_VER = (typeof GM_info !== 'undefined' ? GM_info?.script?.version : null) || '2.16.8';
   const sleep = ms => new Promise(r => setTimeout(r, ms));
 
   // ── Module state ─────────────────────────────────────────────────────────
@@ -3277,16 +3277,27 @@
     );
     if (direct) return direct;
 
-    // 2. Walk up from any zdusercontent iframe (ChannelReply or any sidebar app).
-    //    NOTE: data-app-id CANNOT be used without position-filtering — Zendesk also puts
-    //    data-app-id on ticket-editor apps in the center content area, so an unfiltered
-    //    querySelector would mount our panel in the wrong location on non-ABM tickets.
+    // 2. [data-app-id] filtered by CENTER position — Zendesk adds this attribute to
+    //    each installed app wrapper (ChannelReply block, etc.). Using center-X instead
+    //    of left edge is robust across different window widths. Center X > 60% of
+    //    viewport means the element sits in the right portion of the page (Apps panel),
+    //    not in the center ticket-editor area.
+    const sidebarApp = [...document.querySelectorAll('[data-app-id]')].find(el => {
+      const r = el.getBoundingClientRect();
+      if (r.width === 0 || r.height === 0) return false;
+      return (r.left + r.width / 2) > window.innerWidth * 0.6;
+    });
+    if (sidebarApp?.parentElement) {
+      logStep_('Dock: data-app-id found');
+      return sidebarApp.parentElement;
+    }
+
+    // 3. Walk up from any zdusercontent iframe (ChannelReply or any sidebar app).
+    //    Only runs if step 2 failed (e.g. no apps loaded / ChannelReply iframe absent).
     const appIframe = [...document.querySelectorAll('iframe')]
       .find(f => /zdusercontent\.com/.test(f.src || ''));
 
     if (appIframe) {
-      // Find the app BLOCK: element whose children include both the iframe branch
-      // AND a non-iframe sibling (app header). Its parent is the apps-panel list.
       let el = appIframe;
       let appBlock = null;
       for (let i = 0; i < 22 && el.parentElement && el !== document.body; i++) {
@@ -3301,7 +3312,6 @@
         logStep_('Dock: app-block found');
         return appBlock.parentElement;
       }
-      // Fallback: tallest scroll container walking up from the iframe.
       el = appIframe;
       const scrollEls = [];
       for (let i = 0; i < 18 && el.parentElement && el !== document.body; i++) {
@@ -3313,28 +3323,21 @@
       return appIframe.parentElement;
     }
 
-    // 3. No iframe: find a right-side data-app-id block (sidebar apps, position-filtered).
-    const sidebarApp = [...document.querySelectorAll('[data-app-id]')].find(el => {
-      const r = el.getBoundingClientRect();
-      return r.width > 0 && r.height > 0 && r.left > window.innerWidth * 0.55;
-    });
-    if (sidebarApp?.parentElement) return sidebarApp.parentElement;
-
-    // 4. Semantic: <aside> or complementary role on the right side of the viewport.
+    // 4. Semantic: <aside> or complementary role on the right side.
     const aside = [...document.querySelectorAll('aside, [role="complementary"]')].find(el => {
       const r = el.getBoundingClientRect();
-      return r.left > window.innerWidth * 0.5 && r.height > window.innerHeight * 0.3;
+      return r.left > window.innerWidth * 0.4 && r.height > window.innerHeight * 0.3;
     });
     if (aside) return aside;
 
-    // 5. "Apps" heading text in the right half — Zendesk always shows this label
-    //    in the apps panel header even when no apps are installed.
-    const appsHeading = [...document.querySelectorAll('h1,h2,h3,h4,button,span,label')]
+    // 5. "Apps" heading text — Zendesk always renders this in the apps panel header.
+    //    Search broadly; use center-X and loose y-threshold to handle different layouts.
+    const appsHeading = [...document.querySelectorAll('h1,h2,h3,h4,strong,b,span,label,div')]
       .find(el => {
         if (el.children.length > 0) return false;
         if (el.textContent.trim() !== 'Apps') return false;
         const r = el.getBoundingClientRect();
-        return r.left > window.innerWidth * 0.5 && r.top < window.innerHeight * 0.25;
+        return (r.left + r.width / 2) > window.innerWidth * 0.4 && r.top < window.innerHeight * 0.4;
       });
     if (appsHeading) {
       let el = appsHeading.parentElement;
@@ -3593,18 +3596,20 @@
 
     // Docked collapse/expand button (Garden-style chevron)
     const dockCollapseBtn = panel.querySelector('#sp-dock-collapse-btn');
-    dockCollapseBtn.onclick = e => {
-      e.stopPropagation();
-      const collapsed = panel.classList.toggle('minimized');
-      dockCollapseBtn.setAttribute('aria-label', collapsed ? 'Expand section' : 'Collapse section');
-    };
+    if (dockCollapseBtn) {
+      dockCollapseBtn.onclick = e => {
+        e.stopPropagation();
+        const collapsed = panel.classList.toggle('minimized');
+        dockCollapseBtn.setAttribute('aria-label', collapsed ? 'Expand section' : 'Collapse section');
+      };
+    }
 
     header.addEventListener('click', e => {
       if (header._dragMoved) { header._dragMoved = false; return; }
       if (e.target.closest('#sp-settings-btn, #sp-minimize-btn, #sp-panel-close, #sp-dock-collapse-btn, button')) return;
       if (panel.classList.contains('sp-docked')) {
         const collapsed = panel.classList.toggle('minimized');
-        dockCollapseBtn.setAttribute('aria-label', collapsed ? 'Expand section' : 'Collapse section');
+        if (dockCollapseBtn) dockCollapseBtn.setAttribute('aria-label', collapsed ? 'Expand section' : 'Collapse section');
       } else if (panel.classList.contains('minimized')) {
         panel.classList.remove('minimized');
         if (panel.dataset.savedH) panel.style.height = panel.dataset.savedH;
