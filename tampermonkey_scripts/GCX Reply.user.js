@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         GCX Reply
 // @namespace    https://spigen.com/gcx
-// @version      2.17.4
+// @version      2.17.5
 // @description  Amazon order data via GAS web app + Spigen product info + Zendesk auto-fill
 // @author       Spigen GCX
 // @updateURL    https://raw.githubusercontent.com/codingintheusa0402/spigen-gcx-automation/main/tampermonkey_scripts/GCX%20Reply.user.js
@@ -3486,20 +3486,20 @@
 
     // The new Zendesk omnipanel-pane-wrapper-apps container uses flex-direction:row,
     // which places GCX Reply and ChannelReply side-by-side instead of stacked.
-    // Force column layout so apps stack vertically and the panel scrolls correctly.
+    // Force column layout so apps stack vertically.
     mount.style.flexDirection = 'column';
-    mount.style.overflowY = 'auto';
     mount.style.overflowX = 'hidden';
 
-    // Also walk up and fix any hidden-overflow ancestor that clips the scroll.
-    (function enableDockScroll_() {
-      let el = mount.parentElement;
-      for (let i = 0; i < 4 && el && el !== document.body; i++) {
-        const oy = getComputedStyle(el).overflowY;
-        if (oy === 'auto' || oy === 'scroll') break;
-        if (oy === 'hidden') { el.style.overflowY = 'auto'; break; }
-        el = el.parentElement;
-      }
+    // Give the mount a viewport-relative max-height so overflow-y:auto can trigger
+    // a scrollbar. Without a height constraint the container has height:auto and
+    // grows to fit all children — nothing ever overflows, no scrollbar appears.
+    (function constrainMountHeight_() {
+      const rect = mount.getBoundingClientRect();
+      const topOffset = rect.top > 50 ? rect.top : 80; // fallback if not yet in view
+      const maxH = Math.max(300, window.innerHeight - topOffset - 8);
+      mount.style.maxHeight = maxH + 'px';
+      mount.style.overflowY = 'auto';
+      logStep_('Dock: mount maxH=' + maxH + 'px (viewportH=' + window.innerHeight + ', mountTop=' + Math.round(rect.top) + ')');
     })();
     panel.classList.remove('minimized');
     if (panel._glass) panel._glass.hide();
