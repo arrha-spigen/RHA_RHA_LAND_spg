@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         GCX Reply
 // @namespace    https://spigen.com/gcx
-// @version      2.17.17
+// @version      2.17.18
 // @description  Amazon order data via GAS web app + Spigen product info + Zendesk auto-fill
 // @author       Spigen GCX
 // @updateURL    https://raw.githubusercontent.com/codingintheusa0402/spigen-gcx-automation/main/tampermonkey_scripts/GCX%20Reply.user.js
@@ -3358,14 +3358,28 @@
   let _dockObserverDebounce = null;
   let _dockFailedAt = null; // timestamp of first failed dock attempt after nav; used for floating fallback
 
+  // Returns the DOM element for the current ticket panel, or null if not on a ticket.
+  // Used to scope all DOM queries so we never mount into a stale/hidden ticket panel
+  // (Zendesk keeps every open tab's DOM alive simultaneously).
+  function ticketScope_() {
+    const m = location.pathname.match(/\/tickets\/(\d+)/);
+    const id = m && m[1];
+    return (id && document.querySelector(`[data-test-id="ticket-${id}-standard-layout"]`)) || null;
+  }
+
   function findAppsPanelMount_() {
     const W = window.innerWidth, H = window.innerHeight;
     console.log('[GCX] findAppsPanelMount_ W=' + W + ' H=' + H);
 
+    // 0. Scope all queries to the current ticket's DOM so we never find/mount into
+    //    a stale ticket panel — Zendesk keeps all open tab DOMs alive simultaneously.
+    const _scope = ticketScope_() || document;
+    console.log('[GCX] ticket scope:', _scope === document ? 'document (no ticket)' : _scope.getAttribute('data-test-id'));
+
     // 1. Explicit Zendesk data-test-id selectors.
     // "omnipanel-pane-wrapper-apps" is confirmed by console diagnostics as the
     // correct Apps panel container in the new Zendesk navigation layout.
-    const direct = document.querySelector(
+    const direct = _scope.querySelector(
       '[data-test-id="omnipanel-pane-wrapper-apps"], ' +
       '[data-test-id="ticket-apps-pane"], [data-test-id="apps-tray"], ' +
       '[data-test-id="omnipanel-apps"], [data-test-id="ticket_sidebar"], ' +
@@ -3380,7 +3394,7 @@
     // as its sibling. Walk up from the Apps icon button; at the first ancestor
     // where the icon bar (narrow ≤120px) and a wider content sibling both exist,
     // return the content sibling as the mount point.
-    const omnipanelAppsBtn = document.querySelector('[data-test-id="omnipanel-selector-item-apps"]');
+    const omnipanelAppsBtn = _scope.querySelector('[data-test-id="omnipanel-selector-item-apps"]');
     if (omnipanelAppsBtn) {
       console.log('Step1.5: omnipanel Apps button found, walking up...');
       let el15 = omnipanelAppsBtn;
@@ -3451,7 +3465,7 @@
     //    of left edge is robust across different window widths. Center X > 60% of
     //    viewport means the element sits in the right portion of the page (Apps panel),
     //    not in the center ticket-editor area.
-    const allAppIds = [...document.querySelectorAll('[data-app-id]')];
+    const allAppIds = [..._scope.querySelectorAll('[data-app-id]')];
     console.log('Step2: [data-app-id] count =', allAppIds.length);
     allAppIds.forEach(el => {
       const r = el.getBoundingClientRect();
@@ -3481,13 +3495,13 @@
     // Return null here so the observer/heartbeat keeps retrying until the omnipanel
     // is ready, rather than triggering the unstable-mount loop that resets
     // _dockFailedAt on every brief success and prevents the floating fallback.
-    if (!document.querySelector('[data-test-id*="omnipanel-selector-item"]')) {
+    if (!_scope.querySelector('[data-test-id*="omnipanel-selector-item"]')) {
       console.log('Step3: omnipanel icon bar absent — mid-SPA-nav, returning null');
       return null;
     }
 
     // 3. zdusercontent iframe walk-up
-    const allIframes = [...document.querySelectorAll('iframe')];
+    const allIframes = [..._scope.querySelectorAll('iframe')];
     console.log('Step3: iframes total=' + allIframes.length);
     allIframes.forEach(f => {
       const r = f.getBoundingClientRect();
@@ -3583,20 +3597,20 @@
         // Immediate (no debounce) check — Zendesk may render omnipanel-pane-wrapper-apps
         // only briefly during a React commit before moving it into the hub iframe.
         // Catching it here without delay is critical; the 80ms debounce below misses it.
-        if (document.querySelector('[data-test-id="omnipanel-pane-wrapper-apps"]')) {
+        if ((ticketScope_() || document).querySelector('[data-test-id="omnipanel-pane-wrapper-apps"]')) {
           mountDocked_(panel);
           return;
         }
         clearTimeout(_dockObserverDebounce);
         _dockObserverDebounce = setTimeout(() => {
           if (!loadUi().dockMode || panel.isConnected) return;
-          if (document.querySelector('[data-test-id="omnipanel-pane-wrapper-apps"]')) {
+          if ((ticketScope_() || document).querySelector('[data-test-id="omnipanel-pane-wrapper-apps"]')) {
             mountDocked_(panel);
           } else if (!panel._autoClickedAppsBtn) {
             // Apps pane not rendered — Apps section may be inactive.
             // Click the Apps icon to activate it. Allow re-click after 2s in
             // case the first click didn't trigger a render (React synthetic event issue).
-            const appsBtn = document.querySelector('[data-test-id="omnipanel-selector-item-apps"]');
+            const appsBtn = (ticketScope_() || document).querySelector('[data-test-id="omnipanel-selector-item-apps"]');
             if (appsBtn && appsBtn.getAttribute('aria-pressed') !== 'true') {
               panel._autoClickedAppsBtn = true;
               logStep_('Dock: clicking Apps icon to activate section');
@@ -3616,7 +3630,7 @@
       // omnipanel-pane-wrapper-apps. The immediate observer check will then catch
       // the DOM mutation and mount correctly.  2s guard prevents rapid re-clicks.
       if (!panel._autoClickedAppsBtn) {
-        const appsBtn_ = document.querySelector('[data-test-id="omnipanel-selector-item-apps"]');
+        const appsBtn_ = (ticketScope_() || document).querySelector('[data-test-id="omnipanel-selector-item-apps"]');
         if (appsBtn_ && appsBtn_.getAttribute('aria-pressed') !== 'true') {
           panel._autoClickedAppsBtn = true;
           logStep_('Dock: clicking Apps icon to activate section');
@@ -3680,7 +3694,7 @@
     // with the Apps icon button so it only shows when Apps section is active.
     // Always re-attach to the *current* Apps icon DOM element — Zendesk
     // replaces this element on every SPA navigation, making the old observer stale.
-    const appsIconBtn_ = document.querySelector('[data-test-id="omnipanel-selector-item-apps"]');
+    const appsIconBtn_ = (ticketScope_() || document).querySelector('[data-test-id="omnipanel-selector-item-apps"]');
     if (appsIconBtn_) {
       const syncSectionVis_ = () => {
         const live = appsIconBtn_.isConnected;
@@ -4319,10 +4333,18 @@
       // Don't remount when GCX Reply is intentionally hidden because the user
       // has switched to a different omnipanel section (Customer Context, etc.).
       const hiddenBySection = _panelEl._gcxHiddenBySection === true;
+      // Detect wrong-ticket mount: panel is connected but lives inside a
+      // different ticket's DOM (Zendesk keeps all open tabs in DOM simultaneously).
+      const _hbScope = ticketScope_();
+      const inWrongTicket = _panelEl.isConnected && !!_hbScope && !_hbScope.contains(_panelEl);
       // Always re-mount when disconnected (detached from DOM), regardless of
       // hiddenBySection — the panel must be in the mount to be shown when the
       // user switches back to the Apps section.
-      if (!_panelEl.isConnected || (!hiddenBySection && _panelEl.offsetHeight === 0) || inFloatingFallback) {
+      if (!_panelEl.isConnected || (!hiddenBySection && _panelEl.offsetHeight === 0) || inFloatingFallback || inWrongTicket) {
+        if (inWrongTicket) {
+          _panelEl.remove();
+          logStep_('Dock: wrong ticket DOM, detaching and remounting...');
+        }
         mountDocked_(_panelEl);
       }
       return;
