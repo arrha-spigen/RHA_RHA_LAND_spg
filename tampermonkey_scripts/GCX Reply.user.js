@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         GCX Reply
 // @namespace    https://spigen.com/gcx
-// @version      2.17.13
+// @version      2.17.14
 // @description  Amazon order data via GAS web app + Spigen product info + Zendesk auto-fill
 // @author       Spigen GCX
 // @updateURL    https://raw.githubusercontent.com/codingintheusa0402/spigen-gcx-automation/main/tampermonkey_scripts/GCX%20Reply.user.js
@@ -3425,8 +3425,18 @@
               return iEl.parentElement || iEl;
             }
           }
+          // Guard: only mount in the Apps pane. When Customer Context / Knowledge
+          // / another section is active, contentBranch is their pane wrapper
+          // (e.g. omnipanel-pane-wrapper-customer-context). Mounting there would
+          // show GCX Reply in the wrong section and trigger churn.
+          // Break out so mountDocked_ can auto-click the Apps icon instead.
+          const _cbId = contentBranch.getAttribute('data-test-id') || '';
+          if (_cbId && !_cbId.includes('apps')) {
+            console.log('Step1.5: non-Apps section active (' + _cbId + ') — skipping, will click Apps icon');
+            break;
+          }
           console.log('Step1.5 HIT (contentBranch fallback):', contentBranch);
-          
+
           logStep_('Dock: omnipanel content found');
           return contentBranch;
         }
@@ -3588,6 +3598,19 @@
 
     const mount = findAppsPanelMount_();
     if (!mount) {
+      // If the Apps icon is in the DOM but its section isn't active (e.g. Customer
+      // Context is the saved default), click it so Zendesk renders
+      // omnipanel-pane-wrapper-apps. The immediate observer check will then catch
+      // the DOM mutation and mount correctly.  2s guard prevents rapid re-clicks.
+      if (!panel._autoClickedAppsBtn) {
+        const appsBtn_ = document.querySelector('[data-test-id="omnipanel-selector-item-apps"]');
+        if (appsBtn_ && appsBtn_.getAttribute('aria-pressed') !== 'true') {
+          panel._autoClickedAppsBtn = true;
+          logStep_('Dock: clicking Apps icon to activate section');
+          appsBtn_.click();
+          setTimeout(() => { panel._autoClickedAppsBtn = false; }, 2000);
+        }
+      }
       if (!panel.isConnected) {
         if (loadUi().dockMode) {
           // After 2s of failed dock attempts, show panel floating so the user
