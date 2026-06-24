@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         GCX Reply
 // @namespace    https://spigen.com/gcx
-// @version      2.17.12
+// @version      2.17.13
 // @description  Amazon order data via GAS web app + Spigen product info + Zendesk auto-fill
 // @author       Spigen GCX
 // @updateURL    https://raw.githubusercontent.com/codingintheusa0402/spigen-gcx-automation/main/tampermonkey_scripts/GCX%20Reply.user.js
@@ -3356,6 +3356,7 @@
   // container that holds them. A MutationObserver re-mounts after re-renders.
   let _dockObserver = null;
   let _dockObserverDebounce = null;
+  let _dockFailedAt = null; // timestamp of first failed dock attempt after nav; used for floating fallback
 
   function findAppsPanelMount_() {
     const W = window.innerWidth, H = window.innerHeight;
@@ -3556,20 +3557,28 @@
     if (!_dockObserver) {
       _dockObserver = new MutationObserver(() => {
         if (!loadUi().dockMode || panel.isConnected) return;
+        // Immediate (no debounce) check — Zendesk may render omnipanel-pane-wrapper-apps
+        // only briefly during a React commit before moving it into the hub iframe.
+        // Catching it here without delay is critical; the 80ms debounce below misses it.
+        if (document.querySelector('[data-test-id="omnipanel-pane-wrapper-apps"]')) {
+          mountDocked_(panel);
+          return;
+        }
         clearTimeout(_dockObserverDebounce);
         _dockObserverDebounce = setTimeout(() => {
           if (!loadUi().dockMode || panel.isConnected) return;
           if (document.querySelector('[data-test-id="omnipanel-pane-wrapper-apps"]')) {
-            // Apps pane is now in the DOM — mount.
             mountDocked_(panel);
           } else if (!panel._autoClickedAppsBtn) {
             // Apps pane not rendered — Apps section may be inactive.
-            // Click the Apps icon once to activate it and cause the pane to render.
+            // Click the Apps icon to activate it. Allow re-click after 2s in
+            // case the first click didn't trigger a render (React synthetic event issue).
             const appsBtn = document.querySelector('[data-test-id="omnipanel-selector-item-apps"]');
             if (appsBtn && appsBtn.getAttribute('aria-pressed') !== 'true') {
               panel._autoClickedAppsBtn = true;
               logStep_('Dock: clicking Apps icon to activate section');
               appsBtn.click();
+              setTimeout(() => { panel._autoClickedAppsBtn = false; }, 2000);
             }
           }
         }, 80);
@@ -3581,8 +3590,21 @@
     if (!mount) {
       if (!panel.isConnected) {
         if (loadUi().dockMode) {
-          // Dock mode: keep panel detached; observer + heartbeat will retry.
-          logStep_('Dock: mount not found — staying detached, observer + heartbeat will retry.');
+          // After 2s of failed dock attempts, show panel floating so the user
+          // always sees it even when Zendesk renders the omnipanel inside a
+          // cross-origin hub iframe (unreachable from the main document).
+          // The heartbeat's inFloatingFallback path keeps retrying mountDocked_()
+          // so the panel re-docks the moment the omnipanel appears in main doc.
+          if (!_dockFailedAt) _dockFailedAt = Date.now();
+          if (Date.now() - _dockFailedAt >= 2000) {
+            panel.classList.remove('sp-docked');
+            panel._gcxHiddenBySection = false;
+            panel.style.display = '';
+            document.body.appendChild(panel);
+            logStep_('Dock: 2s timeout — floating fallback (heartbeat retries dock)');
+          } else {
+            logStep_('Dock: mount not found — staying detached, observer + heartbeat will retry.');
+          }
         } else {
           panel.classList.remove('sp-docked');
           document.body.appendChild(panel);
@@ -3591,6 +3613,7 @@
       }
       return;
     }
+    _dockFailedAt = null; // reset — dock succeeded
     // Standalone block at the top of the Apps panel — independent of ChannelReply.
     if (panel.parentElement !== mount || panel.previousElementSibling) {
       mount.insertBefore(panel, mount.firstChild);
@@ -4120,6 +4143,7 @@
         if (newId !== lastTicketId) {
           lastTicketId = newId;
           resetPanel();
+          _dockFailedAt = null; // restart the 2s floating-fallback timer for the new ticket
           clearTimeout(navTimer);
           navTimer = setTimeout(autoDetectAll, 1500);
           // Re-run mountDocked_() after each ticket navigation so that the section
