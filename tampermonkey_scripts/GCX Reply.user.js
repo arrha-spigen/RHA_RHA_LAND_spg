@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         GCX Reply
 // @namespace    https://spigen.com/gcx
-// @version      2.17.15
+// @version      2.17.16
 // @description  Amazon order data via GAS web app + Spigen product info + Zendesk auto-fill
 // @author       Spigen GCX
 // @updateURL    https://raw.githubusercontent.com/codingintheusa0402/spigen-gcx-automation/main/tampermonkey_scripts/GCX%20Reply.user.js
@@ -3473,6 +3473,19 @@
     }
     console.log('Step2: no [data-app-id] matched center-X threshold');
 
+    // Guard: if the omnipanel icon bar (the narrow button strip containing
+    // omnipanel-selector-item-* buttons) is completely absent, Zendesk is mid-SPA
+    // and has torn down the old ticket panel but not yet rendered the new one.
+    // Any zdusercontent iframes found by Step 3 belong to the old ticket context
+    // and will be replaced within milliseconds, making any mount instantly unstable.
+    // Return null here so the observer/heartbeat keeps retrying until the omnipanel
+    // is ready, rather than triggering the unstable-mount loop that resets
+    // _dockFailedAt on every brief success and prevents the floating fallback.
+    if (!document.querySelector('[data-test-id*="omnipanel-selector-item"]')) {
+      console.log('Step3: omnipanel icon bar absent — mid-SPA-nav, returning null');
+      return null;
+    }
+
     // 3. zdusercontent iframe walk-up
     const allIframes = [...document.querySelectorAll('iframe')];
     console.log('Step3: iframes total=' + allIframes.length);
@@ -3619,12 +3632,12 @@
           // The heartbeat's inFloatingFallback path keeps retrying mountDocked_()
           // so the panel re-docks the moment the omnipanel appears in main doc.
           if (!_dockFailedAt) _dockFailedAt = Date.now();
-          if (Date.now() - _dockFailedAt >= 2000) {
+          if (Date.now() - _dockFailedAt >= 1000) {
             panel.classList.remove('sp-docked');
             panel._gcxHiddenBySection = false;
             panel.style.display = '';
             document.body.appendChild(panel);
-            logStep_('Dock: 2s timeout — floating fallback (heartbeat retries dock)');
+            logStep_('Dock: 1s timeout — floating fallback (heartbeat retries dock)');
           } else {
             logStep_('Dock: mount not found — staying detached, observer + heartbeat will retry.');
           }
