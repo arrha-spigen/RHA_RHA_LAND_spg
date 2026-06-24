@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         GCX Reply
 // @namespace    https://spigen.com/gcx
-// @version      2.17.14
+// @version      2.17.15
 // @description  Amazon order data via GAS web app + Spigen product info + Zendesk auto-fill
 // @author       Spigen GCX
 // @updateURL    https://raw.githubusercontent.com/codingintheusa0402/spigen-gcx-automation/main/tampermonkey_scripts/GCX%20Reply.user.js
@@ -3675,6 +3675,17 @@
         panel.style.display = inApps ? '' : 'none';
       };
       syncSectionVis_();
+      // When the Apps section isn't currently active, the panel is hidden.
+      // Auto-click the Apps icon once per ticket visit so it appears without
+      // the user having to manually switch sections. Step 3 of findAppsPanelMount_
+      // finds the zdusercontent iframe mount even when Apps isn't active, so the
+      // old auto-click code in the !mount branch is never reached in this case.
+      if (panel._gcxHiddenBySection && !panel._autoClickedAppsBtn) {
+        panel._autoClickedAppsBtn = true;
+        logStep_('Dock: clicking Apps icon (section not active)');
+        appsIconBtn_.click();
+        setTimeout(() => { panel._autoClickedAppsBtn = false; }, 2000);
+      }
       if (!panel._sectionObserver) {
         panel._sectionObserver = new MutationObserver(syncSectionVis_);
       }
