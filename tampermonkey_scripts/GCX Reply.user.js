@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         GCX Reply
 // @namespace    https://spigen.com/gcx
-// @version      2.17.16
+// @version      2.17.17
 // @description  Amazon order data via GAS web app + Spigen product info + Zendesk auto-fill
 // @author       Spigen GCX
 // @updateURL    https://raw.githubusercontent.com/codingintheusa0402/spigen-gcx-automation/main/tampermonkey_scripts/GCX%20Reply.user.js
@@ -3683,7 +3683,9 @@
     const appsIconBtn_ = document.querySelector('[data-test-id="omnipanel-selector-item-apps"]');
     if (appsIconBtn_) {
       const syncSectionVis_ = () => {
+        const live = appsIconBtn_.isConnected;
         const inApps = appsIconBtn_.getAttribute('aria-pressed') === 'true';
+        logStep_('Dock: syncSection inApps=' + inApps + ' btn=' + (live ? 'live' : 'STALE'));
         panel._gcxHiddenBySection = !inApps;
         panel.style.display = inApps ? '' : 'none';
       };
@@ -3699,10 +3701,12 @@
         appsIconBtn_.click();
         setTimeout(() => { panel._autoClickedAppsBtn = false; }, 2000);
       }
-      if (!panel._sectionObserver) {
-        panel._sectionObserver = new MutationObserver(syncSectionVis_);
-      }
-      panel._sectionObserver.disconnect();
+      // Always recreate the observer so the callback closure captures the current
+      // appsIconBtn_ reference. Reusing the old observer across SPA navigations
+      // would keep the stale closure from the first mountDocked_() call, which
+      // reads a detached element's aria-pressed and permanently hides the panel.
+      if (panel._sectionObserver) panel._sectionObserver.disconnect();
+      panel._sectionObserver = new MutationObserver(syncSectionVis_);
       panel._sectionObserver.observe(appsIconBtn_, { attributes: true, attributeFilter: ['aria-pressed'] });
     } else {
       panel._gcxHiddenBySection = false;
