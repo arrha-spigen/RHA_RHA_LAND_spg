@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         GCX Reply
 // @namespace    https://spigen.com/gcx
-// @version      2.17.19
+// @version      2.17.20
 // @description  Amazon order data via GAS web app + Spigen product info + Zendesk auto-fill
 // @author       Spigen GCX
 // @updateURL    https://raw.githubusercontent.com/codingintheusa0402/spigen-gcx-automation/main/tampermonkey_scripts/GCX%20Reply.user.js
@@ -3700,10 +3700,10 @@
     }
     panel.classList.add('sp-docked');
 
-    // Restore user-set docked height, or apply a tall default so the panel
-    // doesn't look cramped before any order data is loaded.
+    // Restore user-set docked height. Default is 300px so ChannelReply
+    // remains visible below GCX Reply in the 735px wrapper.
     const savedDockH = loadUi().dockH;
-    panel.style.height = (savedDockH > 80 ? savedDockH : 500) + 'px';
+    panel.style.height = (savedDockH > 80 ? savedDockH : 300) + 'px';
 
     // The new Zendesk omnipanel-pane-wrapper-apps container uses flex-direction:row,
     // which places GCX Reply and ChannelReply side-by-side instead of stacked.
