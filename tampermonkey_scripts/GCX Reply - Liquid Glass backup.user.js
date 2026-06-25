@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         GCX Reply
 // @namespace    https://spigen.com/gcx
-// @version      2.18.0
+// @version      2.17.20
 // @description  Amazon order data via GAS web app + Spigen product info + Zendesk auto-fill
 // @author       Spigen GCX
 // @updateURL    https://raw.githubusercontent.com/codingintheusa0402/spigen-gcx-automation/main/tampermonkey_scripts/GCX%20Reply.user.js
@@ -1602,7 +1602,390 @@
       (document.head || document.documentElement || document.body).appendChild(el);
     } catch (_) {}
   }
+  // ── WebGL Liquid Glass (port of Spigen1/liquid-glass-js) ─────────────────
+  // Exact GLSL fragment shader from container.js. html2canvas (@require) captures
+  // the page background once as a texture; the shader samples it with edge
+  // refraction, Gaussian blur, and a background-aware tint gradient each frame.
+  // Falls back to CSS backdrop-filter when WebGL is unavailable.
+  const SP_GLASS_DEFAULTS_ = {
+    blurRadius:    2.5,   // gradient: near-0 at edges, peaks at center
+    tintOpacity:   0.07,  // very subtle neutral frost
+    edgeIntensity: 0.038,
+    rimIntensity:  0.062,
+    baseIntensity: 0.018,
+    edgeDistance:  0.090,
+    rimDistance:   0.360,
+    baseDistance:  0.130,
+    cornerBoost:   0.028,
+    rippleEffect:  0.140,
+    warp:          false,
+  };
+  const SP_GLASS_LS_KEY_ = 'sp_glass_params_v4';
+
+  class GlassWebGL_ {
+    constructor(panel) {
+      this.panel      = panel;
+      this.params     = Object.assign({}, SP_GLASS_DEFAULTS_);
+      this._rafId     = null;
+      this._dead      = false;
+      this._capturing = false;
+      try {
+        const s = JSON.parse(localStorage.getItem(SP_GLASS_LS_KEY_) || '{}');
+        if (s && typeof s === 'object') Object.assign(this.params, s);
+      } catch (_) {}
+
+      this.canvas = document.createElement('canvas');
+      this.canvas.id = 'sp-glass-canvas';
+      this.canvas.style.cssText =
+        'position:absolute;inset:0;width:100%;height:100%;border-radius:21px;' +
+        'z-index:0;pointer-events:none;display:none;';
+      panel.insertBefore(this.canvas, panel.firstChild);
+
+      this._gl = this.canvas.getContext('webgl',
+                   { alpha: true, preserveDrawingBuffer: true }) ||
+                 this.canvas.getContext('experimental-webgl',
+                   { alpha: true, preserveDrawingBuffer: true });
+      if (!this._gl) { console.warn('[GCX] WebGL unavailable'); return; }
+
+      this._buildProgram();
+      if (!this._prog) return;
+      // No initial captures — lazy capture fires on first drag (show() below).
+      // CSS #sp-glass-layer provides instant backdrop-filter fallback until WebGL is ready.
+    }
+
+    _buildProgram() {
+      const gl = this._gl;
+
+      const vs = this._shader(gl.VERTEX_SHADER, `
+        attribute vec2 a_position;
+        attribute vec2 a_texcoord;
+        varying vec2 v_texcoord;
+        void main() {
+          gl_Position = vec4(a_position, 0.0, 1.0);
+          v_texcoord = a_texcoord;
+        }
+      `);
+
+      const fs = this._shader(gl.FRAGMENT_SHADER, `
+        precision mediump float;
+        uniform sampler2D u_image;
+        uniform vec2 u_resolution;
+        uniform vec2 u_textureSize;
+        uniform float u_scrollY;
+        uniform float u_blurRadius;
+        uniform float u_borderRadius;
+        uniform vec2 u_containerPosition;
+        uniform float u_warp;
+        uniform float u_edgeIntensity;
+        uniform float u_rimIntensity;
+        uniform float u_baseIntensity;
+        uniform float u_edgeDistance;
+        uniform float u_rimDistance;
+        uniform float u_baseDistance;
+        uniform float u_cornerBoost;
+        uniform float u_rippleEffect;
+        uniform float u_tintOpacity;
+        varying vec2 v_texcoord;
+
+        float rrDist(vec2 coord, vec2 size, float r) {
+          vec2 c = size * 0.5;
+          vec2 q = abs(coord * size - c) - (c - r);
+          return length(max(q, 0.0)) + min(max(q.x, q.y), 0.0) - r;
+        }
+
+        void main() {
+          vec2 coord = v_texcoord;
+          vec2 cSize = u_resolution;
+          vec2 tSize = u_textureSize;
+
+          vec2 cCenter = u_containerPosition + vec2(0.0, u_scrollY);
+          vec2 pagePixel = cCenter + (coord - 0.5) * cSize;
+          vec2 texCoord = pagePixel / tSize;
+
+          float d = -rrDist(coord, u_resolution, u_borderRadius);
+          d = max(d, 0.0);
+          float dNorm = d / min(u_resolution.x, u_resolution.y);
+          vec2 _cd = coord - vec2(0.5, 0.5);
+          vec2 sNorm = length(_cd) > 0.001 ? normalize(_cd) : vec2(0.0);
+
+          float baseI = 1.0 - exp(-d * u_baseDistance);
+          float edgeI = exp(-d * u_edgeDistance);
+          float rimI  = exp(-d * u_rimDistance);
+
+          float base = u_warp > 0.5 ? baseI * u_baseIntensity : 0.0;
+          vec2 refr = sNorm * (base + edgeI * u_edgeIntensity + rimI * u_rimIntensity);
+
+          float cxN = max(min(coord.x, 1.0 - coord.x), min(coord.y, 1.0 - coord.y));
+          refr += sNorm * exp(-cxN * min(u_resolution.x, u_resolution.y) * 0.3) * u_cornerBoost;
+
+          vec2 perp = vec2(-sNorm.y, sNorm.x);
+          refr += perp * sin(dNorm * 25.0) * u_rippleEffect * rimI;
+
+          texCoord += refr;
+
+          // 7×7 Gaussian blur with edge-to-center gradient:
+          // blur is near-zero at edges, ramps up to u_blurRadius at the center.
+          // smoothstep(0, 0.35, dNorm) maps [0→35% of min-dim] to [0→1].
+          vec4 color = vec4(0.0);
+          vec2 ts = 1.0 / tSize;
+          float sig = max((u_blurRadius / 2.0) * smoothstep(0.0, 0.35, dNorm), 0.001);
+          float tw = 0.0;
+          for (float i = -3.0; i <= 3.0; i += 1.0) {
+            for (float j = -3.0; j <= 3.0; j += 1.0) {
+              float dst = length(vec2(i, j));
+              if (dst > 3.5) continue;
+              float w = exp(-(dst * dst) / (2.0 * sig * sig));
+              color += texture2D(u_image, texCoord + vec2(i, j) * ts * sig) * w;
+              tw += w;
+            }
+          }
+          color /= tw;
+
+          // Neutral frosted-glass tint — no gradient, no dark bottom
+          color.rgb = mix(color.rgb, vec3(0.96), u_tintOpacity);
+
+          float mask = 1.0 - smoothstep(-1.0, 1.0,
+            rrDist(coord, u_resolution, u_borderRadius));
+          gl_FragColor = vec4(color.rgb, mask);
+        }
+      `);
+
+      if (!vs || !fs) return;
+      const prog = gl.createProgram();
+      gl.attachShader(prog, vs);
+      gl.attachShader(prog, fs);
+      gl.linkProgram(prog);
+      if (!gl.getProgramParameter(prog, gl.LINK_STATUS)) {
+        console.error('[GCX] GL link:', gl.getProgramInfoLog(prog)); return;
+      }
+      gl.useProgram(prog);
+      this._prog = prog;
+
+      const pb = gl.createBuffer();
+      gl.bindBuffer(gl.ARRAY_BUFFER, pb);
+      gl.bufferData(gl.ARRAY_BUFFER,
+        new Float32Array([-1,-1, 1,-1, -1,1, -1,1, 1,-1, 1,1]), gl.STATIC_DRAW);
+      const tb = gl.createBuffer();
+      gl.bindBuffer(gl.ARRAY_BUFFER, tb);
+      gl.bufferData(gl.ARRAY_BUFFER,
+        new Float32Array([0,1, 1,1, 0,0, 0,0, 1,1, 1,0]), gl.STATIC_DRAW);
+
+      const posLoc = gl.getAttribLocation(prog, 'a_position');
+      const tcLoc  = gl.getAttribLocation(prog, 'a_texcoord');
+      gl.bindBuffer(gl.ARRAY_BUFFER, pb);
+      gl.enableVertexAttribArray(posLoc);
+      gl.vertexAttribPointer(posLoc, 2, gl.FLOAT, false, 0, 0);
+      gl.bindBuffer(gl.ARRAY_BUFFER, tb);
+      gl.enableVertexAttribArray(tcLoc);
+      gl.vertexAttribPointer(tcLoc, 2, gl.FLOAT, false, 0, 0);
+
+      const ul = n => gl.getUniformLocation(prog, n);
+      this._U = {
+        res:  ul('u_resolution'),  texSize: ul('u_textureSize'),
+        sY:   ul('u_scrollY'),     blur:    ul('u_blurRadius'),
+        brad: ul('u_borderRadius'),cPos:    ul('u_containerPosition'),
+        warp: ul('u_warp'),        edgeI:   ul('u_edgeIntensity'),
+        rimI: ul('u_rimIntensity'),baseI:   ul('u_baseIntensity'),
+        edgeD:ul('u_edgeDistance'),rimD:    ul('u_rimDistance'),
+        baseD:ul('u_baseDistance'),corner:  ul('u_cornerBoost'),
+        ripple:ul('u_rippleEffect'),tint:   ul('u_tintOpacity'),
+        img:  ul('u_image'),
+      };
+
+      this._tex = gl.createTexture();
+      gl.bindTexture(gl.TEXTURE_2D, this._tex);
+      gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, 1, 1, 0, gl.RGBA, gl.UNSIGNED_BYTE,
+                    new Uint8Array([200,205,215,255]));
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+      gl.activeTexture(gl.TEXTURE0);
+      gl.uniform1i(this._U.img, 0);
+      gl.clearColor(0, 0, 0, 0);
+      gl.enable(gl.BLEND);
+      gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
+      this._texW = 1; this._texH = 1;
+    }
+
+    _shader(type, src) {
+      const gl = this._gl;
+      const sh = gl.createShader(type);
+      gl.shaderSource(sh, src);
+      gl.compileShader(sh);
+      if (!gl.getShaderParameter(sh, gl.COMPILE_STATUS)) {
+        console.error('[GCX] Shader:', gl.getShaderInfoLog(sh)); return null;
+      }
+      return sh;
+    }
+
+    _schedCapture(delay) {
+      clearTimeout(this._capTimer);
+      this._capTimer = setTimeout(() => { if (!this._dead) this._capture(); }, delay);
+    }
+
+    _capture() {
+      if (typeof html2canvas !== 'function' || !this._prog || this._dead || this._capturing) return;
+      // Glass disabled by user → never capture the background.
+      if (this.panel.classList.contains('sp-glass-disabled')) return;
+      this._capturing = true;
+      const panel = this.panel;
+      // Capture the viewport only (not full body scroll height).
+      // Zendesk's body.scrollHeight ≈ innerHeight (ticket content scrolls internally).
+      // Using viewport coords keeps textureCoord always in [0,1] at any panel position.
+      // Panel is excluded via ignoreElements — no visibility hide needed.
+      const vw = window.innerWidth, vh = window.innerHeight;
+      // scale:1 → full viewport resolution for smooth, non-pixelated glass.
+      // Safe at full res because captures only fire twice at startup, never periodically.
+      html2canvas(document.body, {
+        x: 0, y: 0, width: vw, height: vh,
+        windowWidth: vw, windowHeight: vh,
+        scale: 1, useCORS: true, allowTaint: true,
+        backgroundColor: null, logging: false,
+        ignoreElements: el => el === panel || el.id === 'sp-toggle-btn',
+      }).then(bg => {
+        this._capturing = false;
+        if (this._dead) return;
+
+        const gl = this._gl;
+        // bg.width/height = actual captured area in logical pixels (may differ from vw
+        // on Windows HiDPI if html2canvas returns a larger canvas than specified).
+        const logW = bg.width, logH = bg.height;
+        const maxTex = gl.getParameter(gl.MAX_TEXTURE_SIZE);
+        let src = bg;
+        if (bg.width > maxTex || bg.height > maxTex) {
+          const sc = Math.min(maxTex / bg.width, maxTex / bg.height);
+          const c2 = document.createElement('canvas');
+          c2.width  = Math.floor(bg.width  * sc);
+          c2.height = Math.floor(bg.height * sc);
+          c2.getContext('2d').drawImage(bg, 0, 0, c2.width, c2.height);
+          src = c2;
+        }
+        // _texW/_texH = logical viewport dims that the texture covers (not compressed dims)
+        this._texW = logW;
+        this._texH = logH;
+        gl.bindTexture(gl.TEXTURE_2D, this._tex);
+        gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, src);
+
+        const glLayer = panel.querySelector('#sp-glass-layer');
+        if (glLayer) glLayer.style.display = 'none';
+        // If user is mid-drag (lazy capture completed while dragging), show WebGL canvas now
+        if (panel.classList.contains('sp-glass-active')) {
+          this.canvas.style.display = 'block';
+        }
+
+        this._draw();
+      }).catch(err => {
+        this._capturing = false;
+        console.warn('[GCX] html2canvas:', err);
+      });
+    }
+
+    // Called during panel resize to sync canvas pixel dimensions then re-render.
+    _resize() {
+      if (!this._prog || this._dead) return;
+      const rect = this.panel.getBoundingClientRect();
+      const w = Math.ceil(rect.width), h = Math.ceil(rect.height);
+      if (this.canvas.width !== w || this.canvas.height !== h) {
+        this.canvas.width  = w;
+        this.canvas.height = h;
+        this._gl.viewport(0, 0, w, h);
+      }
+      this._draw();
+    }
+
+    _draw() {
+      const gl = this._gl, p = this.params, U = this._U;
+      const rect = this.panel.getBoundingClientRect();
+      const w = Math.ceil(rect.width), h = Math.ceil(rect.height);
+      if (this.canvas.width !== w || this.canvas.height !== h) {
+        this.canvas.width = w; this.canvas.height = h;
+        gl.viewport(0, 0, w, h);
+      }
+      gl.clear(gl.COLOR_BUFFER_BIT);
+      gl.uniform2f(U.res,    w, h);
+      gl.uniform2f(U.texSize,this._texW, this._texH);
+      // Texture is viewport-sized (not full-page), so scrollY offset is not needed.
+      // u_containerPosition is already in viewport coordinates.
+      gl.uniform1f(U.sY,     0);
+      gl.uniform1f(U.blur,   p.blurRadius);
+      gl.uniform1f(U.brad,   21);
+      gl.uniform2f(U.cPos,   rect.left + w / 2, rect.top + h / 2);
+      gl.uniform1f(U.warp,   p.warp ? 1.0 : 0.0);
+      gl.uniform1f(U.edgeI,  p.edgeIntensity);
+      gl.uniform1f(U.rimI,   p.rimIntensity);
+      gl.uniform1f(U.baseI,  p.baseIntensity);
+      gl.uniform1f(U.edgeD,  p.edgeDistance);
+      gl.uniform1f(U.rimD,   p.rimDistance);
+      gl.uniform1f(U.baseD,  p.baseDistance);
+      gl.uniform1f(U.corner, p.cornerBoost);
+      gl.uniform1f(U.ripple, p.rippleEffect);
+      gl.uniform1f(U.tint,   p.tintOpacity);
+      gl.drawArrays(gl.TRIANGLES, 0, 6);
+    }
+
+    show() {
+      // Glass disabled by user → do nothing (panel stays solid, no distortion).
+      if (this.panel.classList.contains('sp-glass-disabled')) return;
+      if (!this._dead) {
+        this.panel.classList.add('sp-glass-active');
+        if (this._texW === 1) {
+          // No texture yet — CSS #sp-glass-layer stays visible as backdrop-filter fallback.
+          // Lazy capture fires here; _capture().then() will show the WebGL canvas when ready.
+          if (!this._capturing) this._capture();
+        } else {
+          this.canvas.style.display = 'block';
+        }
+      }
+    }
+    hide() {
+      this.panel.classList.remove('sp-glass-active');
+      this.canvas.style.display = 'none';
+    }
+
+    setParam(name, value) {
+      this.params[name] = value;
+      try { localStorage.setItem(SP_GLASS_LS_KEY_, JSON.stringify(this.params)); } catch (_) {}
+    }
+
+    recapture() { this._capture(); }
+
+    // Mark texture as stale so next show() triggers a fresh capture.
+    // Called on SPA navigation — avoids html2canvas during page load.
+    invalidate() {
+      clearTimeout(this._capTimer);
+      this._texW = 1; this._texH = 1;
+      this.canvas.style.display = 'none';
+      const glLayer = this.panel.querySelector('#sp-glass-layer');
+      if (glLayer) glLayer.style.display = '';
+    }
+
+    destroy() {
+      this._dead = true;
+      if (this._rafId)    cancelAnimationFrame(this._rafId);
+      if (this._capTimer) clearTimeout(this._capTimer);
+    }
+  }
   safeAddStyle_(`
+    /* ── Iridescent border animation ────────────────────────────────────── */
+    @property --sp-iris {
+      syntax: '<angle>';
+      inherits: false;
+      initial-value: 0deg;
+    }
+    @property --sp-glow-clr {
+      syntax: '<color>';
+      inherits: false;
+      initial-value: rgba(160,210,255,0.22);
+    }
+    @keyframes sp-iris { to { --sp-iris: 360deg; } }
+    @keyframes sp-glow-shift {
+      0%   { --sp-glow-clr: rgba(140,200,255,0.22); }
+      25%  { --sp-glow-clr: rgba(175,115,255,0.22); }
+      50%  { --sp-glow-clr: rgba(255,155,75,0.20);  }
+      75%  { --sp-glow-clr: rgba(75,200,195,0.22);  }
+      100% { --sp-glow-clr: rgba(140,200,255,0.22); }
+    }
     /* ── Main panel ─────────────────────────────────────────────────────── */
     #sp-order-panel {
       position: fixed;
@@ -1615,10 +1998,26 @@
       display: flex;
       flex-direction: column;
       overflow: hidden;
-      background: rgb(244,246,251);
-      border: 1px solid rgba(0,0,0,0.10);
+      background:
+        transparent padding-box,
+        conic-gradient(
+          from var(--sp-iris) at 50% 50%,
+          rgba(255,255,255,0.95),
+          rgba(185,225,255,0.88),
+          rgba(85,155,255,0.82),
+          rgba(110,80,240,0.78),
+          rgba(155,45,215,0.72),
+          rgba(100,30,140,0.62),
+          rgba(195,65,155,0.70),
+          rgba(250,130,65,0.78),
+          rgba(255,200,85,0.88),
+          rgba(255,248,195,0.94),
+          rgba(255,255,255,0.95)
+        ) border-box;
+      border: 2px solid transparent;
       border-radius: 22px;
       box-shadow:
+        0 0 18px var(--sp-glow-clr),
         0 10px 28px rgba(0,0,0,0.10),
         0 3px 8px rgba(0,0,0,0.06),
         inset 0 1px 0 rgba(255,255,255,0.70);
@@ -1626,9 +2025,58 @@
       font-size: 12.5px;
       color: #1c1c1e;
       z-index: 99999;
+      animation: sp-iris 9s linear infinite, sp-glow-shift 9s linear infinite;
+      background-color: rgb(244,246,251);
+    }
+
+    /* Glass layer: backdrop-blur (18px = library's gentle blur) + SVG edge   */
+    /* refraction. Fill matches library shader: top=white/18%, bot=gray/18%  */
+    #sp-glass-layer {
+      position: absolute;
+      inset: 0;
+      border-radius: 21px;
+      background: linear-gradient(to bottom,
+        rgba(255,255,255,0.22) 0%,
+        rgba(168,170,180,0.22) 100%
+      );
+      backdrop-filter: blur(14px) saturate(180%);
+      -webkit-backdrop-filter: blur(14px) saturate(180%);
+      pointer-events: none;
+    }
+    /* Caustic sheen: subtle specular at upper-left only (library's rim light) */
+    #sp-glass-layer::before {
+      content: '';
+      position: absolute;
+      inset: 0;
+      border-radius: inherit;
+      background:
+        radial-gradient(ellipse 75% 45% at 12% -8%, rgba(255,255,255,0.14) 0%, transparent 65%),
+        radial-gradient(ellipse 45% 25% at 90% 106%, rgba(255,255,255,0.06) 0%, transparent 55%);
+      pointer-events: none;
     }
 
     #sp-order-panel * { box-sizing: border-box; }
+
+    /* While dragging/resizing: transparent so WebGL canvas shows through */
+    #sp-order-panel.sp-glass-active { background-color: transparent; }
+    #sp-order-panel.sp-glass-active #sp-panel-header { background: rgba(255,255,255,0.05); }
+
+    /* Glass disabled: kill ALL glass layers + effects, force solid panel.    */
+    /* Hides both the CSS backdrop-blur layer and the WebGL distortion canvas, */
+    /* and overrides the sp-glass-active transparency so content stays opaque. */
+    #sp-order-panel.sp-glass-disabled #sp-glass-layer,
+    #sp-order-panel.sp-glass-disabled #sp-glass-canvas {
+      display: none !important;
+    }
+    #sp-order-panel.sp-glass-disabled,
+    #sp-order-panel.sp-glass-disabled.sp-glass-active {
+      background-color: rgb(244,246,251) !important;
+      backdrop-filter: none !important;
+      -webkit-backdrop-filter: none !important;
+    }
+    #sp-order-panel.sp-glass-disabled.sp-glass-active #sp-panel-header {
+      background: rgb(236,239,248) !important;
+    }
 
     /* ── Header ─────────────────────────────────────────────────────────── */
     #sp-panel-header {
@@ -2015,6 +2463,8 @@
       animation: none !important;
       z-index: auto;
     }
+    #sp-order-panel.sp-docked #sp-glass-layer,
+    #sp-order-panel.sp-docked #sp-glass-canvas { display: none !important; }
     /* In docked mode, hide all resize grips except the south (bottom-drag) one */
     #sp-order-panel.sp-docked .sp-re:not(.sp-re-s) { display: none !important; }
     #sp-order-panel.sp-docked .sp-re-s {
@@ -2049,7 +2499,7 @@
     #sp-order-panel.sp-docked #sp-minimize-btn,
     #sp-order-panel.sp-docked #sp-panel-close { display: none !important; }
     #sp-order-panel.sp-docked #sp-settings-btn { margin-left: auto; }
-    /* Settings drawer: override colors for the white docked background */
+    /* Settings drawer: override glass-mode colors for the white docked background */
     #sp-order-panel.sp-docked #sp-settings-drawer.sp-settings-open {
       border-bottom: 1px solid #e9ebed;
       max-height: 280px;
@@ -2179,6 +2629,12 @@
       min-height: 36px;
     }
 
+    /* ── Drag-ghost: glass dissolves while moving ────────────────────────── */
+    /* Glass layer transitions fast on drag start, recovers on drop.         */
+    #sp-order-panel #sp-glass-layer {
+      transition: background 0.12s ease, backdrop-filter 0.12s ease,
+                  -webkit-backdrop-filter 0.12s ease, opacity 0.12s ease;
+    }
     #sp-order-panel.sp-dragging {
       animation-duration: 1.6s, 1.6s;
       box-shadow: 0 8px 20px rgba(0,0,0,0.10);
@@ -2190,6 +2646,7 @@
     const d = document.createElement('div');
     d.id = PANEL_ID;
     d.innerHTML = `
+      <div id="sp-glass-layer"></div>
       <div class="sp-re sp-re-n"></div><div class="sp-re sp-re-ne"></div>
       <div class="sp-re sp-re-e"></div><div class="sp-re sp-re-se"></div>
       <div class="sp-re sp-re-s"></div><div class="sp-re sp-re-sw"></div>
@@ -2201,7 +2658,7 @@
         </svg>
         GCX Reply
         <span style="font-size:9.5px;font-weight:normal;color:#bbb;margin-left:3px;vertical-align:middle;letter-spacing:0.3px;">v${SCRIPT_VER}</span>
-        <span id="sp-settings-btn" title="Settings">⚙</span>
+        <span id="sp-settings-btn" title="Glass Settings">⚙</span>
         <span id="sp-minimize-btn" title="Minimize">─</span>
         <span id="sp-panel-close" title="Close">✕</span>
         <button id="sp-apps-toggle-btn" title="Show ChannelReply">Apps ▼</button>
@@ -2804,6 +3261,7 @@
         panel.style.left  = (e2.clientX - offX) + 'px';
         panel.style.top   = (e2.clientY - offY) + 'px';
         panel.style.right = 'auto';
+        if (panel._glass) { panel._glass.show(); panel._glass._draw(); }
       };
       const onUp = () => {
         handle._dragMoved = moved;
@@ -2811,6 +3269,7 @@
           saveUi({ x: parseInt(panel.style.left), y: parseInt(panel.style.top) });
           panel.classList.remove('sp-dragging');
         }
+        if (panel._glass) panel._glass.hide();
         removeEventListener('mousemove', onMove);
         removeEventListener('mouseup', onUp);
       };
@@ -2889,9 +3348,11 @@
             // stays visible under the cursor regardless of which container clips.
             if (isDocked) el.scrollIntoView({ block: 'end', behavior: 'instant' });
           }
+          if (panel._glass) { panel._glass.show(); panel._glass._resize(); }
         };
 
         const onUp = () => {
+          if (panel._glass) panel._glass.hide();
           if (isDocked) {
             saveUi({ dockH: panel.offsetHeight });
           } else {
@@ -3252,6 +3713,7 @@
     mount.style.flexDirection = 'column';
     mount.style.overflowX = 'hidden';
     panel.classList.remove('minimized');
+    if (panel._glass) panel._glass.hide();
     const tgl = document.getElementById('sp-toggle-btn');
     if (tgl) tgl.style.display = 'none';
 
@@ -3312,18 +3774,23 @@
     logStep_('Dock: restored floating panel');
   }
 
-  // ── Settings drawer (data fetch preferences) ─────────────────────────────
-  function initSettings_(panel) {
+  // ── Settings drawer (Glass toggle + data fetch preferences) ──────────────
+  function initSettings_(panel, glass) {
     const btn    = panel.querySelector('#sp-settings-btn');
     const drawer = panel.querySelector('#sp-settings-drawer');
     if (!btn || !drawer) return;
 
     const uiState = loadUi();
+    const glassEnabled = uiState.glassEnabled === true; // default OFF
     const prefs = getDataFetchPrefs();
 
     drawer.innerHTML = `
       <div class="sp-settings-inner">
         <div style="border-bottom:1px solid rgba(0,0,0,0.06);padding-bottom:8px;margin-bottom:8px;">
+          <label style="display:flex;align-items:center;gap:6px;cursor:pointer;user-select:none;font-size:12px;color:#1c1c1e;margin-bottom:5px;">
+            <input type="checkbox" id="sp-liquid-glass-chk" ${glassEnabled ? 'checked' : ''}/>
+            Liquid Glass
+          </label>
           <label style="display:flex;align-items:center;gap:6px;cursor:pointer;user-select:none;font-size:12px;color:#1c1c1e;margin-bottom:0;">
             <input type="checkbox" id="sp-dock-chk" ${uiState.dockMode === true ? 'checked' : ''}/>
             Dock in Apps panel
@@ -3355,12 +3822,39 @@
       </div>
     `;
 
+    const glassChk = drawer.querySelector('#sp-liquid-glass-chk');
+    glassChk.addEventListener('change', () => {
+      if (glassChk.checked) {
+        // Re-enable: drop the disabled class and restore the CSS backdrop-blur
+        // layer (a prior capture may have set it to inline display:none). The
+        // WebGL distortion canvas stays hidden until the next drag/resize.
+        panel.classList.remove('sp-glass-disabled');
+        if (glass) glass.invalidate();
+        const glLayer = panel.querySelector('#sp-glass-layer');
+        if (glLayer) glLayer.style.display = '';
+      } else {
+        // Disable: solid panel, kill the WebGL canvas + active state. CSS does
+        // the rest (hides both glass layers, overrides transparency).
+        panel.classList.add('sp-glass-disabled');
+        if (glass) glass.hide();
+      }
+      saveUi({ glassEnabled: glassChk.checked });
+    });
+
     const dockChk = drawer.querySelector('#sp-dock-chk');
+    // Liquid Glass is meaningless when docked → grey it out while dock is on.
+    const syncGlassEnabled_ = () => {
+      const lbl = glassChk.closest('label');
+      glassChk.disabled = !!(dockChk && dockChk.checked);
+      if (lbl) { lbl.style.opacity = glassChk.disabled ? '0.4' : ''; lbl.style.cursor = glassChk.disabled ? 'not-allowed' : 'pointer'; }
+    };
     if (dockChk) dockChk.addEventListener('change', () => {
       saveUi({ dockMode: dockChk.checked });
       if (dockChk.checked) mountDocked_(panel);
       else mountFloating_(panel);
+      syncGlassEnabled_();
     });
+    syncGlassEnabled_();
 
     const fetchOrderChk = drawer.querySelector('#sp-fetch-order-chk');
     const fetchShippingChk = drawer.querySelector('#sp-fetch-shipping-chk');
@@ -3464,7 +3958,13 @@
     // Body is NOT draggable so its text stays selectable/copyable; drag via the title bar.
     makeResizable_(panel);
 
-    initSettings_(panel);
+    // WebGL liquid glass + settings console
+    const glass = new GlassWebGL_(panel);
+    panel._glass = glass;
+    // Apply saved glass on/off preference before any drag/resize can fire.
+    // Default OFF — only enabled when the user has explicitly turned it on.
+    if (loadUi().glassEnabled !== true) panel.classList.add('sp-glass-disabled');
+    initSettings_(panel, glass);
 
     // Dock from the start (no floating flash). mountDocked_ retries internally
     // (and the heartbeat re-mounts) until the Apps panel is available.
@@ -3780,6 +4280,9 @@
           panel.classList.add('minimized');
         }
       }
+      // Invalidate glass texture on navigation — CSS backdrop-filter fallback
+      // shows instantly; WebGL recaptures lazily on next drag (no page-load lag).
+      if (panel._glass) panel._glass.invalidate();
     }
     const origPush    = history.pushState.bind(history);
     const origReplace = history.replaceState.bind(history);
