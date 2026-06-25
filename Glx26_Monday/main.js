@@ -88,9 +88,7 @@ function syncSheetToMonday_core() {
 
   if (!toCreate.length) return { createdCount: 0 };
 
-  for (const item of toCreate) {
-    createItemWithVariables(apiKey, item);
-  }
+  createItemsBatch(apiKey, toCreate);
 
   return { createdCount: toCreate.length };
 }
@@ -148,6 +146,19 @@ function createItemWithVariables(apiKey, item) {
  * MONDAY HELPERS
  *************************************************/
 function fetchBoardColumnsAndFirstGroup(apiKey, boardId) {
+
+  const CACHE_KEY = 'BOARD_META_' + boardId;
+  const CACHE_TTL_MS = 60 * 60 * 1000; // 1 hour
+
+  const props = PropertiesService.getScriptProperties();
+  const cached = props.getProperty(CACHE_KEY);
+  if (cached) {
+    try {
+      const { data, ts } = JSON.parse(cached);
+      if (Date.now() - ts < CACHE_TTL_MS) return data;
+    } catch (e) {}
+  }
+
   const query = `
     query {
       boards (ids: ${boardId}) {
@@ -160,11 +171,14 @@ function fetchBoardColumnsAndFirstGroup(apiKey, boardId) {
   const json = mondayCallRaw(apiKey, query);
   const b = json.data.boards[0];
 
-  return {
+  const result = {
     columns: b.columns || [],
     groups: b.groups || [],
     firstGroupId: (b.groups && b.groups[0]) ? b.groups[0].id : null
   };
+
+  props.setProperty(CACHE_KEY, JSON.stringify({ data: result, ts: Date.now() }));
+  return result;
 }
 
 function mondayCallRaw(apiKey, query) {
@@ -190,16 +204,17 @@ function mondayCallRaw(apiKey, query) {
 function fetchExistingReviewLinks(apiKey, boardId, linkColId) {
 
   let cursor = null;
-  let allItems = [];
+  const links = new Set();
 
   do {
+    // Only fetch the one link column — ~30x less payload than fetching all columns
     const query = `
       query ($cursor: String) {
         boards(ids: ${boardId}) {
           items_page(limit: 500, cursor: $cursor) {
             cursor
             items {
-              column_values {
+              column_values(ids: ["${linkColId}"]) {
                 id
                 text
                 value
@@ -213,32 +228,21 @@ function fetchExistingReviewLinks(apiKey, boardId, linkColId) {
     const json = mondayCallRawWithRetry(apiKey, query, { cursor });
     const page = json.data.boards[0].items_page;
 
-    allItems = allItems.concat(page.items);
+    page.items.forEach(it => {
+      const cv = it.column_values[0];
+      if (!cv) return;
+      if (cv.value) {
+        try {
+          const parsed = JSON.parse(cv.value);
+          if (parsed && parsed.url) { links.add(normalizeLink(parsed.url)); return; }
+        } catch (e) {}
+      }
+      if (cv.text) links.add(normalizeLink(cv.text));
+    });
+
     cursor = page.cursor;
 
   } while (cursor);
-
-  const links = new Set();
-
-  allItems.forEach(it => {
-    const cv = it.column_values.find(v => v.id === linkColId);
-
-    if (!cv) return;
-
-    if (cv.value) {
-      try {
-        const parsed = JSON.parse(cv.value);
-        if (parsed && parsed.url) {
-          links.add(normalizeLink(parsed.url));
-          return;
-        }
-      } catch (e) {}
-    }
-
-    if (cv.text) {
-      links.add(normalizeLink(cv.text));
-    }
-  });
 
   Logger.log(`Fetched ${links.size} existing links`);
 
@@ -530,32 +534,66 @@ function jsonGraphQL(value) {
 }
 
 /*************************************************
- * MONDAY CALL WITH RETRY
+ * MONDAY CALL WITH RETRY (exponential backoff on 429/5xx)
  *************************************************/
 function mondayCallRawWithRetry(apiKey, query, variables) {
 
-  const payload = variables
-    ? { query, variables }
-    : { query };
+  const payload = variables ? { query, variables } : { query };
 
-  const resp = UrlFetchApp.fetch(
-    'https://api.monday.com/v2',
-    {
-      method: 'post',
-      contentType: 'application/json',
-      headers: { Authorization: apiKey },
-      payload: JSON.stringify(payload),
-      muteHttpExceptions: true
+  for (let attempt = 0; attempt <= RETRY_MAX; attempt++) {
+    const resp = UrlFetchApp.fetch(
+      'https://api.monday.com/v2',
+      {
+        method: 'post',
+        contentType: 'application/json',
+        headers: { Authorization: apiKey },
+        payload: JSON.stringify(payload),
+        muteHttpExceptions: true
+      }
+    );
+
+    const code = resp.getResponseCode();
+
+    if ((code === 429 || code >= 500) && attempt < RETRY_MAX) {
+      Utilities.sleep(RETRY_BASE_MS * Math.pow(2, attempt));
+      continue;
     }
-  );
 
-  const json = JSON.parse(resp.getContentText());
-
-  if (json.errors) {
-    throw new Error(JSON.stringify(json.errors));
+    const json = JSON.parse(resp.getContentText());
+    if (json.errors) throw new Error(JSON.stringify(json.errors));
+    return json;
   }
+}
 
-  return json;
+/*************************************************
+ * BATCH ITEM CREATION — N items in ceil(N/20) API calls
+ *************************************************/
+function createItemsBatch(apiKey, items) {
+
+  const BATCH_SIZE = 20;
+
+  for (let i = 0; i < items.length; i += BATCH_SIZE) {
+    const batch = items.slice(i, i + BATCH_SIZE);
+
+    const varDefs = batch.map((_, j) =>
+      `$n${j}: String!, $g${j}: String!, $cv${j}: JSON!`
+    ).join(', ');
+
+    const aliases = batch.map((_, j) =>
+      `item${j}: create_item(board_id: "${BOARD_ID}", group_id: $g${j}, item_name: $n${j}, column_values: $cv${j}) { id }`
+    ).join('\n      ');
+
+    const variables = {};
+    batch.forEach((item, j) => {
+      variables[`n${j}`] = item.item_name;
+      variables[`g${j}`] = item.group_id;
+      variables[`cv${j}`] = JSON.stringify(item.column_values);
+    });
+
+    mondayCallRawWithRetry(apiKey, `mutation Batch(${varDefs}) { ${aliases} }`, variables);
+
+    if (i + BATCH_SIZE < items.length) Utilities.sleep(200);
+  }
 }
 
 function chooseGroupFromModel(modelText) {
