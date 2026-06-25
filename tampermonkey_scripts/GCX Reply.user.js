@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         GCX Reply
 // @namespace    https://spigen.com/gcx
-// @version      2.18.2
+// @version      2.18.3
 // @description  Amazon order data via GAS web app + Spigen product info + Zendesk auto-fill
 // @author       Spigen GCX
 // @updateURL    https://raw.githubusercontent.com/codingintheusa0402/spigen-gcx-automation/main/tampermonkey_scripts/GCX%20Reply.user.js
@@ -900,8 +900,10 @@
   }
 
   // ── No Response Needed ────────────────────────────────────────────────────
-  // ChannelReply renders the NRN element in the main page DOM (Angular ng-if).
-  // It is only present on Amazon Buyer Message tickets (data.noResponseNeeded).
+  // ChannelReply renders inside a zdusercontent.com iframe (Zendesk app sandbox).
+  // The NRN element only exists when 'Requested Channel type*' = Amazon Buyer Message.
+  // Primary: iframe bridge (top-of-file code runs in CR iframe → postMessage).
+  // Fallback: direct DOM search (for Zendesk configs that inline the app).
   function findNrnBtnDirect_() {
     // Primary: exact ChannelReply Angular selectors
     const cands = [...document.querySelectorAll(
@@ -941,20 +943,45 @@
       status.style.display = 'block';
       setTimeout(() => { status.style.display = 'none'; }, 4000);
     };
+
+    // Try direct DOM first (Zendesk configs that inline the CR app)
     const el = findNrnBtnDirect_();
-    if (!el) {
-      show('NRN button not found on this ticket', '#c0392b');
-      logStep_('NRN: element not found in DOM');
+    if (el) {
+      if (!isNrnActionable_(el)) {
+        show('Already marked as No Response Needed', '#888');
+        logStep_('NRN: already marked (direct DOM)');
+        return;
+      }
+      el.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }));
+      show('✓ Marked as "No response needed"');
+      logStep_('NRN: clicked directly in page DOM');
       return;
     }
-    if (!isNrnActionable_(el)) {
-      show('Already marked as No Response Needed', '#888');
-      logStep_('NRN: already marked');
-      return;
-    }
-    el.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }));
-    show('✓ Marked as "No response needed"');
-    logStep_('NRN: clicked ChannelReply element directly');
+
+    // Iframe bridge (CR runs in zdusercontent.com sandbox)
+    let acked = false;
+    const onAck = ev => {
+      if (!ev.data || ev.data.__gcxNRN !== 'done') return;
+      acked = true;
+      window.removeEventListener('message', onAck);
+      if (ev.data.ok) {
+        show('✓ Marked as "No response needed"');
+        logStep_('NRN: marked via CR iframe bridge');
+      } else {
+        show(ev.data.reason === 'not-actionable' ? 'Already marked' : '✗ Failed', '#888');
+        logStep_('NRN: iframe bridge — ' + (ev.data.reason || 'unknown'));
+      }
+    };
+    window.addEventListener('message', onAck);
+    [...document.querySelectorAll('iframe')].forEach(f => {
+      try { f.contentWindow.postMessage({ __gcxNRN: 'click' }, '*'); } catch (_) {}
+    });
+    show('Marking…', '#888');
+    logStep_('NRN: dispatching click to CR iframe…');
+    setTimeout(() => {
+      window.removeEventListener('message', onAck);
+      if (!acked) show('✗ ChannelReply not responding', '#c0392b');
+    }, 4000);
   }
 
   // ── Auto-fill: PUT all fields to Zendesk API, fill text fields in DOM ────
@@ -3536,29 +3563,76 @@
       }, true);
     }
 
-    // Sync NRN button state directly from the live ChannelReply DOM element.
-    // MutationObserver catches: ChannelReply's async render (childList) and the
-    // "marked-as-no-response" class toggle (attributes). Guarded once per page load.
+    // NRN button state sync — guarded once per page load.
+    // CR lives in a zdusercontent.com iframe, so the primary path is the iframe
+    // bridge (postMessage). MutationObserver handles the rare direct-DOM case.
     if (!window.__gcxNrnInit) {
       window.__gcxNrnInit = true;
-      const syncNrn_ = () => {
+
+      const setNrnBtn_ = (disabled, title) => {
         const btn = document.querySelector('#sp-order-panel #sp-nrn-btn');
         if (!btn) return;
-        const el = findNrnBtnDirect_();
-        if (el) {
-          const ok = isNrnActionable_(el);
-          btn.disabled = !ok;
-          btn.title = ok ? 'Mark as No Response Needed' : 'Already marked as No Response Needed';
-        } else {
-          btn.disabled = true;
-          btn.title = 'Only available on Amazon Buyer Message tickets';
-        }
+        btn.disabled = disabled;
+        btn.title    = title;
       };
-      syncNrn_();
-      new MutationObserver(syncNrn_).observe(document.body, {
+
+      // Direct-DOM sync (no-op when CR is in iframe)
+      const syncFromDom_ = () => {
+        const el = findNrnBtnDirect_();
+        if (!el) return false;
+        const ok = isNrnActionable_(el);
+        setNrnBtn_(!ok, ok ? 'Mark as No Response Needed' : 'Already marked as No Response Needed');
+        return true;
+      };
+      syncFromDom_();
+      new MutationObserver(syncFromDom_).observe(document.body, {
         childList: true, subtree: true,
         attributes: true, attributeFilter: ['class'],
       });
+
+      // Iframe bridge: receive state from CR and update button
+      let _lastBridgeAt = 0;
+      let _lastUrl = location.href;
+      const queryIframes_ = () =>
+        [...document.querySelectorAll('iframe')].forEach(f => {
+          try { f.contentWindow.postMessage({ __gcxNRN: 'query' }, '*'); } catch (_) {}
+        });
+
+      window.addEventListener('message', ev => {
+        const d = ev.data;
+        if (!d || !d.__gcxNRN) return;
+        if (d.__gcxNRN === 'hello') {
+          // CR iframe just loaded → query its state immediately
+          queryIframes_();
+          return;
+        }
+        if (d.__gcxNRN !== 'state') return;
+        if (syncFromDom_()) return; // direct DOM wins if available
+        _lastBridgeAt = Date.now();
+        if (d.found) {
+          setNrnBtn_(!d.actionable,
+            d.actionable ? 'Mark as No Response Needed' : 'Already marked as No Response Needed');
+        } else {
+          setNrnBtn_(true, 'Only available on Amazon Buyer Message tickets');
+        }
+      });
+
+      // Poll every 2s: direct DOM → query iframes → reset if bridge silent
+      setInterval(() => {
+        // Reset button on SPA navigation
+        if (location.href !== _lastUrl) {
+          _lastUrl = location.href;
+          _lastBridgeAt = 0;
+          setNrnBtn_(true, 'Only available on Amazon Buyer Message tickets');
+        }
+        if (syncFromDom_()) return;
+        queryIframes_();
+        // Bridge silent for >8s on a ticket page → not an ABM ticket
+        if (_lastBridgeAt > 0 && Date.now() - _lastBridgeAt > 8000) {
+          setNrnBtn_(true, 'Only available on Amazon Buyer Message tickets');
+          _lastBridgeAt = 0;
+        }
+      }, 2000);
     }
 
     const notesToggle  = panel.querySelector('#sp-notes-toggle');
