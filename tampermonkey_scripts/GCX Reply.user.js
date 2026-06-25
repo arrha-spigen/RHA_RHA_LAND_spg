@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         GCX Reply
 // @namespace    https://spigen.com/gcx
-// @version      2.18.0
+// @version      2.18.1
 // @description  Amazon order data via GAS web app + Spigen product info + Zendesk auto-fill
 // @author       Spigen GCX
 // @updateURL    https://raw.githubusercontent.com/codingintheusa0402/spigen-gcx-automation/main/tampermonkey_scripts/GCX%20Reply.user.js
@@ -2080,33 +2080,6 @@
     #sp-order-panel.sp-docked #sp-dock-collapse-btn { display: inline-flex; }
     #sp-order-panel.sp-docked.minimized #sp-dock-collapse-btn svg { transform: rotate(0deg); }
 
-    /* ── ChannelReply toggle button (docked only) ─────────────────────────── */
-    #sp-apps-toggle-btn {
-      display: none;
-      align-items: center;
-      justify-content: center;
-      height: 26px;
-      padding: 0 7px;
-      background: transparent;
-      border: 1px solid #d8dcde;
-      border-radius: 4px;
-      cursor: pointer;
-      color: #68737d;
-      font-size: 11px;
-      font-weight: 600;
-      flex-shrink: 0;
-      position: relative;
-      z-index: 10000;
-      margin-right: 4px;
-      white-space: nowrap;
-    }
-    #sp-apps-toggle-btn:hover { background: rgba(0,0,0,0.05); border-color: #c0c6cc; }
-    #sp-order-panel.sp-docked #sp-apps-toggle-btn { display: inline-flex; }
-    /* When in CR mode: hide body so ChannelReply fills the wrapper below */
-    #sp-order-panel.sp-docked.sp-cr-mode #sp-panel-body { display: none; }
-    #sp-order-panel.sp-docked.sp-cr-mode #sp-settings-drawer { display: none; }
-    #sp-order-panel.sp-docked.sp-cr-mode #sp-panel-header { border-radius: 9px; }
-
     #sp-mcf-bar { margin-bottom: 8px; display: none; }
     #sp-mcf-btn {
       background: rgba(255,153,0,0.88);
@@ -2204,7 +2177,6 @@
         <span id="sp-settings-btn" title="Settings">⚙</span>
         <span id="sp-minimize-btn" title="Minimize">─</span>
         <span id="sp-panel-close" title="Close">✕</span>
-        <button id="sp-apps-toggle-btn" title="Show ChannelReply">Apps ▼</button>
         <button id="sp-dock-collapse-btn" type="button" aria-label="Collapse section" data-garden-id="buttons.icon_button" data-garden-version="9.14.2">
           <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 16 16" aria-hidden="true" focusable="false" data-garden-id="buttons.icon" data-garden-version="9.14.2">
             <path fill="currentColor" d="M12.688 5.61a.5.5 0 0 1 .69.718l-.066.062-5 4a.5.5 0 0 1-.542.054l-.082-.054-5-4a.5.5 0 0 1 .55-.83l.074.05L8 9.359l4.688-3.75z"/>
@@ -3489,25 +3461,6 @@
         e.stopPropagation();
         const collapsed = panel.classList.toggle('minimized');
         dockCollapseBtn.setAttribute('aria-label', collapsed ? 'Expand section' : 'Collapse section');
-      };
-    }
-
-    // Apps ▼ / GCX ▲ toggle: collapses GCX panel so ChannelReply fills wrapper below
-    const appsToggleBtn = panel.querySelector('#sp-apps-toggle-btn');
-    if (appsToggleBtn) {
-      appsToggleBtn.onclick = e => {
-        e.stopPropagation();
-        const crMode = panel.classList.toggle('sp-cr-mode');
-        if (crMode) {
-          panel.dataset.savedHCr = panel.style.height || '';
-          panel.style.height = '';
-          appsToggleBtn.textContent = 'GCX ▲';
-          appsToggleBtn.title = 'Show GCX Reply';
-        } else {
-          if (panel.dataset.savedHCr) panel.style.height = panel.dataset.savedHCr;
-          appsToggleBtn.textContent = 'Apps ▼';
-          appsToggleBtn.title = 'Show ChannelReply';
-        }
       };
     }
 
