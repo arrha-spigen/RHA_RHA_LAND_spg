@@ -1,6 +1,6 @@
 // ==UserScript==
 // @name         Amazon MCF Autofill
-// @version      1.3.1
+// @version      1.4.0
 // @updateURL    https://raw.githubusercontent.com/codingintheusa0402/spigen-gcx-automation/main/tampermonkey_scripts/Amazon%20MCF%20Autofill.user.js
 // @downloadURL  https://raw.githubusercontent.com/codingintheusa0402/spigen-gcx-automation/main/tampermonkey_scripts/Amazon%20MCF%20Autofill.user.js
 // @match        https://sellercentral.amazon.*/mcf/orders/create-order*
@@ -273,7 +273,9 @@
       .replace(/[ \t]+/g, ' ')
       .trim();
 
-      const asin = (t.match(/\bASIN\b[^\w]{0,5}(B[A-Z0-9]{9})\b/i) || [])[1];
+      const allLabeledAsins = [...t.matchAll(/\bASIN\b[^\w]{0,5}(B[A-Z0-9]{9})\b/gi)].map(m => m[1]);
+      const asins = [...new Set(allLabeledAsins)];
+      const asin = asins[0] || '';
       const sku  = (t.match(/\bSKU\b[^\w]{0,5}([\w.-]{5,})/i) || [])[1];
       const q = asin || sku || '';
 
@@ -333,7 +335,7 @@
     if (blocks.length > 0) addr = blocks[blocks.length - 1];
 
     const country = ticketCountry || countryFromPhone(addr.phone);
-    return { ...addr, email, q, country, countryRaw: ticketCountryRaw };
+    return { ...addr, email, q, asins, country, countryRaw: ticketCountryRaw };
   }
   // ---------------------------------
   // SHIPPING SPEED (Expedited)
@@ -692,6 +694,74 @@ async function fetchOrderIdByEmail(email) {
 
 
   // ---------------------------------
+  // ASIN PICKER (multi-ASIN)
+  // ---------------------------------
+  function showAsinPicker(asins, onPick) {
+    const existing = document.getElementById('mcf-asin-picker');
+    if (existing) existing.remove();
+
+    const overlay = document.createElement('div');
+    overlay.id = 'mcf-asin-picker';
+    Object.assign(overlay.style, {
+      position: 'fixed', top: '0', left: '0', right: '0', bottom: '0',
+      background: 'rgba(0,0,0,0.72)', zIndex: '2147483646',
+      display: 'flex', alignItems: 'center', justifyContent: 'center',
+    });
+
+    const box = document.createElement('div');
+    Object.assign(box.style, {
+      background: '#0b0f0c', color: '#00ff9c',
+      border: '1px solid #00ff9c', borderRadius: '12px',
+      padding: '20px 24px', minWidth: '300px',
+      fontFamily: 'Consolas, Menlo, monospace', fontSize: '13px',
+      boxShadow: '0 0 20px rgba(0,255,156,.4)',
+    });
+
+    const title = document.createElement('div');
+    Object.assign(title.style, { fontWeight: '700', fontSize: '14px', marginBottom: '12px' });
+    title.textContent = '어떤 ASIN을 자동입력할까요?';
+    box.appendChild(title);
+
+    asins.forEach((a, i) => {
+      const btn = document.createElement('button');
+      Object.assign(btn.style, {
+        display: 'block', width: '100%', textAlign: 'left',
+        background: '#0b0f0c', color: '#00ff9c', border: '1px solid #00ff9c44',
+        padding: '9px 14px', marginBottom: '8px', borderRadius: '8px',
+        cursor: 'pointer', fontFamily: 'Consolas,Menlo,monospace',
+        fontSize: '13px', letterSpacing: '0.5px',
+      });
+      btn.textContent = `${i + 1}. ${a}`;
+      btn.addEventListener('mouseenter', () => { btn.style.borderColor = '#00ff9c'; btn.style.background = '#00ff9c18'; });
+      btn.addEventListener('mouseleave', () => { btn.style.borderColor = '#00ff9c44'; btn.style.background = '#0b0f0c'; });
+      btn.addEventListener('click', () => { overlay.remove(); onPick(a); });
+      box.appendChild(btn);
+    });
+
+    const cancel = document.createElement('button');
+    Object.assign(cancel.style, {
+      display: 'block', width: '100%', textAlign: 'center',
+      background: 'transparent', color: '#4ce6b4', border: '1px solid #4ce6b444',
+      padding: '7px 14px', borderRadius: '8px', cursor: 'pointer',
+      fontFamily: 'Consolas,Menlo,monospace', fontSize: '12px', marginTop: '4px',
+    });
+    cancel.textContent = '취소';
+    cancel.addEventListener('click', () => overlay.remove());
+    box.appendChild(cancel);
+
+    overlay.appendChild(box);
+    overlay.addEventListener('click', e => { if (e.target === overlay) overlay.remove(); });
+    document.body.appendChild(overlay);
+  }
+
+  function pickAsin(asins) {
+    return new Promise(resolve => {
+      if (!asins || asins.length <= 1) { resolve((asins && asins[0]) || null); return; }
+      showAsinPicker(asins, resolve);
+    });
+  }
+
+  // ---------------------------------
   // MAIN CLIPBOARD PASTE
   // ---------------------------------
   async function pasteFromClipboard() {
@@ -703,22 +773,25 @@ async function fetchOrderIdByEmail(email) {
       }
 
       const d = parseClipboard(text);
+
+      const chosenAsin = await pickAsin(d.asins);
+      const fd = { ...d, q: chosenAsin || d.q };
+
       msg('Parsed. Filling…');
+      fillAll(fd);
 
-      fillAll(d);
-
-      if (d.q) autoSelectBestSku();
+      if (fd.q) autoSelectBestSku();
 
       // Country must be set AFTER all other field events have settled.
       // setById/setByLabel fire bubbling input+change events; the kat-dropdown
       // closes itself when it sees events outside its boundary. Delay 800ms.
-      if (d.country && d.countryRaw?.toLowerCase() !== 'united kingdom') {
-        setTimeout(() => setCountry(d.country), 800);
+      if (fd.country && fd.countryRaw?.toLowerCase() !== 'united kingdom') {
+        setTimeout(() => setCountry(fd.country), 800);
       }
 
-      if (d.email) {
+      if (fd.email) {
         msg('시트 업데이트 중…');
-        const orderId = await markRowMcfByEmail(d.email);
+        const orderId = await markRowMcfByEmail(fd.email);
         if (orderId) {
           setOrderIdInput(orderId);
           msg('Order ID 자동입력 완료: ' + orderId);
@@ -760,16 +833,19 @@ async function fetchOrderIdByEmail(email) {
     const d = parseClipboard(text);
     if (!d.name && !d.q && !d.email) return;
 
-    msg('클립보드 자동입력 중…');
-    fillAll(d);
+    const chosenAsin = await pickAsin(d.asins);
+    const fd = { ...d, q: chosenAsin || d.q };
 
-    if (d.q) autoSelectBestSku();
-    if (d.country && d.countryRaw?.toLowerCase() !== 'united kingdom') {
-      setTimeout(() => setCountry(d.country), 800);
+    msg('클립보드 자동입력 중…');
+    fillAll(fd);
+
+    if (fd.q) autoSelectBestSku();
+    if (fd.country && fd.countryRaw?.toLowerCase() !== 'united kingdom') {
+      setTimeout(() => setCountry(fd.country), 800);
     }
-    if (d.email) {
+    if (fd.email) {
       msg('시트 업데이트 중…');
-      const orderId = await markRowMcfByEmail(d.email);
+      const orderId = await markRowMcfByEmail(fd.email);
       if (orderId) {
         setOrderIdInput(orderId);
         msg('Order ID 자동입력 완료: ' + orderId);
