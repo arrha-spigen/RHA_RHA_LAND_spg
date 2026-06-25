@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         GCX Reply
 // @namespace    https://spigen.com/gcx
-// @version      2.18.5
+// @version      2.18.6
 // @description  Amazon order data via GAS web app + Spigen product info + Zendesk auto-fill
 // @author       Spigen GCX
 // @updateURL    https://raw.githubusercontent.com/codingintheusa0402/spigen-gcx-automation/main/tampermonkey_scripts/GCX%20Reply.user.js
@@ -10,6 +10,8 @@
 // @match        https://spigenhelp.zendesk.com/agent/filters
 // @match        https://spigenhelp.zendesk.com/agent/filters/*
 // @match        https://*.zdusercontent.com/*
+// @match        https://*.apps.zdusercontent.com/*
+// @match        https://www.channelreply.com/*
 // @grant        GM_xmlhttpRequest
 // @grant        GM_addStyle
 // @run-at       document-idle
@@ -86,7 +88,18 @@
           const a = findNrnBtn_();
           if (a) {
             if (actionable_(a)) {
-              a.click();
+              // ChannelReply uses AngularJS — ng-click requires $apply to run the
+              // handler; a plain link.click() only dispatches a DOM event without
+              // triggering the Angular digest cycle.
+              let clicked = false;
+              try {
+                if (typeof angular !== 'undefined') {
+                  const scope = angular.element(a).scope();
+                  const expr  = a.getAttribute('ng-click');
+                  if (scope && expr) { scope.$apply(expr); clicked = true; }
+                }
+              } catch (_) {}
+              if (!clicked) a.click(); // plain fallback (non-Angular pages)
               try { window.top.postMessage({ __gcxNRN: 'done', ok: true }, '*'); } catch (_) {}
             } else {
               try { window.top.postMessage({ __gcxNRN: 'done', ok: false, reason: 'not-actionable' }, '*'); } catch (_) {}
