@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         GCX Reply
 // @namespace    https://spigen.com/gcx
-// @version      2.18.4
+// @version      2.18.5
 // @description  Amazon order data via GAS web app + Spigen product info + Zendesk auto-fill
 // @author       Spigen GCX
 // @updateURL    https://raw.githubusercontent.com/codingintheusa0402/spigen-gcx-automation/main/tampermonkey_scripts/GCX%20Reply.user.js
@@ -61,6 +61,12 @@
     const cascade_ = msg => [...document.querySelectorAll('iframe')].forEach(f => {
       try { f.contentWindow.postMessage(msg, '*'); } catch (_) {}
     });
+    // Push state proactively — don't wait for a query that may never arrive if
+    // this frame is nested behind an intermediate frame the top window can't reach.
+    const sendState_ = () => {
+      const a = findNrnBtn_();
+      try { window.top.postMessage({ __gcxNRN: 'state', found: !!a, actionable: a ? actionable_(a) : false }, '*'); } catch (_) {}
+    };
     const hello_ = () => { try { window.top.postMessage({ __gcxNRN: 'hello', href: (location.href || '').slice(0, 90), hasBtn: !!findNrnBtn_() }, '*'); } catch (_) {} };
 
     window.addEventListener('message', ev => {
@@ -69,8 +75,7 @@
 
       if (d.__gcxNRN === 'query') {
         cascade_({ __gcxNRN: 'query' });
-        const a = findNrnBtn_();
-        if (a) { try { window.top.postMessage({ __gcxNRN: 'state', found: true, actionable: actionable_(a) }, '*'); } catch (_) {} }
+        sendState_(); // always reply, even if found:false
         return;
       }
 
@@ -92,9 +97,12 @@
         })();
       }
     });
-    // Announce presence so the top frame can confirm the bridge is injected here.
+    // Announce + push state immediately, then periodically so Angular's async
+    // render of the NRN element is caught even if query messages never arrive.
     hello_();
-    [800, 2000, 4000].forEach(ms => setTimeout(hello_, ms));
+    sendState_();
+    [800, 2000, 4000].forEach(ms => { setTimeout(hello_, ms); setTimeout(sendState_, ms); });
+    setInterval(sendState_, 3000);
     return; // never build the floating panel inside an app iframe
   }
 
@@ -973,9 +981,13 @@
       }
     };
     window.addEventListener('message', onAck);
-    [...document.querySelectorAll('iframe')].forEach(f => {
-      try { f.contentWindow.postMessage({ __gcxNRN: 'click' }, '*'); } catch (_) {}
-    });
+    // Send to the cached CR iframe directly (works even when it's nested behind
+    // intermediate frames that don't cascade), plus broadcast to all direct children.
+    const clickTargets = new Set([
+      window.__gcxNrnSource,
+      ...[...document.querySelectorAll('iframe')].map(f => { try { return f.contentWindow; } catch (_) { return null; } }),
+    ].filter(Boolean));
+    clickTargets.forEach(w => { try { w.postMessage({ __gcxNRN: 'click' }, '*'); } catch (_) {} });
     show('Marking…', '#888');
     logStep_('NRN: dispatching click to CR iframe…');
     setTimeout(() => {
@@ -3573,7 +3585,8 @@
         const d = ev.data;
         if (!d || !d.__gcxNRN) return;
         if (d.__gcxNRN === 'hello') {
-          // CR iframe just loaded → query its state immediately
+          // Cache the source frame so we can click it directly even if it's nested.
+          if (ev.source && d.hasBtn) window.__gcxNrnSource = ev.source;
           queryIframes_();
           return;
         }
@@ -3581,6 +3594,8 @@
         if (syncFromDom_()) return; // direct DOM wins if available
         _lastBridgeAt = Date.now();
         if (d.found) {
+          // Lock onto the frame that has the NRN button for targeted click dispatch.
+          if (ev.source) window.__gcxNrnSource = ev.source;
           setNrnBtn_(!d.actionable,
             d.actionable ? 'Mark as No Response Needed' : 'Already marked as No Response Needed');
         } else {
@@ -3594,6 +3609,7 @@
         if (location.href !== _lastUrl) {
           _lastUrl = location.href;
           _lastBridgeAt = 0;
+          window.__gcxNrnSource = null;
           setNrnBtn_(true, 'Only available on Amazon Buyer Message tickets');
         }
         if (syncFromDom_()) return;
