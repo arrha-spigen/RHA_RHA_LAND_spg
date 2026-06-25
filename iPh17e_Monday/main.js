@@ -427,6 +427,7 @@ function readSheetRowsByPage(
     ).getDisplayValues();
 
   const targetDateObj = parseToDateObject(targetYmdDot);
+  const filterByDate = !!targetDateObj; // false → upload all rows (no date filter)
 
   const rows = [];
   let scanned = 0;
@@ -435,22 +436,21 @@ function readSheetRowsByPage(
   values.forEach((row, i) => {
     scanned++;
 
-    const rawDate = row[dateColIndex1Based - 1];
-    const cellDateObj = parseToDateObject(rawDate);
+    if (filterByDate) {
+      const rawDate = row[dateColIndex1Based - 1];
+      const cellDateObj = parseToDateObject(rawDate);
 
-    if (!cellDateObj || !targetDateObj) return;
+      if (!cellDateObj) return;
 
-    if (
-      cellDateObj.getFullYear() === targetDateObj.getFullYear() &&
-      cellDateObj.getMonth() === targetDateObj.getMonth() &&
-      cellDateObj.getDate() === targetDateObj.getDate()
-    ) {
-      matched++;
-      rows.push({
-        sheetRow: safeStart + i,
-        values: row
-      });
+      if (
+        cellDateObj.getFullYear() !== targetDateObj.getFullYear() ||
+        cellDateObj.getMonth()    !== targetDateObj.getMonth()    ||
+        cellDateObj.getDate()     !== targetDateObj.getDate()
+      ) return;
     }
+
+    matched++;
+    rows.push({ sheetRow: safeStart + i, values: row });
   });
 
   const nextStartRow =
