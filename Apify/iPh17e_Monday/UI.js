@@ -112,13 +112,9 @@ function getPlanPage(targetYmdDot, startRow, pageSize) {
     // Ensure Review Link set
     if (!colVals[LINK_COLUMN_ID]) colVals[LINK_COLUMN_ID] = linkToMondayValue(reviewLinkCell);
 
-    // Default “클레임/리뷰” label
-    if (CLAIM_REVIEW_COLUMN_ID) {
-      const claimMap = statusMaps[CLAIM_REVIEW_COLUMN_ID] || { byLabel: {} };
-      const norm = normalizeStatusLabel(DEFAULT_CLAIM_REVIEW_LABEL);
-      if (claimMap.byLabel && claimMap.byLabel[norm]) {
-        colVals[CLAIM_REVIEW_COLUMN_ID] = { label: claimMap.byLabel[norm] };
-      }
+    // Default “클레임/리뷰” label — only when sheet didn't already supply one
+    if (CLAIM_REVIEW_COLUMN_ID && !colVals[CLAIM_REVIEW_COLUMN_ID]) {
+      colVals[CLAIM_REVIEW_COLUMN_ID] = { label: DEFAULT_CLAIM_REVIEW_LABEL };
     }
 
     // Auto-translate
