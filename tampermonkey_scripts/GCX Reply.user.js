@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         GCX Reply
 // @namespace    https://spigen.com/gcx
-// @version      2.18.6
+// @version      2.18.7
 // @description  Amazon order data via GAS web app + Spigen product info + Zendesk auto-fill
 // @author       Spigen GCX
 // @updateURL    https://raw.githubusercontent.com/codingintheusa0402/spigen-gcx-automation/main/tampermonkey_scripts/GCX%20Reply.user.js
@@ -67,7 +67,11 @@
     // this frame is nested behind an intermediate frame the top window can't reach.
     const sendState_ = () => {
       const a = findNrnBtn_();
-      try { window.top.postMessage({ __gcxNRN: 'state', found: !!a, actionable: a ? actionable_(a) : false }, '*'); } catch (_) {}
+      // Only the frame that actually has the NRN button should speak — silence
+      // means "not my business" (wrapper frames, non-ABM tickets).  Sending
+      // found:false from every frame causes button to blink between states.
+      if (!a) return;
+      try { window.top.postMessage({ __gcxNRN: 'state', found: true, actionable: actionable_(a) }, '*'); } catch (_) {}
     };
     const hello_ = () => { try { window.top.postMessage({ __gcxNRN: 'hello', href: (location.href || '').slice(0, 90), hasBtn: !!findNrnBtn_() }, '*'); } catch (_) {} };
 
