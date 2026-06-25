@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         GCX Reply
 // @namespace    https://spigen.com/gcx
-// @version      2.18.1
+// @version      2.18.2
 // @description  Amazon order data via GAS web app + Spigen product info + Zendesk auto-fill
 // @author       Spigen GCX
 // @updateURL    https://raw.githubusercontent.com/codingintheusa0402/spigen-gcx-automation/main/tampermonkey_scripts/GCX%20Reply.user.js
@@ -899,27 +899,30 @@
     setTimeout(() => { if (status) status.style.display = 'none'; }, 4000);
   }
 
-  // ── No Response Needed: click ChannelReply's button via the iframe bridge ──
-  // TEMPORARY: postMessage cascades down every frame; the bridge (top of file)
-  // Locate the "Mark as No response needed" anchor in the MAIN page DOM.
-  // New Zendesk renders ChannelReply content directly (no iframe), so the button
-  // is accessible without postMessage.
+  // ── No Response Needed ────────────────────────────────────────────────────
+  // ChannelReply renders the NRN element in the main page DOM (Angular ng-if).
+  // It is only present on Amazon Buyer Message tickets (data.noResponseNeeded).
   function findNrnBtnDirect_() {
+    // Primary: exact ChannelReply Angular selectors
     const cands = [...document.querySelectorAll(
       '.button-no-response-needed a.no-select, ' +
       'a[ng-click*="updateNoResponseNeeded"], ' +
       '[ng-click*="updateNoResponseNeeded"]'
-    )].filter(el => /no.?response.?needed/i.test((el.textContent || '').trim()));
+    )].filter(el => !el.closest('#sp-order-panel') &&
+                    /no.?response.?needed/i.test((el.textContent || '').trim()));
     if (cands.length) return cands[0];
-    // Text-only fallback (catches any variant label)
+    // Text-only fallback
     return [...document.querySelectorAll('a, [role="button"], button')]
       .find(el => !el.closest('#sp-order-panel') &&
                   /mark.+no.?response.?needed/i.test((el.textContent || '').trim()));
   }
-  function isNrnActionableDirect_(a) {
+
+  function isNrnActionable_(a) {
     if (!a) return false;
-    const wrap = a.closest('[class*="button-no-response"], [class*="no-response"]');
+    // Wrapper div gets class "marked-as-no-response" once marked
+    const wrap = a.closest('.button-no-response-needed, [class*="no-response"]');
     if (wrap && wrap.classList.contains('marked-as-no-response')) return false;
+    // Span visibility: .not-marked-as-no-response-text visible → actionable
     const nm = a.querySelector('.not-marked-as-no-response-text');
     const m  = a.querySelector('.marked-as-no-response-text');
     if (nm || m) {
@@ -929,7 +932,6 @@
     return true;
   }
 
-  // running inside the ChannelReply app iframe finds and clicks the real button.
   function markNoResponseNeeded(panel) {
     const status = panel.querySelector('#sp-nrn-status');
     const show = (msg, color) => {
@@ -937,40 +939,22 @@
       status.textContent = msg;
       status.style.color = color || '#27ae60';
       status.style.display = 'block';
+      setTimeout(() => { status.style.display = 'none'; }, 4000);
     };
-    // Try direct click first (new Zendesk renders ChannelReply in main page DOM)
-    const directBtn = findNrnBtnDirect_();
-    if (directBtn) {
-      if (isNrnActionableDirect_(directBtn)) {
-        directBtn.click();
-        show('✓ Marked as "No response needed"');
-        logStep_('No Response Needed: clicked directly in page DOM');
-      } else {
-        show('Already marked', '#888');
-        logStep_('No Response Needed: already marked (direct DOM check)');
-      }
+    const el = findNrnBtnDirect_();
+    if (!el) {
+      show('NRN button not found on this ticket', '#c0392b');
+      logStep_('NRN: element not found in DOM');
       return;
     }
-
-    // Fallback: iframe bridge (old Zendesk with CR in zdusercontent.com iframe)
-    let acked = false;
-    const onAck = ev => {
-      if (!ev.data || ev.data.__gcxNRN !== 'done' || !ev.data.ok) return;
-      acked = true;
-      window.removeEventListener('message', onAck);
-      show('✓ Marked as "No response needed"');
-      logStep_('No Response Needed: ChannelReply marked via iframe');
-    };
-    window.addEventListener('message', onAck);
-    [...document.querySelectorAll('iframe')].forEach(f => {
-      try { f.contentWindow.postMessage({ __gcxNRN: 'click' }, '*'); } catch (_) {}
-    });
-    show('Marking…', '#888');
-    logStep_('No Response Needed: dispatching to ChannelReply iframe…');
-    setTimeout(() => {
-      window.removeEventListener('message', onAck);
-      if (!acked) show('✗ ChannelReply button not found', '#c0392b');
-    }, 3000);
+    if (!isNrnActionable_(el)) {
+      show('Already marked as No Response Needed', '#888');
+      logStep_('NRN: already marked');
+      return;
+    }
+    el.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }));
+    show('✓ Marked as "No response needed"');
+    logStep_('NRN: clicked ChannelReply element directly');
   }
 
   // ── Auto-fill: PUT all fields to Zendesk API, fill text fields in DOM ────
@@ -2203,7 +2187,7 @@
           <div id="sp-mcf-status"></div>
         </div>
         <div id="sp-nrn-bar">
-          <button id="sp-nrn-btn" disabled title="Waiting for ChannelReply…">Mark as NRN</button>
+          <button id="sp-nrn-btn" disabled title="Only available on Amazon Buyer Message tickets">Mark as NRN</button>
           <div id="sp-nrn-status"></div>
         </div>
         <div id="sp-notes-section">
@@ -3552,44 +3536,29 @@
       }, true);
     }
 
-    // "Mark as 'No response needed'" is still actionable. Polls the iframe bridge.
-    // Guarded so repeated init() calls don't stack listeners/intervals.
-    if (!window.__gcxNrnPoll) {
-      window.__gcxNrnPoll = true;
-      let lastStateAt = 0;
-      let _helloLogged = false;
-      window.addEventListener('message', ev => {
-        if (!ev.data || !ev.data.__gcxNRN) return;
-        if (ev.data.__gcxNRN === 'hello') {
-          // Confirms the bridge is injected inside an app iframe (diagnostic).
-          if (!_helloLogged) { logStep_(`NRN bridge in: ${ev.data.href || '?'} (button: ${ev.data.hasBtn ? 'yes' : 'no'})`); _helloLogged = true; }
-          return;
+    // Sync NRN button state directly from the live ChannelReply DOM element.
+    // MutationObserver catches: ChannelReply's async render (childList) and the
+    // "marked-as-no-response" class toggle (attributes). Guarded once per page load.
+    if (!window.__gcxNrnInit) {
+      window.__gcxNrnInit = true;
+      const syncNrn_ = () => {
+        const btn = document.querySelector('#sp-order-panel #sp-nrn-btn');
+        if (!btn) return;
+        const el = findNrnBtnDirect_();
+        if (el) {
+          const ok = isNrnActionable_(el);
+          btn.disabled = !ok;
+          btn.title = ok ? 'Mark as No Response Needed' : 'Already marked as No Response Needed';
+        } else {
+          btn.disabled = true;
+          btn.title = 'Only available on Amazon Buyer Message tickets';
         }
-        if (ev.data.__gcxNRN !== 'state') return;
-        const b = document.querySelector('#sp-order-panel #sp-nrn-btn');
-        if (!b || !ev.data.found) return;
-        lastStateAt = Date.now();
-        b.disabled = !ev.data.actionable;
-        b.title = ev.data.actionable ? '' : 'ChannelReply: already marked / not actionable';
+      };
+      syncNrn_();
+      new MutationObserver(syncNrn_).observe(document.body, {
+        childList: true, subtree: true,
+        attributes: true, attributeFilter: ['class'],
       });
-      setInterval(() => {
-        const b = document.querySelector('#sp-order-panel #sp-nrn-btn');
-        if (!b) return;
-        // Direct DOM check first (new Zendesk renders CR without iframes)
-        const directBtn = findNrnBtnDirect_();
-        if (directBtn) {
-          lastStateAt = Date.now();
-          const ok = isNrnActionableDirect_(directBtn);
-          b.disabled = !ok;
-          b.title = ok ? '' : 'Already marked as No Response Needed';
-          return;
-        }
-        // Fallback: iframe bridge
-        [...document.querySelectorAll('iframe')].forEach(f => {
-          try { f.contentWindow.postMessage({ __gcxNRN: 'query' }, '*'); } catch (_) {}
-        });
-        if (Date.now() - lastStateAt > 6000) { b.disabled = true; b.title = 'ChannelReply not detected'; }
-      }, 2500);
     }
 
     const notesToggle  = panel.querySelector('#sp-notes-toggle');
