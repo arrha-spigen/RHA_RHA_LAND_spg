@@ -49,7 +49,7 @@ function dailyScrapeJob() {
   }
 }
 
-// ── Run once in the GAS editor to install a daily 09:00 KST trigger ──────────
+// ── Run once in the GAS editor to install a daily 04:00 KST trigger ──────────
 function createDailyTriggers() {
   // Remove any existing dailyScrapeJob triggers
   ScriptApp.getProjectTriggers().forEach(function(t) {
@@ -60,10 +60,10 @@ function createDailyTriggers() {
 
   ScriptApp.newTrigger('dailyScrapeJob')
     .timeBased()
-    .atHour(9)
+    .atHour(4)
     .everyDays(1)
     .inTimezone('Asia/Seoul')
     .create();
 
-  Logger.log('Daily trigger created: dailyScrapeJob at 09:00 KST every day');
+  Logger.log('Daily trigger created: dailyScrapeJob at 04:00 KST every day');
 }

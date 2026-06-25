@@ -4,9 +4,9 @@ const APIFY_TRIGGER_WINDOW = {
     'Asia/Seoul',
     'yyyy-MM-dd'
   ),
-  endDate: '2026-01-14', // yyyy-MM-dd (inclusive)
-  hour: 5,    // 05:30 KST
-  minute: 30,
+  endDate: '2026-12-31', // yyyy-MM-dd (inclusive)
+  hour: 4,    // 04:00 KST
+  minute: 0,
 };
 
 function createApifyWeekdayTriggers() {
