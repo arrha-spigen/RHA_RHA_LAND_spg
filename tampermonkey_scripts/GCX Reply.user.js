@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         GCX Reply
 // @namespace    https://spigen.com/gcx
-// @version      2.18.3
+// @version      2.18.4
 // @description  Amazon order data via GAS web app + Spigen product info + Zendesk auto-fill
 // @author       Spigen GCX
 // @updateURL    https://raw.githubusercontent.com/codingintheusa0402/spigen-gcx-automation/main/tampermonkey_scripts/GCX%20Reply.user.js
@@ -1702,32 +1702,6 @@
       padding: 8px 12px 10px;
       background: rgba(255,255,255,0.06);
     }
-    .sp-s-row {
-      display: grid;
-      grid-template-columns: 64px 1fr 40px;
-      align-items: center;
-      gap: 5px;
-      margin-bottom: 3px;
-    }
-    .sp-s-row label { font-size: 10px; color: rgba(28,28,30,0.70); font-weight: 500; }
-    .sp-s-range { width: 100%; height: 3px; accent-color: rgba(90,130,255,0.9); cursor: pointer; }
-    .sp-s-val { font-size: 9px; color: rgba(28,28,30,0.50); text-align: right; font-variant-numeric: tabular-nums; }
-    .sp-s-warp { accent-color: rgba(90,130,255,0.9); }
-    .sp-settings-btns { display: flex; gap: 5px; margin-top: 7px; }
-    .sp-s-btn {
-      flex: 1;
-      padding: 4px 0;
-      background: rgba(90,130,255,0.12);
-      border: 1px solid rgba(90,130,255,0.22);
-      border-radius: 6px;
-      font-size: 9.5px;
-      color: rgba(28,28,30,0.75);
-      cursor: pointer;
-      font-weight: 500;
-      transition: background 0.13s;
-    }
-    .sp-s-btn:hover { background: rgba(90,130,255,0.26); }
-
     /* Body text is selectable/copyable (drag the title bar to move the panel). */
     #sp-panel-body, #sp-panel-body .sp-val, #sp-panel-body .sp-label,
     #sp-panel-body .sp-item-card, #sp-panel-body #sp-notes-content {
@@ -2163,10 +2137,7 @@
       min-height: 36px;
     }
 
-    #sp-order-panel.sp-dragging {
-      animation-duration: 1.6s, 1.6s;
-      box-shadow: 0 8px 20px rgba(0,0,0,0.10);
-    }
+    #sp-order-panel.sp-dragging { box-shadow: 0 8px 20px rgba(0,0,0,0.10); }
   `);
 
   // ── Panel HTML ────────────────────────────────────────────────────────────
