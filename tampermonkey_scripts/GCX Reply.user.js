@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         GCX Reply
 // @namespace    https://spigen.com/gcx
-// @version      2.18.8
+// @version      2.18.9
 // @description  Amazon order data via GAS web app + Spigen product info + Zendesk auto-fill
 // @author       Spigen GCX
 // @updateURL    https://raw.githubusercontent.com/codingintheusa0402/spigen-gcx-automation/main/tampermonkey_scripts/GCX%20Reply.user.js
@@ -30,18 +30,21 @@
   // re-broadcasting down the frame tree so nested app frames are reached too.
   // TODO: replace with a direct SP-API/SC status change once a path is found.
   if (window.top !== window.self) {
-    const findNrnBtn_ = () => {
-      // ChannelReply Angular attribute selectors (standard tickets)
-      const byAttr = [...document.querySelectorAll(
+    // Strict: Angular ng-click attributes only — identifies the real CR button.
+    // Used for state reporting (sendState_/hello_).  Non-CR iframes never have
+    // ng-click*="noResponse" attributes, so they stay silent and don't cause blinking.
+    const findNrnBtn_ = () =>
+      [...document.querySelectorAll(
         'a[ng-click*="noResponse"], a[ng-click*="NoResponse"], ' +
         'a[ng-click*="updateNoResponseNeeded"], a[ng-click*="updateNoResponse"], ' +
-        'a.no-select, [ng-click*="noResponse"], [ng-click*="NoResponse"]'
+        '[ng-click*="noResponse"], [ng-click*="NoResponse"]'
       )].find(el => /no.?response.?needed/i.test((el.textContent || '').trim()));
-      if (byAttr) return byAttr;
-      // Text-based fallback — catches ABM and other ChannelReply button variants
-      return [...document.querySelectorAll('a, button, [role="button"], li, [class*="action"]')]
+    // Loose fallback — used ONLY when clicking, never for state reporting.
+    // Catches ABM and non-Angular CR variants without poisoning state from unrelated iframes.
+    const findNrnBtnLoose_ = () =>
+      findNrnBtn_() ||
+      [...document.querySelectorAll('a, button, [role="button"], li, [class*="action"]')]
         .find(el => /no.?response.?needed/i.test((el.textContent || '').trim()));
-    };
     const shown_ = el => !!el && getComputedStyle(el).display !== 'none';
     // "Actionable" = ChannelReply still shows the "Mark as …" span (not yet marked).
     // Lenient: only treat as NOT actionable when the "No response needed" (done)
@@ -89,7 +92,7 @@
         cascade_({ __gcxNRN: 'click' });
         let tries = 0;
         (function tick() {
-          const a = findNrnBtn_();
+          const a = findNrnBtnLoose_();
           if (a) {
             if (actionable_(a)) {
               // ChannelReply uses AngularJS — ng-click requires $apply to run the
