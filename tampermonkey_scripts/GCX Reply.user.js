@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         GCX Reply
 // @namespace    https://spigen.com/gcx
-// @version      2.18.10
+// @version      2.18.11
 // @description  Amazon order data via GAS web app + Spigen product info + Zendesk auto-fill
 // @author       Spigen GCX
 // @updateURL    https://raw.githubusercontent.com/codingintheusa0402/spigen-gcx-automation/main/tampermonkey_scripts/GCX%20Reply.user.js
@@ -1251,10 +1251,8 @@
     const container = document.getElementById('sp-ai-reason-result');
     if (!container) return;
     container.innerHTML = `
-      <div style="padding:0 14px 0;">
-        <div style="border-top:1px solid #e9ebec;padding:7px 0 6px;">
-          <button id="sp-ai-reason-btn" style="background:rgba(124,58,237,0.88);color:#fff;border:none;border-radius:8px;padding:5px 0;cursor:pointer;font-size:12px;width:100%;backdrop-filter:blur(4px);">✦ AI 인입사유 분석</button>
-        </div>
+      <div id="sp-ai-reason-bar">
+        <button id="sp-ai-reason-btn"><span class="sp-ai-star">✦</span> AI 인입사유 분석</button>
       </div>`;
     container.querySelector('#sp-ai-reason-btn').addEventListener('click', () => {
       const review = getAiInputText_();
@@ -1266,7 +1264,10 @@
     const container = document.getElementById('sp-ai-reason-result');
     if (!container || !review) return;
     const _session = _panelSession;
-    container.innerHTML = `<div style="padding:0 14px;"><div style="font-size:11px;color:#aaa;padding:6px 0;">AI 인입사유 분석 중…</div></div>`;
+    container.innerHTML = `
+      <div id="sp-ai-reason-bar">
+        <button id="sp-ai-reason-btn" disabled><span class="sp-ai-star sp-ai-spin">✦</span> AI 인입사유 분석 중…</button>
+      </div>`;
     logStep_('AI 인입사유 분석 중…');
     logStep_('AI 입력텍스트: ' + review.slice(0, 600).replace(/\n+/g, ' / '));
     GM_xmlhttpRequest({
@@ -2144,6 +2145,28 @@
       margin-top: 4px;
       text-align: center;
     }
+
+    #sp-ai-reason-bar { margin-top: 6px; border-top: 1px solid #e9ebec; padding-top: 7px; }
+    #sp-ai-reason-btn {
+      background: rgba(124,58,237,0.88);
+      color: #fff;
+      border: none;
+      border-radius: 8px;
+      padding: 5px 0;
+      cursor: pointer;
+      font-size: 12px;
+      width: 100%;
+      backdrop-filter: blur(4px);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 5px;
+    }
+    #sp-ai-reason-btn:hover:not(:disabled) { background: rgba(100,40,200,0.96); }
+    #sp-ai-reason-btn:disabled { background: rgba(160,120,230,0.65); cursor: default; }
+    .sp-ai-star { display: inline-block; }
+    @keyframes sp-spin { 0% { transform: rotate(0deg); } 100% { transform: rotate(360deg); } }
+    .sp-ai-spin { animation: sp-spin 1s linear infinite; }
 
     #sp-notes-bar {
       margin-bottom: 6px;
