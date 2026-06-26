@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         GCX Reply
 // @namespace    https://spigen.com/gcx
-// @version      2.18.7
+// @version      2.18.8
 // @description  Amazon order data via GAS web app + Spigen product info + Zendesk auto-fill
 // @author       Spigen GCX
 // @updateURL    https://raw.githubusercontent.com/codingintheusa0402/spigen-gcx-automation/main/tampermonkey_scripts/GCX%20Reply.user.js
@@ -937,11 +937,11 @@
       '[ng-click*="updateNoResponseNeeded"]'
     )].filter(el => !el.closest('#sp-order-panel') &&
                     /no.?response.?needed/i.test((el.textContent || '').trim()));
-    if (cands.length) return cands[0];
-    // Text-only fallback
-    return [...document.querySelectorAll('a, [role="button"], button')]
-      .find(el => !el.closest('#sp-order-panel') &&
-                  /mark.+no.?response.?needed/i.test((el.textContent || '').trim()));
+    // No text-only fallback: CR always runs in a cross-origin iframe so the main
+    // page DOM will never contain a real NRN button.  A broad text scan caused
+    // false positives (Zendesk macros / tooltips) that blocked the iframe bridge
+    // from updating _lastBridgeAt, triggering the 8s silence timeout and blinking.
+    return cands[0] || null;
   }
 
   function isNrnActionable_(a) {
@@ -3608,11 +3608,14 @@
           return;
         }
         if (d.__gcxNRN !== 'state') return;
-        if (syncFromDom_()) return; // direct DOM wins if available
+        // Track bridge health BEFORE syncFromDom_() so the 8s silence timeout
+        // never fires while the CR iframe is actively sending state — even if a
+        // direct DOM element happens to be found (which would have caused an early
+        // return and left _lastBridgeAt stale, triggering a spurious disable).
         _lastBridgeAt = Date.now();
+        if (d.found && ev.source) window.__gcxNrnSource = ev.source;
+        if (syncFromDom_()) return; // direct DOM wins for button state
         if (d.found) {
-          // Lock onto the frame that has the NRN button for targeted click dispatch.
-          if (ev.source) window.__gcxNrnSource = ev.source;
           setNrnBtn_(!d.actionable,
             d.actionable ? 'Mark as No Response Needed' : 'Already marked as No Response Needed');
         } else {
