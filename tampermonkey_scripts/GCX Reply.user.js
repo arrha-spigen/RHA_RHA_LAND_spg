@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         GCX Reply
 // @namespace    https://spigen.com/gcx
-// @version      2.18.12
+// @version      2.18.13
 // @description  Amazon order data via GAS web app + Spigen product info + Zendesk auto-fill
 // @author       Spigen GCX
 // @updateURL    https://raw.githubusercontent.com/codingintheusa0402/spigen-gcx-automation/main/tampermonkey_scripts/GCX%20Reply.user.js
@@ -266,18 +266,27 @@
     MX:'amazon.com.mx', TR:'amazon.com.tr', US:'amazon.com',
   };
 
-  function sellerCentralUrl(orderId, salesChannel, countryCode) {
-    if (!orderId) return null;
+  // EU marketplaces (non-DE) all share order search on DE Seller Central.
+  // Logging into DE SC is sufficient — no need to log into each marketplace SC.
+  const EU_SC_REDIRECT = new Set(['amazon.fr','amazon.it','amazon.es','amazon.nl','amazon.pl','amazon.se','amazon.be']);
+
+  function scDomain_(salesChannel, countryCode) {
     const domain = salesChannel ? salesChannel.toLowerCase()
       : (countryCode ? (COUNTRY_SC[countryCode] || null) : null);
+    if (!domain) return null;
+    return EU_SC_REDIRECT.has(domain) ? 'amazon.de' : domain;
+  }
+
+  function sellerCentralUrl(orderId, salesChannel, countryCode) {
+    if (!orderId) return null;
+    const domain = scDomain_(salesChannel, countryCode);
     return domain ? `https://sellercentral.${domain}/orders-v3/order/${orderId}` : null;
   }
 
   // Build Seller Central buyer order history search URL (last 2 years)
   function sellerCentralSearchUrl_(salesChannel, countryCode, buyerEmail) {
     if (!buyerEmail) return null;
-    const domain = salesChannel ? salesChannel.toLowerCase()
-      : (countryCode ? (COUNTRY_SC[countryCode] || null) : null);
+    const domain = scDomain_(salesChannel, countryCode);
     if (!domain) return null;
     const now         = Date.now();
     const twoYearsAgo = Math.round(now - 2 * 365.25 * 24 * 3600 * 1000);
@@ -478,11 +487,13 @@
     GM_xmlhttpRequest({
       method: 'GET',
       url: `https://spigenhelp.zendesk.com/api/v2/ticket_fields/${fieldId}.json`,
+      timeout: 12000,
       onload(res) {
         try { cb(JSON.parse(res.responseText).ticket_field?.custom_field_options || []); }
         catch { cb([]); }
       },
-      onerror() { cb([]); },
+      onerror()   { cb([]); },
+      ontimeout() { cb([]); },
     });
   }
 
@@ -572,6 +583,7 @@
     GM_xmlhttpRequest({
       method: 'GET',
       url: `https://spigenhelp.zendesk.com/api/v2/tickets/${ticketId}/comments.json?include=users`,
+      timeout: 12000,
       onload(res) {
         if (res.status !== 200) return cb(false);
         try {
@@ -586,7 +598,8 @@
           cb(hasPhoto);
         } catch { cb(false); }
       },
-      onerror() { cb(false); },
+      onerror()   { cb(false); },
+      ontimeout() { cb(false); },
     });
   }
 
@@ -1211,6 +1224,7 @@
     GM_xmlhttpRequest({
       method: 'GET',
       url: `https://spigenhelp.zendesk.com/api/v2/tickets/${ticketId}.json`,
+      timeout: 12000,
       onload(res) {
         try {
           const t = JSON.parse(res.responseText).ticket || {};
@@ -1219,7 +1233,8 @@
         } catch {}
         buildAndShow();
       },
-      onerror() { buildAndShow(); },
+      onerror()   { buildAndShow(); },
+      ontimeout() { buildAndShow(); },
     });
   }
 
@@ -2528,6 +2543,7 @@
   // Tries marketplace-specific SC domain first, then sellercentral.amazon.com
   // (global SC) as fallback — Spigen accesses most markets via the global domain.
   function fetchScItems(orderId, salesChannel, countryCode, cb) {
+    // scDomain_ already routes EU non-DE → amazon.de, so primaryUrl never hits NL/FR/etc.
     const scPageUrl = sellerCentralUrl(orderId, salesChannel, countryCode);
     const primaryUrl  = scPageUrl ? scPageUrl.replace('/orders-v3/order/', '/orders-api/order/') : null;
     const fallbackUrl = `https://sellercentral.amazon.com/orders-api/order/${orderId}`;
