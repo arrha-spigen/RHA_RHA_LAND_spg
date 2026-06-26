@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         GCX Reply
 // @namespace    https://spigen.com/gcx
-// @version      2.18.9
+// @version      2.18.10
 // @description  Amazon order data via GAS web app + Spigen product info + Zendesk auto-fill
 // @author       Spigen GCX
 // @updateURL    https://raw.githubusercontent.com/codingintheusa0402/spigen-gcx-automation/main/tampermonkey_scripts/GCX%20Reply.user.js
@@ -30,15 +30,20 @@
   // re-broadcasting down the frame tree so nested app frames are reached too.
   // TODO: replace with a direct SP-API/SC status change once a path is found.
   if (window.top !== window.self) {
-    // Strict: Angular ng-click attributes only — identifies the real CR button.
-    // Used for state reporting (sendState_/hello_).  Non-CR iframes never have
-    // ng-click*="noResponse" attributes, so they stay silent and don't cause blinking.
+    // Strict: Angular ng-click + CR-specific inner span structure. Requiring
+    // .not-marked-as-no-response-text / .marked-as-no-response-text means only the
+    // genuine CR iframe can report state — other zdusercontent.com iframes that happen
+    // to have ng-click*="noResponse" elements won't have these CR class names, so
+    // they stay silent and can't cause the enabled↔disabled blink cycle.
     const findNrnBtn_ = () =>
       [...document.querySelectorAll(
         'a[ng-click*="noResponse"], a[ng-click*="NoResponse"], ' +
         'a[ng-click*="updateNoResponseNeeded"], a[ng-click*="updateNoResponse"], ' +
         '[ng-click*="noResponse"], [ng-click*="NoResponse"]'
-      )].find(el => /no.?response.?needed/i.test((el.textContent || '').trim()));
+      )].find(el =>
+        /no.?response.?needed/i.test((el.textContent || '').trim()) &&
+        !!el.querySelector('.not-marked-as-no-response-text, .marked-as-no-response-text')
+      );
     // Loose fallback — used ONLY when clicking, never for state reporting.
     // Catches ABM and non-Angular CR variants without poisoning state from unrelated iframes.
     const findNrnBtnLoose_ = () =>
