@@ -22,6 +22,8 @@ function backfillTrackingNumbers() {
   var sheet = ss.getSheetByName(BF_SHEET_NAME);
   if (!sheet) throw new Error('Sheet not found: ' + BF_SHEET_NAME);
 
+  _warmLwaTokens(); // fetch EU+JP tokens once before the loop to avoid per-row rate-limit 401s
+
   var lastRow = sheet.getLastRow();
   if (lastRow < BF_START_ROW) return;
 

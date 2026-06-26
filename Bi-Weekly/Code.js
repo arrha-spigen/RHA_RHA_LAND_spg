@@ -3,7 +3,103 @@ function onOpen() {
     .createMenu('Slide Updater')
     .addItem('Update Slide Text', 'updateSlideTextBoxes')
     .addItem('Create 260618 Report', 'createReport260618')
+    .addItem('Get YoY Stats (260618)', 'getYoYStats')
     .addToUi();
+}
+
+// ─── YoY STATS ────────────────────────────────────────────────────────────────
+// Counts all rows (no category filter) up to the date cutoffs,
+// computes YoY%, and lists top-10 1차 Defect Reason or Inquiries for 2026.
+function getYoYStats() {
+  var ZD26_ID   = '1sjcCj_P4DRD8rywkmYJhbsrzwFfgiJQuF9nIKwCiKlc';
+  var ZD25_ID   = '1t5CJLsVw1hAVPspt_gBVCiM6vWSrEfvqQ8aV7xvoGD8';
+  var CUT26     = new Date('2026-06-18T23:59:59');
+  var CUT25     = new Date('2025-06-18T23:59:59');
+
+  // ── 2026 sheet ──────────────────────────────────────────────────────────────
+  var sheet26   = SpreadsheetApp.openById(ZD26_ID).getSheetByName('26년 전체문의');
+  if (!sheet26) { Logger.log('26년 전체문의 not found'); return; }
+
+  var lastRow26 = sheet26.getLastRow();
+  var numRows26 = Math.max(lastRow26 - 1, 0);
+  var headers26 = sheet26.getRange(1, 1, 1, sheet26.getLastColumn()).getDisplayValues()[0];
+
+  function colIdx26(name) {
+    var i = headers26.indexOf(name);
+    if (i === -1) throw new Error('Col not found: ' + name);
+    return i + 1;
+  }
+
+  var dateCol26   = colIdx26('Ticket created - Date');
+  var reasonCol26 = colIdx26('1차 Defect Reason or Inquiries');
+
+  var dates26   = sheet26.getRange(2, dateCol26,   numRows26, 1).getDisplayValues().flat();
+  var reasons26 = sheet26.getRange(2, reasonCol26, numRows26, 1).getDisplayValues().flat();
+
+  var count26 = 0;
+  var reasonMap = {};
+  for (var i = 0; i < numRows26; i++) {
+    var d = new Date(dates26[i]);
+    if (isNaN(d.getTime()) || d > CUT26) continue;
+    count26++;
+    var r = (reasons26[i] || '').trim();
+    if (r) reasonMap[r] = (reasonMap[r] || 0) + 1;
+  }
+
+  // Top-10 reasons
+  var top10 = Object.entries(reasonMap)
+    .sort(function(a, b) { return b[1] - a[1]; })
+    .slice(0, 10);
+
+  // ── 2025 sheet ──────────────────────────────────────────────────────────────
+  var sheet25   = SpreadsheetApp.openById(ZD25_ID).getSheetByName('25년 전체문의');
+  if (!sheet25) { Logger.log('25년 전체문의 not found'); return; }
+
+  var lastRow25 = sheet25.getLastRow();
+  var numRows25 = Math.max(lastRow25 - 1, 0);
+  var headers25 = sheet25.getRange(1, 1, 1, sheet25.getLastColumn()).getDisplayValues()[0];
+
+  function colIdx25(name) {
+    var i = headers25.indexOf(name);
+    if (i === -1) throw new Error('Col not found in 25시트: ' + name);
+    return i + 1;
+  }
+
+  var dateCol25 = colIdx25('Ticket created - Date');
+  var dates25   = sheet25.getRange(2, dateCol25, numRows25, 1).getDisplayValues().flat();
+
+  var count25 = 0;
+  for (var j = 0; j < numRows25; j++) {
+    var d2 = new Date(dates25[j]);
+    if (isNaN(d2.getTime()) || d2 > CUT25) continue;
+    count25++;
+  }
+
+  // ── YoY % ───────────────────────────────────────────────────────────────────
+  var yoy = count25 > 0
+    ? (((count26 - count25) / count25) * 100).toFixed(2) + '%'
+    : 'N/A (no 2025 data)';
+
+  // ── Output ──────────────────────────────────────────────────────────────────
+  var lines = [
+    '=== GCX Bi-Weekly 260618 Stats ===',
+    '',
+    '2026 누적 클레임 (~6.18): ' + count26.toLocaleString() + '건',
+    '2025 누적 클레임 (~6.18): ' + count25.toLocaleString() + '건',
+    'YoY: ' + (count26 - count25 >= 0 ? '+' : '') + (count26 - count25).toLocaleString() + '건  (' + (count26 - count25 >= 0 ? '+' : '') + yoy + ')',
+    '',
+    '─── TOP 10  1차 인입사유 (2026, ~6.18) ───'
+  ];
+  top10.forEach(function(entry, idx) {
+    lines.push((idx + 1) + '. ' + entry[0] + '  →  ' + entry[1] + '건');
+  });
+
+  var msg = lines.join('\n');
+  Logger.log(msg);
+  SpreadsheetApp.getUi
+    ? null
+    : Browser.msgBox(msg);
+  SlidesApp.getUi().alert(msg);
 }
 
 // ─── CREATE 260618 ────────────────────────────────────────────────────────────
