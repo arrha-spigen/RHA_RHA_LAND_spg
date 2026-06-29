@@ -226,19 +226,56 @@ function backfillMCFFees() {
 }
 
 /**
- * Converts every =AMZTK() / =AMZTK_JP() formula cell in the sheet to a static
- * =HYPERLINK() formula so cells no longer depend on live SP-API calls.
+ * STEP 1 — run this first to undo the bad freeze.
+ * Scans for HYPERLINK formulas whose "tracking number" looks like a price
+ * (pure decimal number < 1000, e.g. "22.99") and restores the original
+ * =IF(OR(B…,Q…),"",IF(B…<>"JP", HYPERLINK(…AMZTK…), HYPERLINK(…AMZTK_JP…))) formula.
+ */
+function unfreezeAmztkFormulas() {
+  var sheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName(BF_SHEET_NAME);
+  if (!sheet) throw new Error('Sheet not found: ' + BF_SHEET_NAME);
+
+  var lastRow = sheet.getLastRow();
+  var lastCol = sheet.getLastColumn();
+  if (lastRow < BF_START_ROW) return;
+
+  var numRows     = lastRow - BF_START_ROW + 1;
+  var allFormulas = sheet.getRange(BF_START_ROW, 1, numRows, lastCol).getFormulas();
+  // Matches =HYPERLINK("https://www.swiship.XX/track?id=22.99","22.99")
+  var feePattern  = /^=HYPERLINK\("https:\/\/www\.swiship\.(de|jp)\/track\?id=(\d+\.?\d*)","(\d+\.?\d*)"\)$/i;
+
+  var restored = 0;
+  for (var i = 0; i < numRows; i++) {
+    var rowNum = BF_START_ROW + i;
+    var bRef = 'B' + rowNum;
+    var qRef = 'Q' + rowNum;
+    for (var c = 0; c < lastCol; c++) {
+      var f = allFormulas[i][c] || '';
+      var m = f.match(feePattern);
+      if (!m) continue;
+      // Tracking numbers are never plain small decimals — prices are (< 500 €/¥)
+      if (parseFloat(m[2]) >= 500) continue;
+      var orig =
+        '=IF(OR(' + bRef + '="",' + qRef + '=""),"",IF(' + bRef + '<>"JP",' +
+        'HYPERLINK("https://www.swiship.de/track?id="&AMZTK(' + qRef + '),AMZTK(' + qRef + ')),' +
+        'HYPERLINK("https://www.swiship.jp/track?id="&AMZTK_JP(' + qRef + '),AMZTK_JP(' + qRef + '))))';
+      sheet.getRange(rowNum, c + 1).setFormula(orig);
+      restored++;
+    }
+  }
+  Logger.log('unfreezeAmztkFormulas done — restored: ' + restored + ' cells');
+  SpreadsheetApp.getUi().alert('수식 복원 완료: ' + restored + '개 셀');
+}
+
+/**
+ * STEP 2 — run after unfreezeAmztkFormulas() (and after EU LWA is fixed).
+ * Fetches real tracking numbers from SP-API only (never reads col Z as a source,
+ * since col Z contains fees in this sheet).
  *
- * Logic per row:
- *  1. If col Z already has a valid tracking number → use it immediately.
- *  2. Otherwise call SP-API (JP rows work now; EU rows will be skipped until
- *     EU LWA is re-authorised and will be picked up on the next run).
- *  3. Writes the fetched tracking number to col Z for future reference.
- *  4. Replaces the AMZTK formula cell with:
- *       =HYPERLINK("https://www.swiship.XX/track?id=TN","TN")
- *
- * Run manually from the GAS editor.  Safe to run multiple times — skips cells
- * that are already plain values (no formula).
+ * - JP rows: fetched via FE endpoint immediately.
+ * - EU rows: skipped until EU LWA refresh token is re-authorised.
+ * - Replaces each AMZTK formula cell with =HYPERLINK("swiship.XX/…","TN").
+ * - Safe to run multiple times — skips cells that already have a non-AMZTK formula.
  */
 function freezeAmztkFormulas() {
   var ss    = SpreadsheetApp.getActiveSpreadsheet();
@@ -253,11 +290,9 @@ function freezeAmztkFormulas() {
 
   var numRows = lastRow - BF_START_ROW + 1;
 
-  // Bulk-read everything once (formulas, region, orderId, col-Z static values).
   var allFormulas = sheet.getRange(BF_START_ROW, 1, numRows, lastCol).getFormulas();
-  var regions     = sheet.getRange(BF_START_ROW, BF_COL_REGION,  numRows, 1).getValues();
-  var orderIds    = sheet.getRange(BF_START_ROW, BF_COL_ORDER,   numRows, 1).getValues();
-  var zVals       = sheet.getRange(BF_START_ROW, BF_COL_RESULT,  numRows, 1).getValues();
+  var regions     = sheet.getRange(BF_START_ROW, BF_COL_REGION, numRows, 1).getValues();
+  var orderIds    = sheet.getRange(BF_START_ROW, BF_COL_ORDER,  numRows, 1).getValues();
 
   var frozen = 0, pending = 0, skippedEU = 0;
 
@@ -265,52 +300,40 @@ function freezeAmztkFormulas() {
     var orderId = String(orderIds[i][0] || '').trim();
     if (!orderId) continue;
 
-    // Find every column in this row whose formula references AMZTK.
     var amztkCols = [];
     for (var c = 0; c < lastCol; c++) {
       if ((allFormulas[i][c] || '').toUpperCase().indexOf('AMZTK') !== -1) {
-        amztkCols.push(c + 1); // 1-based column index
+        amztkCols.push(c + 1);
       }
     }
     if (!amztkCols.length) continue;
 
     var isJP = String(regions[i][0] || '').trim().toUpperCase() === 'JP';
-    var zVal = String(zVals[i][0] || '').trim();
 
-    // Determine tracking number to use.
-    var tn = (_isErrorValue(zVal) || !zVal) ? '' : zVal;
+    // EU rows: skip until LWA is re-authorised.
+    if (!isJP) {
+      Logger.log('Row ' + (BF_START_ROW + i) + ': EU — skipping (LWA broken)');
+      skippedEU++;
+      continue;
+    }
 
-    if (!tn) {
-      // Try SP-API fetch.  EU token is currently broken → skip EU rows.
-      if (!isJP) {
-        Logger.log('Row ' + (BF_START_ROW + i) + ': EU LWA broken — skipping until re-authorised');
-        skippedEU++;
-        continue;
-      }
-      try {
-        var tracks = _tracksWithFallbacks(orderId, ['FE', 'EU']);
-        tn = (tracks && tracks.length && (tracks[0].trackingNumber || '').trim())
-          ? tracks[0].trackingNumber.trim() : '';
-        if (tn) {
-          sheet.getRange(BF_START_ROW + i, BF_COL_RESULT).setValue(tn);
-          zVals[i][0] = tn;
-        }
-        Utilities.sleep(400);
-      } catch (e) {
-        Logger.log('Row ' + (BF_START_ROW + i) + ': fetch error — ' + e.message);
-        pending++;
-        continue;
-      }
+    // JP rows: fetch from FE endpoint.
+    var tn = '';
+    try {
+      var tracks = _tracksWithFallbacks(orderId, ['FE', 'EU']);
+      tn = (tracks && tracks.length && (tracks[0].trackingNumber || '').trim())
+        ? tracks[0].trackingNumber.trim() : '';
+      Utilities.sleep(400);
+    } catch (e) {
+      Logger.log('Row ' + (BF_START_ROW + i) + ': fetch error — ' + e.message);
+      pending++;
+      continue;
     }
 
     if (!tn) { pending++; continue; }
 
-    // Replace each AMZTK formula column with a static HYPERLINK.
-    var url = isJP
-      ? 'https://www.swiship.jp/track?id=' + tn
-      : 'https://www.swiship.de/track?id=' + tn;
+    var url           = 'https://www.swiship.jp/track?id=' + tn;
     var staticFormula = '=HYPERLINK("' + url + '","' + tn + '")';
-
     for (var ci = 0; ci < amztkCols.length; ci++) {
       sheet.getRange(BF_START_ROW + i, amztkCols[ci]).setFormula(staticFormula);
     }
@@ -320,12 +343,12 @@ function freezeAmztkFormulas() {
 
   Logger.log(
     'freezeAmztkFormulas done — frozen: ' + frozen +
-    ', EU skipped (LWA broken): ' + skippedEU +
+    ', EU skipped: ' + skippedEU +
     ', pending (no TN yet): ' + pending
   );
   SpreadsheetApp.getUi().alert(
     '완료\n\n' +
-    '✅ 고정됨: ' + frozen + '행\n' +
+    '✅ 고정됨 (JP): ' + frozen + '행\n' +
     '⏭ EU 스킵 (LWA 재인증 필요): ' + skippedEU + '행\n' +
     '⏳ 아직 운송장 없음: ' + pending + '행'
   );
