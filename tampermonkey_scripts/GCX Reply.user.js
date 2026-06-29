@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         GCX Reply
 // @namespace    https://spigen.com/gcx
-// @version      2.18.13
+// @version      2.19.0
 // @description  Amazon order data via GAS web app + Spigen product info + Zendesk auto-fill
 // @author       Spigen GCX
 // @updateURL    https://raw.githubusercontent.com/codingintheusa0402/spigen-gcx-automation/main/tampermonkey_scripts/GCX%20Reply.user.js
@@ -12,6 +12,14 @@
 // @match        https://*.zdusercontent.com/*
 // @match        https://*.apps.zdusercontent.com/*
 // @match        https://www.channelreply.com/*
+// @match        https://sellercentral.amazon.*/mcf/orders/create-order*
+// @match        https://sellercentral.amazon.com/mcf/orders/create-order*
+// @match        https://sellercentral.amazon.co.uk/mcf/orders/create-order*
+// @match        https://sellercentral.amazon.de/mcf/orders/create-order*
+// @match        https://sellercentral.amazon.fr/mcf/orders/create-order*
+// @match        https://sellercentral.amazon.it/mcf/orders/create-order*
+// @match        https://sellercentral.amazon.es/mcf/orders/create-order*
+// @match        https://sellercentral-europe.amazon.*/mcf/orders/create-order*
 // @grant        GM_xmlhttpRequest
 // @grant        GM_addStyle
 // @run-at       document-idle
@@ -131,6 +139,12 @@
     return; // never build the floating panel inside an app iframe
   }
 
+  // ── Seller Central MCF page: run embedded autofill instead of Zendesk panel ──
+  if (location.hostname.includes('sellercentral') && location.pathname.includes('/mcf/orders/create-order')) {
+    initMcfPage_();
+    return;
+  }
+
   const GAS_URL    = 'https://script.google.com/macros/s/AKfycbw2Vdwk197LXB6oUAzuHS8sKamD5uqKZJDLvcHzbftWJk-M65XV1fAnTqiZo7ZEm4hk/exec';
   const SHEET_URL  = 'https://docs.google.com/spreadsheets/d/1fx9K4r2T9SeZK076zy9kMHoLzAKDgmlRp-C2VtnTKVo/edit?gid=0#gid=0';
   const ORDER_RE   = /\b(\d{3}-\d{7}-\d{7})\b/g;
@@ -174,7 +188,7 @@
   };
 
   const FULFILLMENT_MAP = { AFN: 'fba', MFN: 'merchant__fbm_' };
-  const SCRIPT_VER = (typeof GM_info !== 'undefined' ? GM_info?.script?.version : null) || '2.16.9';
+  const SCRIPT_VER = (typeof GM_info !== 'undefined' ? GM_info?.script?.version : null) || '2.19.0';
   const sleep = ms => new Promise(r => setTimeout(r, ms));
 
   // ── Module state ─────────────────────────────────────────────────────────
@@ -862,28 +876,33 @@
   }
 
   // ── MCF: 주문 API + 티켓 본문 주소를 합쳐 해시 페이로드 생성 ─────────────────
-  function buildMcfPayload_(panelEl, emailOverride) {
+  function buildMcfPayload_(panelEl, emailOverride, chosenAsin) {
     const o  = lastOrderData?.order   || {};
     const ad = lastOrderData?.address || {};
     const b  = lastOrderData?.buyer   || {};
     const itemAsins = (lastOrderData?.items || []).map(i => i.ASIN).filter(Boolean);
-    const asin    = itemAsins[0] || panelEl?.querySelector('#sp-asin-input')?.value.trim() || '';
+    const asin    = chosenAsin || itemAsins[0] || panelEl?.querySelector('#sp-asin-input')?.value.trim() || '';
     const orderId = panelEl?.querySelector('#sp-order-input')?.value.trim() || '';
     // 고객이 티켓에 직접 쓴 주소가 주문 API 주소보다 우선 (MCF 배송지이므로)
     const ta = parseTicketAddress_(getTicketBodyText_());
     const country = ta.country || ad.CountryCode || '';
+    // Per-unit item price for MCF delivery cost ratio warning
+    const rawAmt = parseFloat(o.OrderTotal?.Amount || 0);
+    const totalQty = (lastOrderData?.items || []).reduce((s, i) => s + (i.QuantityOrdered || 1), 0);
+    const itemPrice = rawAmt > 0 ? (rawAmt / Math.max(1, totalQty)).toFixed(2) : null;
     return {
-      name:    ta.name   || b.BuyerName || o.BuyerInfo?.BuyerName || ad.Name || '',
-      street:  ta.street || ad.AddressLine1 || '',
-      city:    ta.city   || ad.City || '',
-      state:   ta.state  || ad.StateOrRegion || '',
-      postal:  ta.postal || ad.PostalCode || '',
-      phone:   ta.phone  || ad.Phone || '',
-      email:   emailOverride || ta.email  || b.BuyerEmail || '',
+      name:      ta.name   || b.BuyerName || o.BuyerInfo?.BuyerName || ad.Name || '',
+      street:    ta.street || ad.AddressLine1 || '',
+      city:      ta.city   || ad.City || '',
+      state:     ta.state  || ad.StateOrRegion || '',
+      postal:    ta.postal || ad.PostalCode || '',
+      phone:     ta.phone  || ad.Phone || '',
+      email:     emailOverride || ta.email  || b.BuyerEmail || '',
       country,
-      asin:    ta.q || asin,
+      asin:      ta.q || asin,
       orderId,
-      region:  country === 'JP' ? 'JP' : 'global',
+      region:    country === 'JP' ? 'JP' : 'global',
+      itemPrice,
     };
   }
 
@@ -929,6 +948,41 @@
     );
   }
 
+  function showMcfAsinPicker_(asins) {
+    return new Promise(resolve => {
+      if (!asins || asins.length <= 1) { resolve((asins && asins[0]) || null); return; }
+      const overlay = document.createElement('div');
+      overlay.style.cssText = 'position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,0.5);z-index:2147483646;display:flex;align-items:center;justify-content:center;';
+      const box = document.createElement('div');
+      box.style.cssText = 'background:#fff;border-radius:10px;padding:20px 24px;min-width:280px;box-shadow:0 4px 24px rgba(0,0,0,.25);font-family:-apple-system,BlinkMacSystemFont,sans-serif;';
+      const title = document.createElement('div');
+      title.style.cssText = 'font-size:14px;font-weight:600;color:#2f3941;margin-bottom:4px;';
+      title.textContent = 'MCF SKU 검색 ASIN 선택';
+      const sub = document.createElement('div');
+      sub.style.cssText = 'font-size:11px;color:#68737d;margin-bottom:14px;';
+      sub.textContent = '티켓에서 여러 ASIN이 감지됐습니다. MCF 페이지에서 어떤 ASIN으로 SKU를 검색할까요?';
+      box.appendChild(title);
+      box.appendChild(sub);
+      asins.forEach((a, i) => {
+        const btn = document.createElement('button');
+        btn.style.cssText = 'display:block;width:100%;text-align:left;background:#f8f9f9;border:1px solid #d8dcde;padding:8px 12px;margin-bottom:8px;border-radius:6px;cursor:pointer;font-size:13px;color:#2f3941;font-family:monospace;transition:all .15s;';
+        btn.textContent = `${i + 1}. ${a}`;
+        btn.onmouseenter = () => { btn.style.background = '#e8f5fd'; btn.style.borderColor = '#5ba4cf'; };
+        btn.onmouseleave = () => { btn.style.background = '#f8f9f9'; btn.style.borderColor = '#d8dcde'; };
+        btn.onclick = () => { overlay.remove(); resolve(a); };
+        box.appendChild(btn);
+      });
+      const cancel = document.createElement('button');
+      cancel.style.cssText = 'display:block;width:100%;text-align:center;background:transparent;border:none;color:#68737d;cursor:pointer;font-size:12px;padding:6px;margin-top:2px;';
+      cancel.textContent = '취소';
+      cancel.onclick = () => { overlay.remove(); resolve(null); };
+      box.appendChild(cancel);
+      overlay.appendChild(box);
+      overlay.onclick = e => { if (e.target === overlay) { overlay.remove(); resolve(null); } };
+      document.body.appendChild(overlay);
+    });
+  }
+
   async function sendToMCF(panel) {
     if (!lastOrderData) return;
     const status = panel.querySelector('#sp-mcf-status');
@@ -937,7 +991,22 @@
     showSt('고객 이메일 확인 중…');
     const ctxEmail = await getCustomerContextEmail_();
 
-    const payload = buildMcfPayload_(panel, ctxEmail);
+    // Collect all unique ASINs: SP-API order items + ASIN-labeled in ticket body
+    const itemAsins = (lastOrderData?.items || []).map(i => i.ASIN).filter(Boolean);
+    const bodyText  = getTicketBodyText_();
+    const bodyAsins = [...new Set([...bodyText.matchAll(/\bASIN\b[^\w]{0,5}(B[A-Z0-9]{9})\b/gi)].map(m => m[1]))];
+    const allAsins  = [...new Set([...itemAsins, ...bodyAsins])];
+
+    let chosenAsin = null;
+    if (allAsins.length > 1) {
+      showSt('ASIN 선택 중…');
+      chosenAsin = await showMcfAsinPicker_(allAsins);
+      if (chosenAsin === null) { if (status) status.style.display = 'none'; return; }
+    } else {
+      chosenAsin = allAsins[0] || null;
+    }
+
+    const payload = buildMcfPayload_(panel, ctxEmail, chosenAsin);
     const encoded = btoa(encodeURIComponent(JSON.stringify(payload)));
     const _mcfW = window.open(getMcfBase_(payload.country) + '#spigen_mcf=' + encoded, '_blank');
     if (_mcfW) { try { _mcfW.name = 'spigen_mcf:' + encoded; } catch(e) {} }
@@ -3843,6 +3912,286 @@
     observer.observe(document.body, { childList: true, subtree: true });
 
     if (isTicketPage_()) setTimeout(autoDetectAll, 1500);
+  }
+
+  // ── Embedded MCF page autofill (runs on Seller Central MCF pages) ──────────
+  // This makes GCX Reply self-sufficient for MCF autofill — "Amazon MCF Autofill"
+  // Tampermonkey script is no longer required (kept only as emergency clipboard fallback).
+  function initMcfPage_() {
+    const sl = ms => new Promise(r => setTimeout(r, ms));
+
+    // --- Kat form helpers ---
+    function setKat(el, val) {
+      if (!el || val == null) return false;
+      try {
+        el.value = val;
+        el.setAttribute('value', val);
+        el.dispatchEvent(new Event('input', { bubbles: true }));
+        el.dispatchEvent(new Event('change', { bubbles: true }));
+        const inner = el.shadowRoot?.querySelector('input,textarea');
+        if (inner) {
+          inner.value = val;
+          inner.dispatchEvent(new Event('input', { bubbles: true }));
+          inner.dispatchEvent(new Event('change', { bubbles: true }));
+        }
+        return true;
+      } catch(e) { return false; }
+    }
+
+    function setByAnyLbl(labels, v) {
+      if (!v) return false;
+      const el = [...document.querySelectorAll('kat-input')].find(k =>
+        labels.some(l => (k.getAttribute('label') || '').trim().toLowerCase() === l.toLowerCase())
+      );
+      return el ? setKat(el, v) : false;
+    }
+
+    function setCountry(code) {
+      if (!code) return false;
+      const upper = code.toUpperCase().replace(/^UK$/, 'GB').replace(/^EL$/, 'GR');
+      const dd = document.querySelector('kat-dropdown[label="Country"]') ||
+                 document.querySelector('kat-dropdown[label="국가"]');
+      if (!dd?.shadowRoot) return false;
+      const sr = dd.shadowRoot;
+      const header = sr.querySelector('.select-header, [part="dropdown-header"]');
+      if (header) header.click();
+      let attempts = 0;
+      const timer = setInterval(() => {
+        const opt = sr.querySelector(`kat-option[value="${upper}"]`);
+        if (opt && opt.offsetParent !== null) {
+          const inner = opt.shadowRoot?.querySelector('.content-wrapper');
+          (inner || opt).click();
+          clearInterval(timer);
+          return;
+        }
+        if (++attempts > 30) clearInterval(timer);
+      }, 100);
+      return true;
+    }
+
+    function fillAll({ name, street, city, state, postal, phone, email, asin }) {
+      let ok = false;
+      ok = setByAnyLbl(['Full name', '전체 이름'], name)           || ok;
+      ok = setByAnyLbl(['Street address', '상세 주소'], street)    || ok;
+      ok = setByAnyLbl(['City', '도시'], city)                     || ok;
+      ok = setByAnyLbl(['State / Province', '시/도'], state)       || ok;
+      ok = setByAnyLbl(['Postcode', '우편번호'], postal)           || ok;
+      ok = setByAnyLbl(['Phone number', '전화번호'], phone)        || ok;
+      if (email) ok = setByAnyLbl(['Email address', '이메일 주소'], email) || ok;
+      if (asin) {
+        const inp = document.getElementById('sku-search-input');
+        if (inp) {
+          setKat(inp, asin);
+          ok = true;
+          setTimeout(() => {
+            const inner = inp.shadowRoot?.querySelector('input');
+            if (inner) {
+              inner.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', keyCode: 13, bubbles: true, composed: true }));
+              inner.dispatchEvent(new KeyboardEvent('keyup',   { key: 'Enter', keyCode: 13, bubbles: true, composed: true }));
+            }
+          }, 400);
+        }
+      }
+      return ok;
+    }
+
+    // --- SKU auto-select (highest fulfillable count, skip amzn.* internal SKUs) ---
+    function autoSelectBestSku() {
+      let attempts = 0;
+      const timer = setInterval(() => {
+        const components = [...document.querySelectorAll('.search-result-component')];
+        if (!components.length) { if (++attempts > 60) clearInterval(timer); return; }
+        const entries = components.map(comp => {
+          const m = (comp.querySelector('.search-result-component-quantity')?.textContent || '').match(/([\d,]+)\s+fulfillable/i);
+          return { count: m ? parseInt(m[1].replace(/,/g, ''), 10) : 0, comp };
+        }).filter(({ comp }) => !/\bamzn[.\-]/i.test(comp.textContent || ''));
+        if (!entries.length) { if (++attempts > 60) clearInterval(timer); return; }
+        entries.sort((a, b) => b.count - a.count);
+        const xBtn = entries[0].comp.querySelector('.search-result-x');
+        if (!xBtn) { if (++attempts > 60) clearInterval(timer); return; }
+        clearInterval(timer);
+        // React fiber click (most reliable)
+        const fKey = Object.keys(xBtn).find(k => k.startsWith('__reactFiber') || k.startsWith('__reactInternalInstance'));
+        if (fKey) {
+          let fiber = xBtn[fKey];
+          while (fiber) {
+            if (fiber.memoizedProps && typeof fiber.memoizedProps.onClick === 'function') {
+              fiber.memoizedProps.onClick({ preventDefault(){}, stopPropagation(){}, type:'click', target:xBtn });
+              return;
+            }
+            fiber = fiber.return;
+          }
+        }
+        ['pointerover','pointerenter','mouseover','mouseenter','pointermove','mousemove',
+         'pointerdown','mousedown','pointerup','mouseup','click'].forEach(type =>
+          xBtn.dispatchEvent(new MouseEvent(type, { bubbles: true, cancelable: true, composed: true, view: window }))
+        );
+      }, 500);
+    }
+
+    // --- Expedited shipping ---
+    function forceExpedited() {
+      let left = 80;
+      const timer = setInterval(() => {
+        const grp = document.querySelector('kat-radiobutton-group[name="shipping-speed"]') ||
+                    document.querySelector('kat-radiobutton-group');
+        if (grp) {
+          const rb = [...document.querySelectorAll('kat-radiobutton')].find(r => (r.getAttribute('value') || '').toLowerCase() === 'expedited');
+          if (rb) { rb.click(); }
+          else { try { grp.value = 'Expedited'; grp.dispatchEvent(new Event('change', { bubbles: true })); } catch(_) {} }
+          if ((grp.value || '').toLowerCase() === 'expedited') { clearInterval(timer); return; }
+        }
+        const labels = [...document.querySelectorAll('kat-label[part="radiobutton-label"], kat-label[for]')];
+        const exped = labels.find(el =>
+          /\bexpedited\b/i.test(el.getAttribute('text') || '') ||
+          /\bexpedited\b/i.test(el.textContent || '') ||
+          (el.textContent || '').includes('빠른 배송')
+        );
+        if (exped) { const nl = exped.querySelector('label[for]'); if (nl) { nl.click(); clearInterval(timer); return; } }
+        if (--left <= 0) clearInterval(timer);
+      }, 350);
+    }
+
+    // --- Order ID ---
+    const _isOrderLbl = lbl => lbl.includes('order id') || lbl.includes('merchant order id') || lbl.includes('주문 id');
+    function isOrderIdFilled_() {
+      const k = [...document.querySelectorAll('kat-input')].find(k => _isOrderLbl((k.getAttribute('label') || '').trim().toLowerCase()));
+      if (k && (k.value || k.getAttribute('value'))) return true;
+      const inner = document.querySelector('input[name*="orderId"], input[id*="orderId"]');
+      return !!(inner && inner.value.trim());
+    }
+    function setOrderId_(v) {
+      if (!v) return;
+      const k = [...document.querySelectorAll('kat-input')].find(k => _isOrderLbl((k.getAttribute('label') || '').trim().toLowerCase()));
+      if (k) { setKat(k, v); return; }
+      const inner = document.querySelector('input[name*="orderId"], input[id*="orderId"]');
+      if (inner) { inner.value = v; inner.dispatchEvent(new Event('input', { bubbles: true })); }
+    }
+
+    const _MCF_GAS_EP = 'https://script.google.com/macros/s/AKfycbwM02GYF6gvdT1mSD7ePeLMU2huRz4ARl2E5AJ2Oh-nKYLWD3nbyHqAcNreM8wGZwdo/exec';
+    async function markRowMcf_(email) {
+      if (!email) return null;
+      try {
+        const url = _MCF_GAS_EP + '?email=' + encodeURIComponent(email) + '&action=markMcf&match=last&person=' + encodeURIComponent('김지우');
+        const res = await fetch(url);
+        if (!res.ok) return null;
+        const data = await res.json().catch(() => null);
+        return (data?.success === true && data.orderId) ? data.orderId : null;
+      } catch(e) { return null; }
+    }
+
+    // --- Price warning: red-highlight + note bubble if MCF fee > 1/3 item price ---
+    function parsePriceNum_(str) {
+      if (!str) return null;
+      const m = (str || '').match(/([\d]+[.,][\d]{2}|[\d]+)/);
+      return m ? parseFloat(m[1].replace(',', '.')) : null;
+    }
+
+    function applyPriceWarning_(el, deliveryPrice, itemPrice) {
+      if (!el || deliveryPrice == null || !itemPrice || itemPrice <= 0) return;
+      const ratio = deliveryPrice / itemPrice;
+      if (ratio <= 1 / 3) {
+        el.style.cssText = '';
+        el._spBubble?.remove();
+        delete el._spBubble;
+        return;
+      }
+      el.style.cssText = 'background:#c0392b!important;color:#fff!important;padding:1px 5px;border-radius:3px;font-weight:700;';
+      if (!el._spBubble) {
+        const bubble = document.createElement('span');
+        bubble.style.cssText = 'display:inline-flex;align-items:center;justify-content:center;margin-left:5px;cursor:default;background:#c0392b;color:#fff;border-radius:50%;width:15px;height:15px;font-size:10px;font-weight:700;vertical-align:middle;position:relative;';
+        bubble.textContent = '!';
+        const tip = document.createElement('div');
+        tip.style.cssText = 'display:none;position:absolute;bottom:120%;left:50%;transform:translateX(-50%);background:#c0392b;color:#fff;padding:6px 10px;border-radius:6px;font-size:11px;white-space:nowrap;z-index:99999;box-shadow:0 2px 8px rgba(0,0,0,.35);pointer-events:none;';
+        tip.textContent = `MCF 배송비가 상품가의 1/3 초과 (${Math.round(ratio * 100)}%)`;
+        bubble.appendChild(tip);
+        bubble.addEventListener('mouseenter', () => { tip.style.display = 'block'; });
+        bubble.addEventListener('mouseleave', () => { tip.style.display = 'none'; });
+        el.parentElement?.insertBefore(bubble, el.nextSibling);
+        el._spBubble = bubble;
+      } else {
+        const tip = el._spBubble.querySelector('div');
+        if (tip) tip.textContent = `MCF 배송비가 상품가의 1/3 초과 (${Math.round(ratio * 100)}%)`;
+      }
+    }
+
+    function watchPriceWarning_(itemPrice) {
+      const check = () => document.querySelectorAll('.total-price-label').forEach(el =>
+        applyPriceWarning_(el, parsePriceNum_(el.textContent), itemPrice)
+      );
+      check();
+      new MutationObserver(check).observe(document.body, { childList: true, subtree: true, characterData: true });
+    }
+
+    // --- Main hash/window.name bridge autofill ---
+    async function autoFillFromHash_() {
+      // window.name is the primary bridge (persists through Netlify → SC cross-origin redirects)
+      let wnEncoded = '';
+      const wn = window.name || '';
+      if (wn.startsWith('spigen_mcf:')) {
+        wnEncoded = wn.slice('spigen_mcf:'.length);
+        window.name = '';
+      }
+      // Fallback: sessionStorage hash saved by MCF Autofill script (if also installed)
+      const storedHash = sessionStorage.getItem('_spigen_mcf_hash') || '';
+      const encoded = wnEncoded || (storedHash.includes('spigen_mcf=') ? storedHash.split('spigen_mcf=')[1] : '');
+      if (!encoded) return;
+
+      try {
+        const d = JSON.parse(decodeURIComponent(atob(encoded)));
+        if (!d || d.region === 'JP') return;
+        sessionStorage.removeItem('_spigen_mcf_hash');
+
+        // Fill form — retry until address fields appear (some SC markets show them only after SKU selection)
+        let filled = false;
+        let asinKicked = false;
+        for (let i = 0; i < 60; i++) {
+          await sl(500);
+          const ok = fillAll({ name: d.name, street: d.street, city: d.city, state: d.state,
+                               postal: d.postal, phone: d.phone, email: d.email, asin: d.asin });
+          if (ok) { filled = true; break; }
+          if (!asinKicked && d.asin) {
+            const searchInner = document.getElementById('sku-search-input')?.shadowRoot?.querySelector('input');
+            if (searchInner?.value?.trim()) { asinKicked = true; autoSelectBestSku(); }
+          }
+        }
+        if (!filled) return;
+
+        if (d.asin && !asinKicked) autoSelectBestSku();
+        if (d.country) setTimeout(() => setCountry(d.country), 800);
+
+        if (d.email) {
+          const orderId = await markRowMcf_(d.email);
+          if (orderId) setOrderId_(orderId);
+        }
+
+        // Wait for item + order ID to be ready, then select Expedited
+        let left = 150;
+        const shTimer = setInterval(() => {
+          if (isOrderIdFilled_()) { forceExpedited(); clearInterval(shTimer); return; }
+          if (--left <= 0) clearInterval(shTimer);
+        }, 400);
+
+        // Price warning
+        if (d.itemPrice) watchPriceWarning_(parseFloat(d.itemPrice));
+      } catch(e) { /* silent */ }
+    }
+
+    // Run after DOM is ready
+    if (document.body) {
+      setTimeout(autoFillFromHash_, 500);
+    } else {
+      const t = setInterval(() => { if (document.body) { clearInterval(t); setTimeout(autoFillFromHash_, 500); } }, 20);
+    }
+
+    // SPA hashchange (if Amazon routes to MCF via client-side nav without full reload)
+    window.addEventListener('hashchange', () => {
+      if (location.hash?.includes('spigen_mcf=')) {
+        try { sessionStorage.setItem('_spigen_mcf_hash', location.hash); } catch(e) {}
+        history.replaceState(null, '', location.pathname + location.search);
+        autoFillFromHash_();
+      }
+    });
   }
 
   // 국가 코드 → MCF 랜딩 URL
