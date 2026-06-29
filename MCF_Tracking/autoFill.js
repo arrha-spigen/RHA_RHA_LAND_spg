@@ -43,24 +43,34 @@ function backfillTrackingNumbers() {
     var isJP      = String(regions[i][0] || '').trim().toUpperCase() === 'JP';
     var endpoints = isJP ? ['FE', 'EU'] : ['EU', 'FE'];
 
-    try {
-      var tracks = _tracksWithFallbacks(orderId, endpoints);
-      var tn = (tracks && tracks.length && (tracks[0].trackingNumber || '').trim())
-        ? tracks[0].trackingNumber.trim()
-        : '';
-
-      if (tn) {
-        sheet.getRange(BF_START_ROW + i, BF_COL_RESULT).setValue(tn);
-        Logger.log('Row ' + (BF_START_ROW + i) + ': wrote ' + tn);
+    var tn = '';
+    var retries429b = 0;
+    var fetchOkB = false;
+    while (!fetchOkB) {
+      try {
+        var tracks = _tracksWithFallbacks(orderId, endpoints);
+        tn = (tracks && tracks.length && (tracks[0].trackingNumber || '').trim())
+          ? tracks[0].trackingNumber.trim() : '';
+        Utilities.sleep(400);
+        fetchOkB = true;
+      } catch (e) {
+        if (_isRateLimit429(e) && retries429b < 3) {
+          retries429b++;
+          Logger.log('Row ' + (BF_START_ROW + i) + ': 429 — waiting 45 s (retry ' + retries429b + '/3)');
+          Utilities.sleep(45000);
+        } else {
+          var errMsg = (isJP ? 'JP' : 'EU') + ' ERR: ' + (e.message || e);
+          sheet.getRange(BF_START_ROW + i, BF_COL_RESULT).setValue(errMsg);
+          Logger.log('Row ' + (BF_START_ROW + i) + ': ' + errMsg);
+          fetchOkB = true; // stop retrying, move on
+        }
       }
-    } catch (e) {
-      var errMsg = (isJP ? 'JP' : 'EU') + ' ERR: ' + (e.message || e);
-      // Write error back so the next backfill run retries this row.
-      sheet.getRange(BF_START_ROW + i, BF_COL_RESULT).setValue(errMsg);
-      Logger.log('Row ' + (BF_START_ROW + i) + ': ' + errMsg);
     }
 
-    Utilities.sleep(400); // stay under SP-API rate limit
+    if (tn) {
+      sheet.getRange(BF_START_ROW + i, BF_COL_RESULT).setValue(tn);
+      Logger.log('Row ' + (BF_START_ROW + i) + ': wrote ' + tn);
+    }
   }
 }
 
@@ -317,18 +327,30 @@ function freezeAmztkFormulas() {
       continue;
     }
 
-    // JP rows: fetch from FE endpoint.
+    // JP rows: fetch from FE endpoint, with outer 429 retry (45 s backoff, up to 3×).
     var tn = '';
-    try {
-      var tracks = _tracksWithFallbacks(orderId, ['FE', 'EU']);
-      tn = (tracks && tracks.length && (tracks[0].trackingNumber || '').trim())
-        ? tracks[0].trackingNumber.trim() : '';
-      Utilities.sleep(400);
-    } catch (e) {
-      Logger.log('Row ' + (BF_START_ROW + i) + ': fetch error — ' + e.message);
-      pending++;
-      continue;
+    var retries429 = 0;
+    var fetchOk = false;
+    while (!fetchOk) {
+      try {
+        var tracks = _tracksWithFallbacks(orderId, isJP ? ['FE', 'EU'] : ['EU', 'FE']);
+        tn = (tracks && tracks.length && (tracks[0].trackingNumber || '').trim())
+          ? tracks[0].trackingNumber.trim() : '';
+        Utilities.sleep(400);
+        fetchOk = true;
+      } catch (e) {
+        if (_isRateLimit429(e) && retries429 < 3) {
+          retries429++;
+          Logger.log('Row ' + (BF_START_ROW + i) + ': 429 — waiting 45 s (retry ' + retries429 + '/3)');
+          Utilities.sleep(45000);
+        } else {
+          Logger.log('Row ' + (BF_START_ROW + i) + ': fetch error — ' + e.message);
+          pending++;
+          break;
+        }
+      }
     }
+    if (!fetchOk) continue;
 
     if (!tn) { pending++; continue; }
 
