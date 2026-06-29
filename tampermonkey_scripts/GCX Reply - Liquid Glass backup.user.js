@@ -1,5 +1,5 @@
 // ==UserScript==
-// @name         GCX Reply
+// @name         GCX Reply Backup
 // @namespace    https://spigen.com/gcx
 // @version      2.17.20
 // @description  Amazon order data via GAS web app + Spigen product info + Zendesk auto-fill
