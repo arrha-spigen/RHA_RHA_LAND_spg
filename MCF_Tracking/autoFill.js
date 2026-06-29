@@ -225,6 +225,112 @@ function backfillMCFFees() {
   Logger.log('backfillMCFFees done — written: %s, not settled: %s', written, notSettled);
 }
 
+/**
+ * Converts every =AMZTK() / =AMZTK_JP() formula cell in the sheet to a static
+ * =HYPERLINK() formula so cells no longer depend on live SP-API calls.
+ *
+ * Logic per row:
+ *  1. If col Z already has a valid tracking number → use it immediately.
+ *  2. Otherwise call SP-API (JP rows work now; EU rows will be skipped until
+ *     EU LWA is re-authorised and will be picked up on the next run).
+ *  3. Writes the fetched tracking number to col Z for future reference.
+ *  4. Replaces the AMZTK formula cell with:
+ *       =HYPERLINK("https://www.swiship.XX/track?id=TN","TN")
+ *
+ * Run manually from the GAS editor.  Safe to run multiple times — skips cells
+ * that are already plain values (no formula).
+ */
+function freezeAmztkFormulas() {
+  var ss    = SpreadsheetApp.getActiveSpreadsheet();
+  var sheet = ss.getSheetByName(BF_SHEET_NAME);
+  if (!sheet) throw new Error('Sheet not found: ' + BF_SHEET_NAME);
+
+  _warmLwaTokens();
+
+  var lastRow = sheet.getLastRow();
+  var lastCol = sheet.getLastColumn();
+  if (lastRow < BF_START_ROW) { Logger.log('No data rows.'); return; }
+
+  var numRows = lastRow - BF_START_ROW + 1;
+
+  // Bulk-read everything once (formulas, region, orderId, col-Z static values).
+  var allFormulas = sheet.getRange(BF_START_ROW, 1, numRows, lastCol).getFormulas();
+  var regions     = sheet.getRange(BF_START_ROW, BF_COL_REGION,  numRows, 1).getValues();
+  var orderIds    = sheet.getRange(BF_START_ROW, BF_COL_ORDER,   numRows, 1).getValues();
+  var zVals       = sheet.getRange(BF_START_ROW, BF_COL_RESULT,  numRows, 1).getValues();
+
+  var frozen = 0, pending = 0, skippedEU = 0;
+
+  for (var i = 0; i < numRows; i++) {
+    var orderId = String(orderIds[i][0] || '').trim();
+    if (!orderId) continue;
+
+    // Find every column in this row whose formula references AMZTK.
+    var amztkCols = [];
+    for (var c = 0; c < lastCol; c++) {
+      if ((allFormulas[i][c] || '').toUpperCase().indexOf('AMZTK') !== -1) {
+        amztkCols.push(c + 1); // 1-based column index
+      }
+    }
+    if (!amztkCols.length) continue;
+
+    var isJP = String(regions[i][0] || '').trim().toUpperCase() === 'JP';
+    var zVal = String(zVals[i][0] || '').trim();
+
+    // Determine tracking number to use.
+    var tn = (_isErrorValue(zVal) || !zVal) ? '' : zVal;
+
+    if (!tn) {
+      // Try SP-API fetch.  EU token is currently broken → skip EU rows.
+      if (!isJP) {
+        Logger.log('Row ' + (BF_START_ROW + i) + ': EU LWA broken — skipping until re-authorised');
+        skippedEU++;
+        continue;
+      }
+      try {
+        var tracks = _tracksWithFallbacks(orderId, ['FE', 'EU']);
+        tn = (tracks && tracks.length && (tracks[0].trackingNumber || '').trim())
+          ? tracks[0].trackingNumber.trim() : '';
+        if (tn) {
+          sheet.getRange(BF_START_ROW + i, BF_COL_RESULT).setValue(tn);
+          zVals[i][0] = tn;
+        }
+        Utilities.sleep(400);
+      } catch (e) {
+        Logger.log('Row ' + (BF_START_ROW + i) + ': fetch error — ' + e.message);
+        pending++;
+        continue;
+      }
+    }
+
+    if (!tn) { pending++; continue; }
+
+    // Replace each AMZTK formula column with a static HYPERLINK.
+    var url = isJP
+      ? 'https://www.swiship.jp/track?id=' + tn
+      : 'https://www.swiship.de/track?id=' + tn;
+    var staticFormula = '=HYPERLINK("' + url + '","' + tn + '")';
+
+    for (var ci = 0; ci < amztkCols.length; ci++) {
+      sheet.getRange(BF_START_ROW + i, amztkCols[ci]).setFormula(staticFormula);
+    }
+    Logger.log('Row ' + (BF_START_ROW + i) + ': frozen → ' + tn);
+    frozen++;
+  }
+
+  Logger.log(
+    'freezeAmztkFormulas done — frozen: ' + frozen +
+    ', EU skipped (LWA broken): ' + skippedEU +
+    ', pending (no TN yet): ' + pending
+  );
+  SpreadsheetApp.getUi().alert(
+    '완료\n\n' +
+    '✅ 고정됨: ' + frozen + '행\n' +
+    '⏭ EU 스킵 (LWA 재인증 필요): ' + skippedEU + '행\n' +
+    '⏳ 아직 운송장 없음: ' + pending + '행'
+  );
+}
+
 function onEdit_mcf(e) {
   if (!e) return;
 
