@@ -735,6 +735,18 @@ function updateFeedbackSheet() {
     [39,
       '【Before】 인도(Amazon.in) SP-API LWA 토큰 만료 시 예외 미처리 → 주문 조회 전체 실패\n【After GAS 2026-06-15】 지역별 LWA 예외 개별 catch, 403+만료 시 캐시 자동 삭제 후 1회 재시도\n📋 테스트 티켓: #1000150413',
       'v2.8.4'],
+    [40,
+      '【Before】 SPA 티켓 이동 시 history.pushState 직후 clearAllZdFields_() 호출 → DOM이 아직 이전 티켓을 렌더링 중일 경우 해당 티켓 ZD 필드값이 지워짐 → 다른 Zendesk 탭으로 이동 후 복귀 시 Purchase Date 변경, Order ID/ASIN/SKU 공란 발생\n【After v2.19.1】 clearAllZdFields_()를 resetPanel()에서 Auto-Fill 확인 직전으로 이동 → DOM 타이밍과 무관하게 정확한 티켓 필드만 초기화\n✅ 테스트 티켓: #1000150854',
+      'v2.19.1'],
+    [41,
+      '【Before】 제품 정보 시트 AGL10123 모델명 불일치 → "Glas.tR EZ Fit Pro"로 오매칭\n【After v2.19.1】 시트 AGL10123 모델명 → "Glas.tR Optik Pro"으로 수정\n✅ 테스트 티켓: #1000150922 (ASIN B0FFVDVB4S)',
+      'v2.19.1'],
+    [42,
+      '【Before】 제품 정보 시트 ACS07624 모델명 불일치 → "Ultra Hybrid OneTap Metal Ring MagFit"으로 오매칭\n【After v2.19.1】 시트 ACS07624 모델명 → "Ultra Hybrid MagFit"으로 수정\n✅ 테스트 티켓: #1000150934 (ASIN B0CV71SSMQ)',
+      'v2.19.1'],
+    [43,
+      '【Before】 제품 정보 시트 AMP08885 대분류가 "거치대/스탠드" 형태로 등록 → SDA로 매핑됨\n【After v2.19.1】 시트 AMP08885 대분류 → "차량용 거치대/스탠드"으로 수정 → NewBiz 정확 선택\n✅ 테스트 티켓: #1000151691 (ASIN B0DJPZ8RHG)',
+      'v2.19.1'],
   ];
 
   UPDATES.forEach(([row, feedback, build]) => {
@@ -755,6 +767,10 @@ function updateFeedbackSheet() {
     // row 37: Fail already set by team — do not overwrite
     [38, 'Pass'],   // v2.8.3 Spigen SKU pattern rejects "PE2304IN 45w"
     [39, 'Pass'],   // GAS 2026-06-15 India LWA per-region catch + retry applied
+    [40, 'Pass'],   // v2.19.1 clearAllZdFields_() moved to Auto-Fill callback
+    [41, 'Pass'],   // v2.19.1 AGL10123 → "Glas.tR Optik Pro"
+    [42, 'Pass'],   // v2.19.1 ACS07624 → "Ultra Hybrid MagFit"
+    [43, 'Pass'],   // v2.19.1 AMP08885 대분류 → "차량용 거치대/스탠드"
   ];
   GCX_TEST.forEach(([row, val]) => sheet.getRange(row, H_COL).setValue(val));
 
@@ -778,6 +794,9 @@ function fixProductSheetData() {
     'AGL10819': ['모델명',  'Glas.tR EZ Fit Anti-Glare'],
     'AGL07930': ['모델명',  'Glas.tR EZ Fit Anti Reflection'],
     'AMP09837': ['대분류',  '차량용 거치대/스탠드'],
+    'AGL10123': ['모델명',  'Glas.tR Optik Pro'],
+    'ACS07624': ['모델명',  'Ultra Hybrid MagFit'],
+    'AMP08885': ['대분류',  '차량용 거치대/스탠드'],
   };
 
   const colMap = { '모델명': MODEL_COL, '대분류': DAEBUN_COL };
