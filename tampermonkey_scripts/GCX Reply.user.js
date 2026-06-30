@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         GCX Reply
 // @namespace    https://spigen.com/gcx
-// @version      2.19.4
+// @version      2.20.0
 // @description  Amazon order data via GAS web app + Spigen product info + Zendesk auto-fill
 // @author       Spigen GCX
 // @updateURL    https://raw.githubusercontent.com/codingintheusa0402/spigen-gcx-automation/main/tampermonkey_scripts/GCX%20Reply.user.js
@@ -24,7 +24,7 @@
 // @grant        GM_addStyle
 // @run-at       document-idle
 // @connect      *
-// @require      https://cdn.jsdelivr.net/npm/html2canvas@1.4.1/dist/html2canvas.min.js
+// html2canvas removed — Liquid Glass WebGL deprecated
 // ==/UserScript==
 
 (function () {
@@ -233,28 +233,62 @@
   let lastAmazonProduct = null;
   let lastAiReason      = null;
 
+  // ── Ticket JSON cache: avoid double-fetching the same ticket JSON ────────
+  // Both getTicketFields (auto-detect) and autoFillTicket (currentCfMap) call
+  // /api/v2/tickets/{id}.json on the same ticket. This cache makes the second
+  // caller reuse the first response (60s TTL — fresh enough for one session).
+  let _ticketJsonCache = null; // { id, ticket, ts }
+  function fetchTicketJson_(ticketId, cb) {
+    const now = Date.now();
+    if (_ticketJsonCache && _ticketJsonCache.id === ticketId && now - _ticketJsonCache.ts < 60000) {
+      cb(_ticketJsonCache.ticket);
+      return;
+    }
+    GM_xmlhttpRequest({
+      method: 'GET',
+      url: `https://spigenhelp.zendesk.com/api/v2/tickets/${ticketId}.json`,
+      timeout: 12000,
+      onload(res) {
+        if (res.status !== 200) { cb(null); return; }
+        try {
+          const ticket = JSON.parse(res.responseText).ticket || {};
+          _ticketJsonCache = { id: ticketId, ticket, ts: Date.now() };
+          cb(ticket);
+        } catch { cb(null); }
+      },
+      onerror()   { cb(null); },
+      ontimeout() { cb(null); },
+    });
+  }
+
+  // ── SC session expiry warning ─────────────────────────────────────────────
+  // Shown when fetchScItems / fetchScBuyerStats_ detect a login redirect.
+  // Inserts a yellow banner at the top of #sp-result; removed on ticket nav.
+  function showScSessionWarning_(scBaseUrl) {
+    if (document.getElementById('sp-sc-session-warn')) return;
+    const result = document.getElementById('sp-result');
+    if (!result) return;
+    const domain = (scBaseUrl || 'https://sellercentral.amazon.de').match(/^https:\/\/[^/]+/)?.[0] || 'https://sellercentral.amazon.de';
+    const warn = document.createElement('div');
+    warn.id = 'sp-sc-session-warn';
+    warn.style.cssText = 'background:#fff3cd;border:1px solid #ffc107;border-radius:6px;padding:6px 10px;font-size:11.5px;color:#856404;margin-bottom:8px;line-height:1.4;';
+    warn.innerHTML = `⚠ SC 세션 만료 — <a href="${domain}/orders-v3" target="_blank" rel="noopener" style="color:#856404;font-weight:600;text-decoration:underline;">Seller Central 로그인</a> 필요 (구매이력/SKU 없음)`;
+    result.insertBefore(warn, result.firstChild);
+  }
+
   // ── Zendesk API: read order ID + ASIN from ticket custom fields ──────────
   function getTicketFields(cb) {
     const m = location.pathname.match(/\/tickets\/(\d+)/);
     if (!m) return cb(null, null, []);
-    GM_xmlhttpRequest({
-      method: 'GET',
-      url: `https://spigenhelp.zendesk.com/api/v2/tickets/${m[1]}.json`,
-      onload(res) {
-        if (res.status !== 200) return cb(null, null, []);
-        try {
-          const ticket  = JSON.parse(res.responseText).ticket || {};
-          const fields  = ticket.custom_fields || [];
-          const vals    = fields.map(f => String(f.value || ''));
-          const orderId = vals.find(v => /^\d{3}-\d{7}-\d{7}$/.test(v)) || null;
-          const asin    = vals.find(v => /^B[A-Z0-9]{9}$/.test(v)) || null;
-          // Also scan the customer message body for order IDs
-          const desc    = ticket.description || '';
-          const bodyIds = [...new Set([...desc.matchAll(/\b(\d{3}-\d{7}-\d{7})\b/g)].map(x => x[1]))];
-          cb(orderId, asin, bodyIds);
-        } catch { cb(null, null, []); }
-      },
-      onerror() { cb(null, null, []); },
+    fetchTicketJson_(m[1], ticket => {
+      if (!ticket) return cb(null, null, []);
+      const fields  = ticket.custom_fields || [];
+      const vals    = fields.map(f => String(f.value || ''));
+      const orderId = vals.find(v => /^\d{3}-\d{7}-\d{7}$/.test(v)) || null;
+      const asin    = vals.find(v => /^B[A-Z0-9]{9}$/.test(v)) || null;
+      const desc    = ticket.description || '';
+      const bodyIds = [...new Set([...desc.matchAll(/\b(\d{3}-\d{7}-\d{7})\b/g)].map(x => x[1]))];
+      cb(orderId, asin, bodyIds);
     });
   }
 
@@ -508,6 +542,24 @@
       },
       onerror()   { cb([]); },
       ontimeout() { cb([]); },
+    });
+  }
+
+  // Cached wrapper around fetchZdFieldOpts — field options rarely change per session.
+  // Uses sessionStorage with a 30-min TTL to avoid repeated API calls on the same ticket.
+  const ZD_OPTS_CACHE_TTL = 30 * 60 * 1000;
+  function fetchZdFieldOptsCached(fieldId, cb) {
+    const key = `sp_zdopts_${fieldId}`;
+    try {
+      const raw = sessionStorage.getItem(key);
+      if (raw) {
+        const { ts, opts } = JSON.parse(raw);
+        if (Date.now() - ts < ZD_OPTS_CACHE_TTL) { cb(opts); return; }
+      }
+    } catch {}
+    fetchZdFieldOpts(fieldId, opts => {
+      try { sessionStorage.setItem(key, JSON.stringify({ ts: Date.now(), opts })); } catch {}
+      cb(opts);
     });
   }
 
@@ -1336,7 +1388,7 @@
     }
 
     // Async fetches — device opts always fetched (invoice detection needs opts even without product)
-    fetchZdFieldOpts(ZD.DEVICE, opts => {
+    fetchZdFieldOptsCached(ZD.DEVICE, opts => {
       if (deviceLabel) {
         const cands = topDeviceCandidates_(opts, deviceLabel, ticketText);
         if (cands.length === 0) {
@@ -1352,7 +1404,7 @@
       buildAndShow();
     });
     if (productLabel) {
-      fetchZdFieldOpts(ZD.PRODUCT_NAME, opts => {
+      fetchZdFieldOptsCached(ZD.PRODUCT_NAME, opts => {
         const cands = topCandidateOpts_(opts, productLabel, true);
         if (cands.length === 0) {
           resolvedProduct = { val: null, name: '', opts };
@@ -1364,7 +1416,7 @@
         buildAndShow();
       });
     }
-    fetchZdFieldOpts(ZD.FULFILLMENT, opts => {
+    fetchZdFieldOptsCached(ZD.FULFILLMENT, opts => {
       fulfillOpts = opts;
       let fv = null;
       if (skuHasPan) { const o2 = opts.find(x => /pan\s*eu/i.test(x.name)); if (o2) fv = o2.value; }
@@ -1376,20 +1428,12 @@
       buildAndShow();
     });
     fetchTicketComments(ticketId, hasPhoto => { resolvedHasPhoto = hasPhoto; buildAndShow(); });
-    GM_xmlhttpRequest({
-      method: 'GET',
-      url: `https://spigenhelp.zendesk.com/api/v2/tickets/${ticketId}.json`,
-      timeout: 12000,
-      onload(res) {
-        try {
-          const t = JSON.parse(res.responseText).ticket || {};
-          for (const f of (t.custom_fields || [])) currentCfMap[f.id] = f.value || '';
-          ticketSubject = t.subject || '';
-        } catch {}
-        buildAndShow();
-      },
-      onerror()   { buildAndShow(); },
-      ontimeout() { buildAndShow(); },
+    fetchTicketJson_(ticketId, t => {
+      if (t) {
+        for (const f of (t.custom_fields || [])) currentCfMap[f.id] = f.value || '';
+        ticketSubject = t.subject || '';
+      }
+      buildAndShow();
     });
   }
 
@@ -2575,10 +2619,10 @@
     }).join('');
 
     const orderCountNote = data.totalPurchases != null
-      ? ` <span style="color:#888;font-size:11px;">(구매 ${data.totalPurchases}건 / 환불 ${data.totalRefunds}건)</span>`
+      ? ` <span id="sp-stat-badge" style="color:#888;font-size:11px;">(구매 ${data.totalPurchases}건 / 환불 ${data.totalRefunds}건)</span>`
       : data.orderCount != null
-        ? ` <span style="color:#888;font-size:11px;">(총 ${data.orderCount}건)</span>`
-        : '';
+        ? ` <span id="sp-stat-badge" style="color:#888;font-size:11px;">(총 ${data.orderCount}건)</span>`
+        : ` <span id="sp-stat-badge" style="color:#888;font-size:11px;"></span>`;
 
     if (!prefs.fetchOrder) {
       return `${rowReturnAsin(returnAsin, o.SalesChannel, data.itemsStatus)}`;
@@ -2620,11 +2664,11 @@
           ${shippingSection}
           ${row('Ship Service Level',  o.ShipServiceLevel)}
           ${row('Buyer Name',          buyerName)}
-          ${rowLinked('구매이력 (2yr)',
+          <div id="sp-stat-link-wrap">${rowLinked('구매이력 (2yr)',
               data.totalPurchases != null
                 ? `구매 ${data.totalPurchases}건 / 환불 ${data.totalRefunds}건`
                 : '—',
-              scSearchUrl)}
+              scSearchUrl)}</div>
 
           ${it.length > 0 ? `<div class="sp-items-title">Items (${it.length})</div>${itemRows}` : ''}
         </div>
@@ -2647,6 +2691,11 @@
       redirect: 'follow',
       timeout: 15000,
       onload(res) {
+        if (res.finalUrl?.includes('/ap/signin') || (res.responseText || '').trimStart().startsWith('<')) {
+          showScSessionWarning_(base);
+          cb(null);
+          return;
+        }
         let email = null;
         if (res.status === 200) {
           try {
@@ -2718,6 +2767,12 @@
         redirect: 'follow',
         timeout:  20000,
         onload(res) {
+          if (res.finalUrl?.includes('/ap/signin') || (res.status === 200 && (res.responseText || '').trimStart().startsWith('<'))) {
+            const base = url.match(/^https:\/\/[^/]+/)?.[0];
+            showScSessionWarning_(base);
+            logStep_(`SC items: session expired → login redirect`);
+            return onFail();
+          }
           if (res.status !== 200) {
             logStep_(`SC items: ${url.replace(/^https:\/\//,'')} → HTTP ${res.status}${res.finalUrl && res.finalUrl !== url ? ` (→ ${res.finalUrl.replace(/^https:\/\//,'').slice(0,40)})` : ''}`);
             return onFail();
@@ -2806,6 +2861,7 @@
           applySectionState(result);
 
           // SC session fallback: get buyer email + 2yr order count when SP-API can't provide it
+          // Uses in-place DOM patch (#sp-stat-badge / #sp-stat-link-wrap) to avoid full re-render.
           if (data.totalPurchases == null) {
             fetchScBuyerStats_(orderId, data.order?.SalesChannel, data.address?.CountryCode, stats => {
               if (_panelSession !== _session || !result.isConnected || !stats) return;
@@ -2817,11 +2873,20 @@
               });
               lastOrderData = Object.assign({}, lastOrderData, updated);
               logStep_(`SC buyer stats: 구매 ${stats.totalPurchases ?? '?'}건`);
-              result.innerHTML = renderOrder(updated, orderId, resolvedAsin);
-              result.querySelectorAll('.sp-block-title').forEach(t => {
-                t.addEventListener('click', e => { e.stopPropagation(); t.closest('.sp-block').classList.toggle('collapsed'); });
-              });
-              applySectionState(result);
+              const badge = result.querySelector('#sp-stat-badge');
+              if (badge) {
+                const tp = updated.totalPurchases, tr = updated.totalRefunds ?? 0;
+                badge.textContent = tp != null ? `(구매 ${tp}건 / 환불 ${tr}건)` : '';
+              }
+              const linkWrap = result.querySelector('#sp-stat-link-wrap');
+              if (linkWrap) {
+                const newEmail = updated.buyer?.BuyerEmail;
+                const newScUrl = sellerCentralSearchUrl_(updated.order?.SalesChannel, updated.address?.CountryCode, newEmail);
+                const tp = updated.totalPurchases, tr = updated.totalRefunds ?? 0;
+                linkWrap.innerHTML = rowLinked('구매이력 (2yr)',
+                  tp != null ? `구매 ${tp}건 / 환불 ${tr}건` : '—',
+                  newScUrl);
+              }
               maybeShowAutoFill(document.getElementById(PANEL_ID));
             });
           }
@@ -2898,11 +2963,9 @@
     });
   }
 
-  const LOADING_GIF = 'https://upload.wikimedia.org/wikipedia/commons/b/b1/Loading_icon.gif?_=20151024034921';
   function setStatus(msg, isLoading = false) {
-    const html = isLoading
-      ? `<img src="${LOADING_GIF}" style="width:14px;height:14px;vertical-align:middle;margin-right:5px;">${esc(msg)}`
-      : esc(msg);
+    const spinner = `<span style="display:inline-block;width:13px;height:13px;border:2px solid rgba(110,110,115,0.25);border-top-color:#6e6e73;border-radius:50%;animation:sp-spin 0.8s linear infinite;vertical-align:middle;margin-right:6px;"></span>`;
+    const html = isLoading ? `${spinner}${esc(msg)}` : esc(msg);
     const el = document.getElementById('sp-status');
     if (el) { el.innerHTML = html; return; }
     const result = document.getElementById('sp-result');
@@ -3886,6 +3949,8 @@
       lastProductData  = null;
       lastAmazonProduct = null;
       _productReady    = false;
+      _ticketJsonCache = null;
+      document.getElementById('sp-sc-session-warn')?.remove();
       // Only wipe GCX Reply-filled ZD fields when Auto-Fill was actually confirmed on this
       // ticket. Clearing unconditionally caused Zendesk's own saved field values to be lost
       // whenever the agent navigated away and back (regression from v2.7.3).

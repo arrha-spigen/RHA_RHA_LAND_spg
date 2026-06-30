@@ -1,4 +1,4 @@
-// GCX Reply — Apps Script Web App (v2.6.0)
+// GCX Reply — Apps Script Web App (v2.6.1)
 // Endpoint: ?orderId=XXX  |  ?asin=XXX  |  ?orderId=XXX&asin=XXX
 // Deploy as: Execute as Me, Access: Anyone (or Anyone anonymous)
 // Script Properties required: AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY,
@@ -434,38 +434,68 @@ function colToLetter_(col) {
   return letter;
 }
 
-function checkMarketplaces_(asin) {
-  const cache    = CacheService.getScriptCache();
-  const cacheKey = 'mkt3_' + asin;
-  const hit      = cache.get(cacheKey);
-  if (hit) return JSON.parse(hit);
+// ── Sheet row caching helpers ─────────────────────────────────────────────────
+// GAS ScriptCache has a 100 KB per-entry limit. We only write if the serialised
+// JSON fits in 95 KB; otherwise we fall through to a live read every time.
+const SHEET1_CACHE_KEY = 'prod_sheet1_v1';
+const SHEET2_CACHE_KEY = 'prod_sheet2_v1';
+const SHEET_ROW_TTL    = 3600;
+const MKT_INDEX_CACHE_KEY = 'mkt_idx_v1';
+const MKT_INDEX_TTL    = 14400;
 
-  const ss      = SpreadsheetApp.openById(MARKET_SS_ID);
-  const selling = [];
+function loadSheetRows_(ssId, sheetName, cacheKey) {
+  const cache = CacheService.getScriptCache();
+  const hit   = cache.get(cacheKey);
+  if (hit) return JSON.parse(hit);
+  const sheet = SpreadsheetApp.openById(ssId).getSheetByName(sheetName);
+  if (!sheet) return [];
+  const rows = sheet.getDataRange().getValues();
+  const json = JSON.stringify(rows);
+  if (json.length < 95000) cache.put(cacheKey, json, SHEET_ROW_TTL);
+  return rows;
+}
+
+// Builds a full ASIN → [{name, gid, cell}] index across all market sheets and
+// caches it for 4 hours. Returns null if the index is too large to cache (rare).
+function getMktIndex_() {
+  const cache = CacheService.getScriptCache();
+  const hit   = cache.get(MKT_INDEX_CACHE_KEY);
+  if (hit) return JSON.parse(hit);
+  const ss    = SpreadsheetApp.openById(MARKET_SS_ID);
+  const index = {};
   for (const sheetName of MARKET_SHEETS) {
     const sheet = ss.getSheetByName(sheetName);
     if (!sheet) continue;
-    const data = sheet.getDataRange().getValues();
-    for (let r = 0; r < data.length; r++) {
-      const cells  = data[r].map(c => String(c));
-      const colIdx = cells.findIndex(c => c === asin);
-      if (colIdx >= 0) {
-        if (!cells.some(c => c.includes('단종'))) {
-          selling.push({ name: sheetName, gid: sheet.getSheetId(), cell: colToLetter_(colIdx) + (r + 1) });
+    const gid  = sheet.getSheetId();
+    const rows = sheet.getDataRange().getValues();
+    for (let r = 0; r < rows.length; r++) {
+      const cells = rows[r].map(c => String(c));
+      for (let col = 0; col < cells.length; col++) {
+        const cell = cells[col];
+        if (/^B[A-Z0-9]{9}$/.test(cell)) {
+          if (!cells.some(c => c.includes('단종'))) {
+            if (!index[cell]) index[cell] = [];
+            index[cell].push({ name: sheetName, gid, cell: colToLetter_(col) + (r + 1) });
+          }
+          break;
         }
-        break;
       }
     }
   }
+  const json = JSON.stringify(index);
+  if (json.length < 95000) cache.put(MKT_INDEX_CACHE_KEY, json, MKT_INDEX_TTL);
+  return index;
+}
 
-  cache.put(cacheKey, JSON.stringify(selling), 3600);
-  return selling;
+function checkMarketplaces_(asin) {
+  const idx = getMktIndex_();
+  return idx[asin] || [];
 }
 
 // ── Google Sheet ASIN lookup ──────────────────────────────────────────────────
 function lookupAsin_(asin) {
-  const sheet   = SpreadsheetApp.openById(SHEET_ID).getSheetByName(SHEET_NAME);
-  const data    = sheet.getDataRange().getValues();
+  const data    = loadSheetRows_(SHEET_ID, SHEET_NAME, SHEET1_CACHE_KEY);
+  if (!data.length) return null;
   const headers = data[0];
   const asinIdx = headers.indexOf('ASIN');
   if (asinIdx < 0) throw new Error('ASIN column not found in sheet');
@@ -483,9 +513,8 @@ function lookupAsin_(asin) {
 
 // ── Market spreadsheet — Data sheet ASIN lookup (source 2) ───────────────────
 function lookupAsin2_(asin) {
-  const sheet = SpreadsheetApp.openById(MARKET_SS_ID).getSheetByName('Data');
-  if (!sheet) return null;
-  const data    = sheet.getDataRange().getValues();
+  const data = loadSheetRows_(MARKET_SS_ID, 'Data', SHEET2_CACHE_KEY);
+  if (!data.length) return null;
   const headers = data[0];
   const asinIdx = headers.indexOf('ASIN');
   if (asinIdx < 0) return null;
@@ -593,12 +622,22 @@ function inferReason_(text, category) {
 }
 
 function loadDefectDataDR_(category) {
-  const sh = SpreadsheetApp.openById(DEFECT_SS_ID).getSheetByName(DEFECT_SHEET_NAME);
-  if (!sh) { Logger.log('loadDefectData: sheet not found'); return { rawList: [], list: [], enrichedList: [] }; }
-  const lastRow = sh.getLastRow();
-  if (lastRow < 2) return { rawList: [], list: [], enrichedList: [] };
+  const cache     = CacheService.getScriptCache();
+  const rowsKey   = 'dr_defect_list_v1';
+  let rows;
+  const rowsHit   = cache.get(rowsKey);
+  if (rowsHit) {
+    rows = JSON.parse(rowsHit);
+  } else {
+    const sh = SpreadsheetApp.openById(DEFECT_SS_ID).getSheetByName(DEFECT_SHEET_NAME);
+    if (!sh) { Logger.log('loadDefectData: sheet not found'); return { rawList: [], list: [], enrichedList: [] }; }
+    const lastRow = sh.getLastRow();
+    if (lastRow < 2) return { rawList: [], list: [], enrichedList: [] };
+    rows = sh.getRange(2, 1, lastRow - 1, 3).getValues();
+    const json = JSON.stringify(rows);
+    if (json.length < 95000) cache.put(rowsKey, json, 21600);
+  }
 
-  const rows = sh.getRange(2, 1, lastRow - 1, 3).getValues();
   let filtered = rows.filter(r => (!category || String(r[0]).trim() === category) && r[1]);
   if (!filtered.length && category) {
     Logger.log(`loadDefectData: no rows for category="${category}", using all`);
@@ -780,6 +819,9 @@ function updateFeedbackSheet() {
     [43,
       '【Before】 제품 정보 시트 AMP08885 대분류가 "거치대/스탠드" 형태로 등록 → SDA로 매핑됨\n【After v2.19.1】 시트 AMP08885 대분류 → "차량용 거치대/스탠드"으로 수정 → NewBiz 정확 선택\n✅ 테스트 티켓: #1000151691 (ASIN B0DJPZ8RHG)',
       'v2.19.1'],
+    [44,
+      '【Before】 html2canvas(1.4MB) @require가 잔류(Liquid Glass 제거 후 dead code) / 매 Auto-Fill마다 ZD field-opts API 3회 + ticket JSON 2회 중복 호출 / SC 세션 만료 시 무음 실패 / SC 구매이력 업데이트 시 전체 패널 re-render / GAS 시트 읽기 매 요청마다 cold read\n【After v2.20.0】 html2canvas @require 제거, fetchTicketJson_(60s TTL) + fetchZdFieldOptsCached(sessionStorage 30min TTL) 캐싱 도입, SC 세션 만료 배너 표시, SC stats 인플레이스 DOM 패치(#sp-stat-badge/#sp-stat-link-wrap), loadSheetRows_(ScriptCache 1h) + getMktIndex_(4h) + loadDefectDataDR_ allRows(6h) 캐싱\n✅ 2026-06-30 적용',
+      'v2.20.0'],
   ];
 
   UPDATES.forEach(([row, feedback, build]) => {
