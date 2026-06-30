@@ -1,6 +1,6 @@
 // ==UserScript==
 // @name         Amazon MCF Autofill
-// @version      1.4.0
+// @version      1.4.1
 // @updateURL    https://raw.githubusercontent.com/codingintheusa0402/spigen-gcx-automation/main/tampermonkey_scripts/Amazon%20MCF%20Autofill.user.js
 // @downloadURL  https://raw.githubusercontent.com/codingintheusa0402/spigen-gcx-automation/main/tampermonkey_scripts/Amazon%20MCF%20Autofill.user.js
 // @match        https://sellercentral.amazon.*/mcf/orders/create-order*
@@ -338,19 +338,9 @@
     return { ...addr, email, q, asins, country, countryRaw: ticketCountryRaw };
   }
   // ---------------------------------
-  // SHIPPING SPEED (Expedited)
+  // SHIPPING SPEED (Standard)
   // ---------------------------------
-  function clickShowMoreIfAny(next) {
-    const btn = document.querySelector('kat-button.toggle-inferior-ship-options-button');
-    if (btn && btn.offsetParent !== null) {
-      btn.click();
-      setTimeout(next, 300);
-    } else {
-      next();
-    }
-  }
-
-  function clickExpeditedKatLabel() {
+  function clickStandardKatLabel() {
     const labels = [
       ...document.querySelectorAll('kat-label[part="radiobutton-label"], kat-label[for]')
     ];
@@ -358,8 +348,8 @@
     for (const el of labels) {
       const attrText = (el.getAttribute('text') || '').trim().toLowerCase();
       const txt = (el.textContent || '').trim().toLowerCase();
-      const isExpedited = attrText === 'expedited' || /\bexpedited\b/.test(txt) || txt.includes('빠른 배송');
-      if (!isExpedited) continue;
+      const isStandard = attrText === 'standard' || /\bstandard\b/.test(txt);
+      if (!isStandard) continue;
 
       const nativeLabel = el.querySelector('label[for]');
       if (nativeLabel) {
@@ -381,18 +371,18 @@
       }
     }
 
-    return pickExpeditedByGroup();
+    return pickStandardByGroup();
   }
 
-  function pickExpeditedByGroup() {
+  function pickStandardByGroup() {
     const grp =
       document.querySelector('kat-radiobutton-group[name="shipping-speed"]') ||
       document.querySelector('kat-radiobutton-group');
     if (!grp) return false;
 
     try {
-      grp.value = 'Expedited';
-      grp.setAttribute('value', 'Expedited');
+      grp.value = 'Standard';
+      grp.setAttribute('value', 'Standard');
       grp.dispatchEvent(new Event('input', { bubbles:true }));
       grp.dispatchEvent(new Event('change', { bubbles:true }));
       return true;
@@ -401,34 +391,32 @@
     }
   }
 
-  function pickExpedited() {
+  function pickStandard() {
     const rb = [...document.querySelectorAll('kat-radiobutton')]
-      .find(rb => (rb.getAttribute('value') || '').toLowerCase() === 'expedited');
+      .find(rb => (rb.getAttribute('value') || '').toLowerCase() === 'standard');
     if (rb) { rb.click(); return true; }
 
     const grp = document.querySelector('kat-radiobutton-group[name="shipping-speed"]');
     const radio =
-      grp && grp.querySelector('input[type="radio"][name="shipping-speed"][value="Expedited"]');
+      grp && grp.querySelector('input[type="radio"][name="shipping-speed"][value="Standard"]');
     if (radio) { radio.click(); return true; }
 
     return false;
   }
 
-  function forceExpedited({ attempts=80, everyMs=350 } = {}) {
+  function forceStandard({ attempts=80, everyMs=350 } = {}) {
     let left = attempts;
     const timer = setInterval(() => {
-      clickShowMoreIfAny(() => {
-        if (clickExpeditedKatLabel() || pickExpeditedByGroup() || pickExpedited()) {
-          const grp =
-            document.querySelector('kat-radiobutton-group[name="shipping-speed"]') ||
-            document.querySelector('kat-radiobutton-group');
-          if (!grp || (grp.value || '').toLowerCase() === 'expedited') {
-            msg('Shipping speed set to: Expedited');
-            clearInterval(timer);
-            return;
-          }
+      if (clickStandardKatLabel() || pickStandardByGroup() || pickStandard()) {
+        const grp =
+          document.querySelector('kat-radiobutton-group[name="shipping-speed"]') ||
+          document.querySelector('kat-radiobutton-group');
+        if (!grp || (grp.value || '').toLowerCase() === 'standard') {
+          msg('Shipping speed set to: Standard');
+          clearInterval(timer);
+          return;
         }
-      });
+      }
 
       if (--left <= 0) clearInterval(timer);
     }, everyMs);
@@ -448,15 +436,15 @@
   }
 
   let shippingWaiterStarted = false;
-  function ensureExpeditedAfterReady({ attempts=150, everyMs=400 } = {}) {
+  function ensureStandardAfterReady({ attempts=150, everyMs=400 } = {}) {
     if (shippingWaiterStarted) return;
     shippingWaiterStarted = true;
 
     let left = attempts;
     const timer = setInterval(() => {
       if (hasItemSelected() && isOrderIdFilled()) {
-        LOG('Item + Order ID ready → Select Expedited.');
-        forceExpedited();
+        LOG('Item + Order ID ready → Select Standard.');
+        forceStandard();
         clearInterval(timer);
         return;
       }
@@ -800,7 +788,7 @@ async function fetchOrderIdByEmail(email) {
         }
       }
 
-      ensureExpeditedAfterReady();
+      ensureStandardAfterReady();
 
     } catch (e) {
       msg('Clipboard error.');
@@ -853,7 +841,7 @@ async function fetchOrderIdByEmail(email) {
         msg('시트 업데이트 완료 (Order ID 없음)');
       }
     }
-    ensureExpeditedAfterReady();
+    ensureStandardAfterReady();
   });
 
   // ── URL 해시 브릿지: Zendesk GCX Reply → MCF 자동입력 ───────────────────
@@ -922,7 +910,7 @@ async function fetchOrderIdByEmail(email) {
       } else {
         msg('✓ Zendesk 자동입력 완료');
       }
-      ensureExpeditedAfterReady();
+      ensureStandardAfterReady();
     } catch(e) { LOG('autoFillFromUrlHash error', e); }
   }
 
