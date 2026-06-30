@@ -1,4 +1,4 @@
-// GCX Reply — Apps Script Web App (v2.5.0)
+// GCX Reply — Apps Script Web App (v2.6.0)
 // Endpoint: ?orderId=XXX  |  ?asin=XXX  |  ?orderId=XXX&asin=XXX
 // Deploy as: Execute as Me, Access: Anyone (or Anyone anonymous)
 // Script Properties required: AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY,
@@ -207,7 +207,9 @@ function signingKey_(secret, dateStamp, region) {
   return hmac_(kService, 'aws4_request');
 }
 
-function spApiGet_(endpoint, region, cred, fullPath, tokenOverride) {
+// Returns a signed fetch-options object (url + headers) without calling UrlFetchApp.
+// Use directly with UrlFetchApp.fetchAll() to parallelise multiple SP-API requests.
+function spApiBuildFetch_(endpoint, region, cred, fullPath, tokenOverride) {
   const props     = PropertiesService.getScriptProperties().getProperties();
   const accessKey = props['AWS_ACCESS_KEY_ID'];
   const secretKey = props['AWS_SECRET_ACCESS_KEY'];
@@ -243,11 +245,17 @@ function spApiGet_(endpoint, region, cred, fullPath, tokenOverride) {
   const sig      = hmacHex_(signingKey_(secretKey, dateStamp, region), sts);
   const auth     = `AWS4-HMAC-SHA256 Credential=${accessKey}/${scope}, SignedHeaders=${signedHdrs}, Signature=${sig}`;
 
-  const res = UrlFetchApp.fetch(endpoint + fullPath, {
+  return {
+    url:                endpoint + fullPath,
     method:             'get',
     headers:            { 'x-amz-access-token': token, 'x-amz-date': amzDate, 'Authorization': auth },
     muteHttpExceptions: true,
-  });
+  };
+}
+
+function spApiGet_(endpoint, region, cred, fullPath, tokenOverride) {
+  const req = spApiBuildFetch_(endpoint, region, cred, fullPath, tokenOverride);
+  const res = UrlFetchApp.fetch(req.url, req);
   return { status: res.getResponseCode(), body: res.getContentText() };
 }
 
@@ -303,9 +311,15 @@ function getRdt_(endpoint, region, cred, orderId) {
 
 // ── Buyer purchase + refund stats (last 2 years, up to 500 orders) ───────────
 // Returns { totalPurchases, totalRefunds } where totalRefunds = Canceled orders.
+// Cached 5 min per buyer email — shared across agents on the same ticket.
 function fetchBuyerPurchaseStats_(endpoint, region, cred, salesChannel, buyerEmail) {
   const mpId = marketplaceId_(salesChannel);
   if (!mpId || !buyerEmail) return null;
+
+  const cache    = CacheService.getScriptCache();
+  const cacheKey = 'bstat_' + Utilities.base64Encode(buyerEmail).replace(/[+/=]/g, '').slice(0, 50);
+  const hit      = cache.get(cacheKey);
+  if (hit) { try { return JSON.parse(hit); } catch(_) {} }
 
   const createdAfter = new Date(Date.now() - 2 * 365.25 * 24 * 3600 * 1000).toISOString().slice(0, 19) + 'Z';
   let totalPurchases = 0;
@@ -329,11 +343,26 @@ function fetchBuyerPurchaseStats_(endpoint, region, cred, salesChannel, buyerEma
     page++;
   } while (nextToken && page < 5);
 
-  return { totalPurchases, totalRefunds };
+  const result = { totalPurchases, totalRefunds };
+  try { cache.put(cacheKey, JSON.stringify(result), 300); } catch(_) {}
+  return result;
 }
 
 // ── Fetch order + items + address + buyer ─────────────────────────────────────
+// Results are cached 90 s per order ID so concurrent agents on the same ticket
+// share a single SP-API round-trip instead of each making 5-6 calls.
 function fetchOrderData_(orderId) {
+  const cache    = CacheService.getScriptCache();
+  const cacheKey = 'ord2_' + orderId;
+  const hit      = cache.get(cacheKey);
+  if (hit) { try { return JSON.parse(hit); } catch(_) {} }
+
+  const result = fetchOrderDataFresh_(orderId);
+  try { cache.put(cacheKey, JSON.stringify(result), 90); } catch(_) {}
+  return result;
+}
+
+function fetchOrderDataFresh_(orderId) {
   const regionErrors = [];
   for (const { endpoint, region, cred } of REGIONS) {
     let r;
@@ -362,9 +391,13 @@ function fetchOrderData_(orderId) {
 
     const rdtResult = getRdt_(endpoint, region, cred, orderId);
     const rdtToken  = rdtResult.token || undefined;
-    const itemsR    = spApiGet_(endpoint, region, cred, `/orders/v0/orders/${orderId}/items`,     rdtToken);
-    const addrR     = spApiGet_(endpoint, region, cred, `/orders/v0/orders/${orderId}/address`);
-    const buyerR    = spApiGet_(endpoint, region, cred, `/orders/v0/orders/${orderId}/buyerInfo`, rdtToken);
+
+    // Fire items + address + buyerInfo in parallel — saves ~600 ms vs sequential
+    const [itemsR, addrR, buyerR] = UrlFetchApp.fetchAll([
+      spApiBuildFetch_(endpoint, region, cred, `/orders/v0/orders/${orderId}/items`,     rdtToken),
+      spApiBuildFetch_(endpoint, region, cred, `/orders/v0/orders/${orderId}/address`),
+      spApiBuildFetch_(endpoint, region, cred, `/orders/v0/orders/${orderId}/buyerInfo`, rdtToken),
+    ]).map(res => ({ status: res.getResponseCode(), body: res.getContentText() }));
 
     const buyer = buyerR.status === 200 ? JSON.parse(buyerR.body).payload || {} : {};
     const stats = fetchBuyerPurchaseStats_(endpoint, region, cred, order.SalesChannel, buyer.BuyerEmail || null);
