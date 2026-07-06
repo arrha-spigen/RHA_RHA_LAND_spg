@@ -1,4 +1,4 @@
-// GCX Reply — Apps Script Web App (v2.6.1)
+// GCX Reply — Apps Script Web App (v2.6.2)
 // Endpoint: ?orderId=XXX  |  ?asin=XXX  |  ?orderId=XXX&asin=XXX
 // Deploy as: Execute as Me, Access: Anyone (or Anyone anonymous)
 // Script Properties required: AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY,
@@ -310,7 +310,9 @@ function getRdt_(endpoint, region, cred, orderId) {
 }
 
 // ── Buyer purchase + refund stats (last 2 years, up to 500 orders) ───────────
-// Returns { totalPurchases, totalRefunds } where totalRefunds = Canceled orders.
+// Returns { totalPurchases, totalRefunds }
+// totalRefunds = orders with a Finances API RefundEventList entry (post-shipment
+// refunds are NOT reflected in OrderStatus — 'Canceled' is pre-fulfillment only).
 // Cached 5 min per buyer email — shared across agents on the same ticket.
 function fetchBuyerPurchaseStats_(endpoint, region, cred, salesChannel, buyerEmail) {
   const mpId = marketplaceId_(salesChannel);
@@ -323,9 +325,9 @@ function fetchBuyerPurchaseStats_(endpoint, region, cred, salesChannel, buyerEma
 
   const createdAfter = new Date(Date.now() - 2 * 365.25 * 24 * 3600 * 1000).toISOString().slice(0, 19) + 'Z';
   let totalPurchases = 0;
-  let totalRefunds   = 0;
   let nextToken      = null;
   let page           = 0;
+  const orderIds     = [];
 
   do {
     const path = nextToken
@@ -337,15 +339,65 @@ function fetchBuyerPurchaseStats_(endpoint, region, cred, salesChannel, buyerEma
       const d      = JSON.parse(r.body);
       const orders = d.payload?.Orders || [];
       totalPurchases += orders.length;
-      totalRefunds   += orders.filter(o => o.OrderStatus === 'Canceled').length;
+      orders.forEach(o => { if (o.AmazonOrderId) orderIds.push(o.AmazonOrderId); });
       nextToken       = d.payload?.NextToken || null;
     } catch { break; }
     page++;
   } while (nextToken && page < 5);
 
+  const totalRefunds = fetchBuyerRefundCount_(endpoint, region, cred, orderIds);
   const result = { totalPurchases, totalRefunds };
   try { cache.put(cacheKey, JSON.stringify(result), 300); } catch(_) {}
   return result;
+}
+
+// ── Count refunded orders via Finances API ────────────────────────────────────
+// Uses GET /finances/v0/orders/{id}/financialEvents, batched 30 at a time via
+// UrlFetchApp.fetchAll() (respects Finances API burst limit of 30).
+// Per-order results cached 1 hr — refund status for Shipped orders is immutable.
+// Returns 0 gracefully if Finances API role is not enabled (403).
+function fetchBuyerRefundCount_(endpoint, region, cred, orderIds) {
+  if (!orderIds || !orderIds.length) return 0;
+  const cache = CacheService.getScriptCache();
+  const BATCH = 30;
+  let count = 0;
+  const uncached = [];
+
+  for (const id of orderIds) {
+    const hit = cache.get('fin_' + id);
+    if (hit !== null) { if (hit === '1') count++; }
+    else uncached.push(id);
+  }
+
+  for (let i = 0; i < uncached.length; i += BATCH) {
+    const batch = uncached.slice(i, i + BATCH);
+    const requests = batch.map(id =>
+      spApiBuildFetch_(endpoint, region, cred, `/finances/v0/orders/${id}/financialEvents`));
+    let results;
+    try { results = UrlFetchApp.fetchAll(requests); }
+    catch(_) { break; }
+
+    let financeUnavailable = false;
+    for (let j = 0; j < results.length; j++) {
+      const id   = batch[j];
+      const code = results[j].getResponseCode();
+      if (code === 403) { financeUnavailable = true; break; }
+      if (code === 200) {
+        try {
+          const ev = JSON.parse(results[j].getContentText()).payload?.FinancialEvents;
+          const refunded = (ev?.RefundEventList?.length > 0) ||
+                           (ev?.GuaranteeClaimEventList?.length > 0) ||
+                           (ev?.ChargebackEventList?.length > 0);
+          cache.put('fin_' + id, refunded ? '1' : '0', 3600);
+          if (refunded) count++;
+        } catch(_) {}
+      }
+    }
+    if (financeUnavailable) break;
+    if (i + BATCH < uncached.length) Utilities.sleep(2000);
+  }
+
+  return count;
 }
 
 // ── Fetch order + items + address + buyer ─────────────────────────────────────
@@ -822,6 +874,9 @@ function updateFeedbackSheet() {
     [44,
       '【Before】 html2canvas(1.4MB) @require가 잔류(Liquid Glass 제거 후 dead code) / 매 Auto-Fill마다 ZD field-opts API 3회 + ticket JSON 2회 중복 호출 / SC 세션 만료 시 무음 실패 / SC 구매이력 업데이트 시 전체 패널 re-render / GAS 시트 읽기 매 요청마다 cold read\n【After v2.20.0】 html2canvas @require 제거, fetchTicketJson_(60s TTL) + fetchZdFieldOptsCached(sessionStorage 30min TTL) 캐싱 도입, SC 세션 만료 배너 표시, SC stats 인플레이스 DOM 패치(#sp-stat-badge/#sp-stat-link-wrap), loadSheetRows_(ScriptCache 1h) + getMktIndex_(4h) + loadDefectDataDR_ allRows(6h) 캐싱\n✅ 2026-06-30 적용',
       'v2.20.0'],
+    [45,
+      '【Before】 환불 수 = OrderStatus === "Canceled" 주문 수 → 배송 완료 후 환불된 주문은 OrderStatus가 Shipped 유지, 반영 안 됨 → 환불 0건 표시\n【After GAS v2.6.2 / TM v2.20.1】 Finances API GET /finances/v0/orders/{id}/financialEvents 병렬 호출(UrlFetchApp.fetchAll, 30건 배치) → RefundEventList 비어있지 않으면 환불로 집계. 오더당 결과 1hr 캐시, 403 시 graceful 폴백. SC fallback totalRefunds: 0 하드코딩 → null로 수정(기존 SP-API 값 유지)\n✅ 2026-07-06 적용',
+      'v2.20.1'],
   ];
 
   UPDATES.forEach(([row, feedback, build]) => {
