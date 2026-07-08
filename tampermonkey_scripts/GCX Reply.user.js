@@ -52,9 +52,16 @@
   // are skipped silently (no popup shown).
   const CURRENT_VERSION = '2.24.1';
   const CHANGELOG_ = {
-    // '2.24.1' entry pending — description to be confirmed with user before adding.
+    // Consolidated: the popup only shows the entry for CURRENT_VERSION, and
+    // agents often skip versions — so each entry should include everything
+    // agent-relevant since the last Google Chat announcement, not just that
+    // one version's own changes.
+    '2.24.1': [
+      'Auto-Fill 확인창(Confirm Auto-Fill)의 "After" 값을 직접 수정할 수 있습니다 — 드롭다운 필드(Device, Country, Fulfillment Methods 등)는 드롭다운으로, 텍스트 필드(Order ID, ASIN, 문의SKU 등)는 텍스트 입력창으로 표시되어 잘못되거나 비어있는 값을 채우기 전에 바로 고칠 수 있습니다',
+      'Auto-Fill 버그 수정: GCX Reply가 값을 채우지 못하는 필드(예: Order ID, ASIN, 문의SKU)의 기존 입력값이 더 이상 지워지지 않고 그대로 유지됩니다',
+      'Order 조회 시 데이터가 안 불러와질 때 재시도 속도가 빨라졌습니다 (timeout 30초 → 15초)',
+    ],
     '2.24.0': [
-      '버전 업데이트 안내 팝업 추가 (24시간 동안 보지 않기 / 다음 업데이트까지 보지 않기 선택 가능)',
       'Auto-Fill 버그 수정: GCX Reply가 값을 채우지 못하는 필드(예: Order ID, ASIN, 문의SKU)는 더 이상 지워지지 않고 기존에 입력된 값이 그대로 유지됩니다',
     ],
     '2.23.1': [
