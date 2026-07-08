@@ -1,4 +1,4 @@
-// GCX Reply — Apps Script Web App (v2.6.2)
+// GCX Reply — Apps Script Web App (v2.6.3)
 // Endpoint: ?orderId=XXX  |  ?asin=XXX  |  ?orderId=XXX&asin=XXX
 // Deploy as: Execute as Me, Access: Anyone (or Anyone anonymous)
 // Script Properties required: AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY,
@@ -414,12 +414,30 @@ function fetchOrderData_(orderId) {
   return result;
 }
 
-function fetchOrderDataFresh_(orderId) {
+// Finds which REGIONS entry has the order, trying all of them in parallel via
+// UrlFetchApp.fetchAll() instead of one at a time. The old sequential cascade
+// (EU -> FE/JP -> NA -> IN) meant any non-EU order — most commonly NA/US —
+// paid for 1-2 full wasted round-trips before reaching the right region,
+// adding real, consistent latency to most ticket loads. Falls back to the
+// original sequential loop if the parallel batch itself throws (e.g. a
+// connectivity-level failure on one request can abort the whole fetchAll
+// batch, unlike per-region try/catch), so this never regresses reliability.
+function findOrderRegion_(orderId) {
   const regionErrors = [];
-  for (const { endpoint, region, cred } of REGIONS) {
-    let r;
-    try { r = spApiGet_(endpoint, region, cred, `/orders/v0/orders/${orderId}`); }
-    catch (e) { regionErrors.push(`${cred}:LWA(${e.message})`); continue; }
+  let responses;
+  try {
+    const requests = REGIONS.map(({ endpoint, region, cred }) =>
+      spApiBuildFetch_(endpoint, region, cred, `/orders/v0/orders/${orderId}`));
+    responses = UrlFetchApp.fetchAll(requests).map(res => ({
+      status: res.getResponseCode(), body: res.getContentText(),
+    }));
+  } catch (e) {
+    return findOrderRegionSequential_(orderId); // parallel batch itself failed — safe fallback
+  }
+
+  for (let i = 0; i < REGIONS.length; i++) {
+    const { endpoint, region, cred } = REGIONS[i];
+    let r = responses[i];
 
     // 403 + "expired" → cached LWA token went stale; clear cache and retry once
     if (r.status === 403 && r.body.includes('expired')) {
@@ -434,42 +452,82 @@ function fetchOrderDataFresh_(orderId) {
       continue;
     }
 
-    const order  = JSON.parse(r.body).payload || {};
+    let order;
+    try { order = JSON.parse(r.body).payload || {}; }
+    catch (e) { regionErrors.push(`${cred}:parse-error`); continue; }
     if (!order.AmazonOrderId) {
       const preview = r.body.substring(0, 120).replace(/\s+/g, ' ');
       regionErrors.push(`${cred}:200-noId(${preview})`);
       continue;
     }
 
-    const rdtResult = getRdt_(endpoint, region, cred, orderId);
-    const rdtToken  = rdtResult.token || undefined;
-
-    // Fire items + address + buyerInfo in parallel — saves ~600 ms vs sequential
-    const [itemsR, addrR, buyerR] = UrlFetchApp.fetchAll([
-      spApiBuildFetch_(endpoint, region, cred, `/orders/v0/orders/${orderId}/items`,     rdtToken),
-      spApiBuildFetch_(endpoint, region, cred, `/orders/v0/orders/${orderId}/address`),
-      spApiBuildFetch_(endpoint, region, cred, `/orders/v0/orders/${orderId}/buyerInfo`, rdtToken),
-    ]).map(res => ({ status: res.getResponseCode(), body: res.getContentText() }));
-
-    const buyer = buyerR.status === 200 ? JSON.parse(buyerR.body).payload || {} : {};
-    const stats = fetchBuyerPurchaseStats_(endpoint, region, cred, order.SalesChannel, buyer.BuyerEmail || null);
-
-    return {
-      order,
-      items:          itemsR.status === 200 ? JSON.parse(itemsR.body).payload?.OrderItems || [] : [],
-      itemsStatus:    itemsR.status,
-      itemsError:     itemsR.body,
-      rdtStatus:      rdtResult.status,
-      rdtError:       rdtResult.error,
-      address:        addrR.status === 200 ? JSON.parse(addrR.body).payload?.ShippingAddress || {} : {},
-      buyer,
-      orderCount:     stats ? stats.totalPurchases : null,
-      totalPurchases: stats ? stats.totalPurchases : null,
-      totalRefunds:   stats ? stats.totalRefunds   : null,
-      region,
-    };
+    return { endpoint, region, cred, order };
   }
   throw new Error('Order not found — ' + regionErrors.join(' | '));
+}
+
+// Original one-at-a-time cascade — kept as the fallback path.
+function findOrderRegionSequential_(orderId) {
+  const regionErrors = [];
+  for (const { endpoint, region, cred } of REGIONS) {
+    let r;
+    try { r = spApiGet_(endpoint, region, cred, `/orders/v0/orders/${orderId}`); }
+    catch (e) { regionErrors.push(`${cred}:LWA(${e.message})`); continue; }
+
+    if (r.status === 403 && r.body.includes('expired')) {
+      CacheService.getScriptCache().remove('lwa_' + cred);
+      try { r = spApiGet_(endpoint, region, cred, `/orders/v0/orders/${orderId}`); }
+      catch (e) { regionErrors.push(`${cred}:LWA-retry(${e.message})`); continue; }
+    }
+
+    if (r.status !== 200) {
+      const detail = (r.status === 403 && r.body.includes('expired')) ? '(auth-revoked)' : '';
+      regionErrors.push(`${cred}:${r.status}${detail}`);
+      continue;
+    }
+
+    const order = JSON.parse(r.body).payload || {};
+    if (!order.AmazonOrderId) {
+      const preview = r.body.substring(0, 120).replace(/\s+/g, ' ');
+      regionErrors.push(`${cred}:200-noId(${preview})`);
+      continue;
+    }
+
+    return { endpoint, region, cred, order };
+  }
+  throw new Error('Order not found — ' + regionErrors.join(' | '));
+}
+
+function fetchOrderDataFresh_(orderId) {
+  const { endpoint, region, cred, order } = findOrderRegion_(orderId);
+
+  const rdtResult = getRdt_(endpoint, region, cred, orderId);
+  const rdtToken  = rdtResult.token || undefined;
+
+  // Fire items + address + buyerInfo in parallel — saves ~600 ms vs sequential
+  const [itemsR, addrR, buyerR] = UrlFetchApp.fetchAll([
+    spApiBuildFetch_(endpoint, region, cred, `/orders/v0/orders/${orderId}/items`,     rdtToken),
+    spApiBuildFetch_(endpoint, region, cred, `/orders/v0/orders/${orderId}/address`),
+    spApiBuildFetch_(endpoint, region, cred, `/orders/v0/orders/${orderId}/buyerInfo`, rdtToken),
+  ]).map(res => ({ status: res.getResponseCode(), body: res.getContentText() }));
+
+  const buyer = buyerR.status === 200 ? JSON.parse(buyerR.body).payload || {} : {};
+  const stats = fetchBuyerPurchaseStats_(endpoint, region, cred, order.SalesChannel, buyer.BuyerEmail || null);
+
+  return {
+    order,
+    items:          itemsR.status === 200 ? JSON.parse(itemsR.body).payload?.OrderItems || [] : [],
+    itemsStatus:    itemsR.status,
+    itemsError:     itemsR.body,
+    rdtStatus:      rdtResult.status,
+    rdtError:       rdtResult.error,
+    address:        addrR.status === 200 ? JSON.parse(addrR.body).payload?.ShippingAddress || {} : {},
+    buyer,
+    orderCount:     stats ? stats.totalPurchases : null,
+    totalPurchases: stats ? stats.totalPurchases : null,
+    totalRefunds:   stats ? stats.totalRefunds   : null,
+    region,
+  };
 }
 
 
