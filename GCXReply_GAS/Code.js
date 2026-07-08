@@ -1,10 +1,19 @@
-// GCX Reply — Apps Script Web App (v2.6.3)
+// GCX Reply — Apps Script Web App (v2.6.4)
 // Endpoint: ?orderId=XXX  |  ?asin=XXX  |  ?orderId=XXX&asin=XXX
 // Deploy as: Execute as Me, Access: Anyone (or Anyone anonymous)
 // Script Properties required: AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY,
 //   LWA_CLIENT_ID, LWA_CLIENT_SECRET, LWA_REFRESH_TOKEN,         ← EU + NA
 //   LWA_CLIENT_ID_JP, LWA_CLIENT_SECRET_JP, LWA_REFRESH_TOKEN_JP ← Japan (FE)
 //   LWA_CLIENT_ID_IN, LWA_CLIENT_SECRET_IN, LWA_REFRESH_TOKEN_IN ← India
+
+// Script Properties are themselves a network-backed GAS service call, not an
+// in-memory read — memoize per execution so building N signed SP-API requests
+// in one doGet() invocation only pays this cost once, not N times.
+let _scriptPropsCache_ = null;
+function scriptProps_() {
+  if (!_scriptPropsCache_) _scriptPropsCache_ = PropertiesService.getScriptProperties().getProperties();
+  return _scriptPropsCache_;
+}
 
 const SHEET_ID    = '1fx9K4r2T9SeZK076zy9kMHoLzAKDgmlRp-C2VtnTKVo';
 const SHEET_NAME  = 'Data';
@@ -135,7 +144,7 @@ function diagJP() {
   CacheService.getScriptCache().remove('lwa_jp');
   Logger.log('Cache cleared.');
 
-  const props = PropertiesService.getScriptProperties().getProperties();
+  const props = scriptProps_();
   Logger.log('CLIENT_ID_JP present:      ' + !!props['LWA_CLIENT_ID_JP']);
   Logger.log('CLIENT_SECRET_JP present:  ' + !!props['LWA_CLIENT_SECRET_JP']);
   Logger.log('CLIENT_SECRET_JP prefix:   ' + (props['LWA_CLIENT_SECRET_JP'] || '').slice(0, 30));
@@ -165,7 +174,7 @@ function getLwaToken_(cred) {
   const hit      = cache.get(cacheKey);
   if (hit) return hit;
 
-  const props  = PropertiesService.getScriptProperties().getProperties();
+  const props  = scriptProps_();
   const sfx    = cred === 'jp' ? '_JP' : cred === 'in' ? '_IN' : '';
   const resp   = UrlFetchApp.fetch('https://api.amazon.com/auth/o2/token', {
     method: 'post',
@@ -210,7 +219,7 @@ function signingKey_(secret, dateStamp, region) {
 // Returns a signed fetch-options object (url + headers) without calling UrlFetchApp.
 // Use directly with UrlFetchApp.fetchAll() to parallelise multiple SP-API requests.
 function spApiBuildFetch_(endpoint, region, cred, fullPath, tokenOverride) {
-  const props     = PropertiesService.getScriptProperties().getProperties();
+  const props     = scriptProps_();
   const accessKey = props['AWS_ACCESS_KEY_ID'];
   const secretKey = props['AWS_SECRET_ACCESS_KEY'];
   const token     = tokenOverride || getLwaToken_(cred);
@@ -261,7 +270,7 @@ function spApiGet_(endpoint, region, cred, fullPath, tokenOverride) {
 
 // ── SP-API POST (for Tokens API) ──────────────────────────────────────────────
 function spApiPost_(endpoint, region, cred, path, body) {
-  const props     = PropertiesService.getScriptProperties().getProperties();
+  const props     = scriptProps_();
   const accessKey = props['AWS_ACCESS_KEY_ID'];
   const secretKey = props['AWS_SECRET_ACCESS_KEY'];
   const token     = getLwaToken_(cred);
@@ -414,60 +423,16 @@ function fetchOrderData_(orderId) {
   return result;
 }
 
-// Finds which REGIONS entry has the order, trying all of them in parallel via
-// UrlFetchApp.fetchAll() instead of one at a time. The old sequential cascade
-// (EU -> FE/JP -> NA -> IN) meant any non-EU order — most commonly NA/US —
-// paid for 1-2 full wasted round-trips before reaching the right region,
-// adding real, consistent latency to most ticket loads. Falls back to the
-// original sequential loop if the parallel batch itself throws (e.g. a
-// connectivity-level failure on one request can abort the whole fetchAll
-// batch, unlike per-region try/catch), so this never regresses reliability.
+// Tries each SP-API region one at a time (EU -> FE/JP -> NA -> IN) until one
+// has the order. Previously tried parallelizing this via UrlFetchApp.fetchAll()
+// on the theory that non-EU orders were paying for wasted sequential attempts
+// — reverted after real-world testing showed it made things SLOWER overall,
+// not faster: it unconditionally built all 4 signed requests (and their LWA/
+// props lookups) up front every time, whereas the sequential version almost
+// always succeeds on the very first (EU) attempt for this account's order mix,
+// so parallelizing traded a rare slow path for a much more common slower one.
+// Keep this sequential; scriptProps_() memoization below is the safe win.
 function findOrderRegion_(orderId) {
-  const regionErrors = [];
-  let responses;
-  try {
-    const requests = REGIONS.map(({ endpoint, region, cred }) =>
-      spApiBuildFetch_(endpoint, region, cred, `/orders/v0/orders/${orderId}`));
-    responses = UrlFetchApp.fetchAll(requests).map(res => ({
-      status: res.getResponseCode(), body: res.getContentText(),
-    }));
-  } catch (e) {
-    return findOrderRegionSequential_(orderId); // parallel batch itself failed — safe fallback
-  }
-
-  for (let i = 0; i < REGIONS.length; i++) {
-    const { endpoint, region, cred } = REGIONS[i];
-    let r = responses[i];
-
-    // 403 + "expired" → cached LWA token went stale; clear cache and retry once
-    if (r.status === 403 && r.body.includes('expired')) {
-      CacheService.getScriptCache().remove('lwa_' + cred);
-      try { r = spApiGet_(endpoint, region, cred, `/orders/v0/orders/${orderId}`); }
-      catch (e) { regionErrors.push(`${cred}:LWA-retry(${e.message})`); continue; }
-    }
-
-    if (r.status !== 200) {
-      const detail = (r.status === 403 && r.body.includes('expired')) ? '(auth-revoked)' : '';
-      regionErrors.push(`${cred}:${r.status}${detail}`);
-      continue;
-    }
-
-    let order;
-    try { order = JSON.parse(r.body).payload || {}; }
-    catch (e) { regionErrors.push(`${cred}:parse-error`); continue; }
-    if (!order.AmazonOrderId) {
-      const preview = r.body.substring(0, 120).replace(/\s+/g, ' ');
-      regionErrors.push(`${cred}:200-noId(${preview})`);
-      continue;
-    }
-
-    return { endpoint, region, cred, order };
-  }
-  throw new Error('Order not found — ' + regionErrors.join(' | '));
-}
-
-// Original one-at-a-time cascade — kept as the fallback path.
-function findOrderRegionSequential_(orderId) {
   const regionErrors = [];
   for (const { endpoint, region, cred } of REGIONS) {
     let r;
