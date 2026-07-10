@@ -1,6 +1,6 @@
 // ==UserScript==
 // @name         Amazon MCF Autofill
-// @version      1.4.1
+// @version      1.4.2
 // @updateURL    https://raw.githubusercontent.com/codingintheusa0402/spigen-gcx-automation/main/tampermonkey_scripts/Amazon%20MCF%20Autofill.user.js
 // @downloadURL  https://raw.githubusercontent.com/codingintheusa0402/spigen-gcx-automation/main/tampermonkey_scripts/Amazon%20MCF%20Autofill.user.js
 // @match        https://sellercentral.amazon.*/mcf/orders/create-order*
@@ -314,22 +314,34 @@
        .replace(/^(.+?)\s+--?\s*/i, '')
        .trim();
 
+    const labelOf = s => {
+      const m = s.match(/^(.+?):\s*/) || s.match(/^(.+?)\s+--?\s*/);
+      return (m ? m[1] : '').trim();
+    };
+
     for (const line of t.split('\n').map(s => s.trim()).filter(Boolean)) {
       const m = line.match(numberedLine);
       if (!m) continue;
 
       const idx = parseInt(m[1], 10);
-      const val = unlabel(m[2].trim());
+      const content = m[2].trim();
+      const val = unlabel(content);
 
-      if (idx === 1) {
+      // Only open a NEW block when line 1 reads as "Full Name" — a ticket can
+      // contain other, unrelated numbered lists (e.g. an internal "1. 2. 3."
+      // processing note with no field labels) that would otherwise masquerade
+      // as the start of an address block and, since only the LAST block is
+      // kept, silently override a real, already-parsed address.
+      if (idx === 1 && /full\s*name|\bname\b/i.test(labelOf(content))) {
         pushCur();
         cur = { name:'', street:'', city:'', state:'', postal:'', phone:'' };
       }
-      if (!cur) cur = { name:'', street:'', city:'', state:'', postal:'', phone:'' };
+      if (!cur) continue;
 
       setByIndex(cur, idx, val);
       if (idx === 6) pushCur();
     }
+    pushCur();
 
     let addr = { name:'', street:'', city:'', state:'', postal:'', phone:'' };
     if (blocks.length > 0) addr = blocks[blocks.length - 1];
