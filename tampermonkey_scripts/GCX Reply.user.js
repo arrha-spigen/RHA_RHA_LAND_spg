@@ -56,19 +56,28 @@
   // its version is superseded. Add a fresh '<version>': [...] entry here on
   // the next version bump that needs a "what's new" popup.
   const CHANGELOG_ = {
-    // Consolidated summary of every major change since v3.0.0, capped at 10
-    // items so the popup stays a quick skim, not a full technical changelog.
-    '3.1.6': [
-      'Auto-Fill 확인창(Confirm Auto-Fill)의 드롭다운이 검색 가능해졌습니다 — 예: "iphone" 입력 시 관련 항목만 바로 필터링됩니다',
-      'Mark as NRN이 ChannelReply 없이 Seller Central과 직접 연동되어 정상 작동합니다',
-      'Auto-Fill이 값을 채우지 못하는 필드의 기존 입력값을 더 이상 지우지 않습니다',
-      'Auto-Fill 확인창의 "After" 값을 직접 수정할 수 있습니다 (드롭다운/텍스트 입력 모두 지원)',
-      'MCF ASIN 선택 팝업에서 고른 ASIN이 무시되고 항상 첫 번째 ASIN이 적용되던 버그 수정',
-      'Purchase Date가 "2026-04-29" 형식으로 통일되고, 달력 선택 또는 직접 입력이 가능합니다',
-      'Customer Full Name을 SP-API가 못 가져올 때 티켓 페이지에서 자동으로 가져옵니다',
-      "'전체 주문'/'전체 환불'이 주문 건수가 아닌 총 구매/환불 수량 기준으로 계산됩니다",
-      'Seller Central의 Seller Notes를 GCX Reply 패널에서 자동으로 확인할 수 있습니다',
-      'Zendesk Notes가 한 번만 반영되던 버그와, 티켓 첫 방문 시 표시되지 않던 버그 수정',
+    // Full per-version log since v3.0.0, per user request (not the earlier
+    // capped-at-10 consolidated style) — kept as one string per version so
+    // it's easy to keep appending to on future bumps.
+    '3.2.1': [
+      'v3.0.1 — MCF ASIN 선택 팝업에서 고른 ASIN이 무시되고 티켓 본문에서 처음 발견된 ASIN이 적용되던 버그 수정',
+      'v3.0.2 — MCF 주소 자동입력 버그 수정: 주소와 무관한 번호 목록(예: 내부 처리사항)이 있을 경우 실제 주소 대신 해당 목록이 잘못 채워지던 문제 해결',
+      'v3.0.3 — 업데이트 안내 팝업에 v3.0.1+v3.0.2 changelog 등록',
+      'v3.0.4 — Confirm Auto-Fill 개선: Purchase Date를 yyyy-mm-dd로 표시, 체크 해제된 행 클릭 시 가독성 문제 수정, Customer Full Name DOM 폴백 추가, \'전체 주문\'/\'전체 환불\'을 주문 건수 대신 총 구매/환불 수량 기준으로 변경',
+      'v3.0.5 — Purchase Date 입력 필드가 OS 로케일에 따라 다르게 표시되던 문제 수정 (항상 yyyy-mm-dd 표시 + 달력 선택 가능)',
+      'v3.0.6 — Customer Full Name DOM 폴백 버그 수정: Customer context 패널이 지연 렌더링되는 문제라 자동으로 패널을 먼저 열도록 개선',
+      'v3.0.7 — Auto-Fill 실행 후 Apps 탭이 아닌 Customer context 탭에 머물러 있던 버그 수정',
+      'v3.1.0 — Seller Central Seller Notes를 GCX Reply 패널에서 자동으로 확인 가능하도록 추가',
+      'v3.1.1 — Notes/Seller Notes 양방향 편집 기능 추가 (이후 3.1.3에서 다시 읽기 전용으로 롤백)',
+      'v3.1.2 — Notes 양방향 동기화 버그 수정, Seller Notes가 계속 로딩 중으로 보이던 버그 수정',
+      'v3.1.3 — Notes/Seller Notes를 다시 읽기 전용으로 변경 (실제 수정은 Zendesk/Seller Central 원본에서만)',
+      'v3.1.4 — 사용되지 않는 코드 제거 (5141→5026줄), 기능 변화 없음',
+      'v3.1.5 — Seller Notes 로딩 스피너 추가, Notes 첫 조회 시 안 보이던 문제 개선, 업데이트 안내 팝업에 v3.0.0~v3.1.5 요약 등록',
+      'v3.1.6 — Notes가 안 보이던 근본 원인 수정: 텍스트 영역 자체가 아직 렌더링 안 된 상태였음 (값이 안 채워진 게 아니라)',
+      'v3.1.7 — Customer context 탭 버튼 자체가 아직 렌더링 안 됐을 때 시도조차 안 하고 포기하던 문제 수정',
+      'v3.1.8 — 사이드바 전체가 몇 초간 렌더링 안 되는 경우까지 고려해 대기 시간 연장 (2초→10초/5초)',
+      'v3.2.0 — 내부 성능/구조 개선 6건 (기능 변화 없음): 페이지 텍스트 캐싱, 폴링 로직 통합, SC 동시 요청 수 제한, Auto-Fill 비동기 처리 방식(Promise.all) 개선, 일부 API 호출 통합',
+      'v3.2.1 — 사이드바를 아예 못 불러왔을 때 "notes 없음" 대신 새로고침 안내 메시지 표시',
     ],
   };
 
