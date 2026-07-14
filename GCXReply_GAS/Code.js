@@ -79,6 +79,14 @@ function doGet(e) {
       return respond({ reason: inferReason_(review, category) });
     }
 
+    if (p.action === 'abmRelayPending') {
+      return respond({ pending: getAbmRelayPending_() });
+    }
+
+    if (p.action === 'abmRelayStatus') {
+      return respond({ status: getAbmRelayStatus_(p.ticketId) });
+    }
+
     if (!orderId && !asin) {
       return respond({ error: 'Provide orderId and/or asin parameter' });
     }
@@ -122,6 +130,101 @@ function respond(data) {
   return ContentService
     .createTextOutput(JSON.stringify(data))
     .setMimeType(ContentService.MimeType.JSON);
+}
+
+// ── ABM relay status log ──────────────────────────────────────────────────────
+// Durable, cross-browser-session record of whether each ABM ticket's Public
+// reply was actually relayed to the Amazon buyer via Seller Central — a toast
+// in the agent's browser at send-time isn't enough on its own: it's gone the
+// moment the agent navigates away, and doesn't help if the whole relay attempt
+// silently died (tab closed mid-flight, etc.). One row per ticketId, upserted
+// on every attempt (success or failure) so `Status` always reflects the latest
+// known outcome. `MessageText` is kept so a later retry sweep (any agent's
+// browser, not necessarily the one that first tried) can resend without
+// needing to re-open the original ticket.
+const ABM_LOG_SHEET_NAME = 'ABM_Relay_Log';
+const ABM_LOG_HEADERS = ['Timestamp', 'TicketId', 'CaseId', 'Marketplace', 'Status', 'Attempts', 'LastError', 'MessageText'];
+
+function getAbmLogSheet_() {
+  const ss = SpreadsheetApp.openById(SHEET_ID);
+  let sheet = ss.getSheetByName(ABM_LOG_SHEET_NAME);
+  if (!sheet) {
+    sheet = ss.insertSheet(ABM_LOG_SHEET_NAME);
+    sheet.getRange(1, 1, 1, ABM_LOG_HEADERS.length).setValues([ABM_LOG_HEADERS]);
+  }
+  return sheet;
+}
+
+function upsertAbmRelayLog_(entry) {
+  const sheet = getAbmLogSheet_();
+  const data = sheet.getDataRange().getValues();
+  const ticketCol = ABM_LOG_HEADERS.indexOf('TicketId');
+  let rowIdx = -1;
+  for (let i = 1; i < data.length; i++) {
+    if (String(data[i][ticketCol]) === String(entry.ticketId)) { rowIdx = i + 1; break; }
+  }
+  const row = [
+    new Date(), entry.ticketId, entry.caseId || '', entry.marketplace || '',
+    entry.status || '', entry.attempts || 1, entry.lastError || '', entry.messageText || ''
+  ];
+  if (rowIdx === -1) sheet.appendRow(row);
+  else sheet.getRange(rowIdx, 1, 1, row.length).setValues([row]);
+}
+
+function getAbmRelayPending_() {
+  const sheet = getAbmLogSheet_();
+  const data = sheet.getDataRange().getValues();
+  if (data.length < 2) return [];
+  const headers = data[0];
+  const idx = name => headers.indexOf(name);
+  const out = [];
+  for (let i = 1; i < data.length; i++) {
+    const row = data[i];
+    if (row[idx('TicketId')] && row[idx('Status')] !== 'success') {
+      out.push({
+        ticketId:    row[idx('TicketId')],
+        caseId:      row[idx('CaseId')],
+        marketplace: row[idx('Marketplace')],
+        attempts:    row[idx('Attempts')],
+        messageText: row[idx('MessageText')],
+      });
+    }
+  }
+  return out;
+}
+
+function getAbmRelayStatus_(ticketId) {
+  if (!ticketId) return null;
+  const sheet = getAbmLogSheet_();
+  const data = sheet.getDataRange().getValues();
+  if (data.length < 2) return null;
+  const headers = data[0];
+  const idx = name => headers.indexOf(name);
+  for (let i = 1; i < data.length; i++) {
+    if (String(data[i][idx('TicketId')]) === String(ticketId)) {
+      return {
+        status:    data[i][idx('Status')],
+        attempts:  data[i][idx('Attempts')],
+        lastError: data[i][idx('LastError')],
+        timestamp: data[i][idx('Timestamp')],
+      };
+    }
+  }
+  return null;
+}
+
+// POST-only: message text can be long enough to make a GET query string unwieldy.
+function doPost(e) {
+  try {
+    const body = JSON.parse((e && e.postData && e.postData.contents) || '{}');
+    if (body.action === 'logAbmRelay') {
+      upsertAbmRelayLog_(body);
+      return respond({ ok: true });
+    }
+    return respond({ error: 'unknown action' });
+  } catch (err) {
+    return respond({ error: err.message });
+  }
 }
 
 // ── Keep-warm: prevents GAS cold starts during business hours ─────────────────
