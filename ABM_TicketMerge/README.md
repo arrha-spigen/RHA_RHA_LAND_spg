@@ -58,11 +58,14 @@ the deployment's version:
 
 ```bash
 cd ~/Desktop/GCX/ABM_TicketMerge && clasp push --force
-# Then create a new version + point the existing deployment at it:
+# Then create a new version + point the existing deployment at it.
+# (OAuth client_id/client_secret/refresh_token: same clasp-login credentials
+# used for every other project's redeploy workflow in this repo — not
+# reproduced here; pull them from your own clasp/OAuth config.)
 TOKEN=$(curl -s -X POST https://oauth2.googleapis.com/token \
-  -d "client_id=1072944905499-vm2v2i5dvn0a0d2o4ca36i1vge8cvbn0.apps.googleusercontent.com" \
-  -d "client_secret=<YOUR_CLIENT_SECRET>" \
-  -d "refresh_token=<YOUR_REFRESH_TOKEN>" \
+  -d "client_id=${CLASP_CLIENT_ID}" \
+  -d "client_secret=${CLASP_CLIENT_SECRET}" \
+  -d "refresh_token=${CLASP_REFRESH_TOKEN}" \
   -d "grant_type=refresh_token" | python3 -c "import json,sys; print(json.load(sys.stdin).get('access_token',''))")
 SCRIPT_ID="1gJu9O-8MNYWVItLYsr48eym0afY1P9n8lUjSwM_p457DIisZLwOXIWAj"
 DEPLOY_ID="AKfycbz2hQMj97voADUPYv6YBHzjZaLsogj1osFhFNpny5iQXtKjBJpn8P2i1pW3Af-6M89ZcA"
