@@ -137,19 +137,38 @@ function respond(data) {
 // reply was actually relayed to the Amazon buyer via Seller Central — a toast
 // in the agent's browser at send-time isn't enough on its own: it's gone the
 // moment the agent navigates away, and doesn't help if the whole relay attempt
-// silently died (tab closed mid-flight, etc.). One row per ticketId, upserted
-// on every attempt (success or failure) so `Status` always reflects the latest
-// known outcome. `MessageText` is kept so a later retry sweep (any agent's
-// browser, not necessarily the one that first tried) can resend without
-// needing to re-open the original ticket.
+// silently died (tab closed mid-flight, etc.).
+//
+// Upserted by `RelayKey` (`${ticketId}_${startTimeMs}`, generated once per
+// relay invocation client-side), NOT by bare TicketId — a single ticket can
+// get multiple agent replies over time, each triggering its own separate
+// relay. An earlier version keyed by TicketId alone, so a second reply's log
+// entry silently overwrote the first reply's row, making it impossible to
+// tell which of two same-ticket messages actually failed (confirmed live:
+// exactly this ambiguity on tickets #1000153623/#1000153609 — two replies
+// each, only one `success` row survived per ticket with no way to tell which
+// send it corresponded to). `MessageText` is kept so a later retry sweep (any
+// agent's browser, not necessarily the one that first tried) can resend
+// without needing to re-open the original ticket.
 const ABM_LOG_SHEET_NAME = 'ABM_Relay_Log';
-const ABM_LOG_HEADERS = ['Timestamp', 'TicketId', 'CaseId', 'Marketplace', 'Status', 'Attempts', 'LastError', 'MessageText'];
+const ABM_LOG_HEADERS = ['Timestamp', 'RelayKey', 'TicketId', 'CaseId', 'Marketplace', 'Status', 'Attempts', 'LastError', 'MessageText'];
 
 function getAbmLogSheet_() {
   const ss = SpreadsheetApp.openById(SHEET_ID);
   let sheet = ss.getSheetByName(ABM_LOG_SHEET_NAME);
   if (!sheet) {
     sheet = ss.insertSheet(ABM_LOG_SHEET_NAME);
+    sheet.getRange(1, 1, 1, ABM_LOG_HEADERS.length).setValues([ABM_LOG_HEADERS]);
+    return sheet;
+  }
+  // Self-repairing migration: the sheet was created before RelayKey existed
+  // (8-column header). Without this, every column lookup below silently
+  // reads the wrong cell against real existing rows (e.g. the 1000153623/
+  // 1000153609 test data) instead of erroring loudly. Insert the missing
+  // column once, in place, preserving all existing rows/data.
+  const existingHeaders = sheet.getRange(1, 1, 1, sheet.getLastColumn()).getValues()[0];
+  if (existingHeaders.indexOf('RelayKey') === -1) {
+    sheet.insertColumnBefore(2); // right after Timestamp
     sheet.getRange(1, 1, 1, ABM_LOG_HEADERS.length).setValues([ABM_LOG_HEADERS]);
   }
   return sheet;
@@ -158,13 +177,16 @@ function getAbmLogSheet_() {
 function upsertAbmRelayLog_(entry) {
   const sheet = getAbmLogSheet_();
   const data = sheet.getDataRange().getValues();
-  const ticketCol = ABM_LOG_HEADERS.indexOf('TicketId');
+  const keyCol = ABM_LOG_HEADERS.indexOf('RelayKey');
+  // Fallback so a pre-migration row (old TicketId-only key, or a client still
+  // running a pre-RelayKey version) doesn't get duplicated on its next update.
+  const relayKey = entry.relayKey || String(entry.ticketId);
   let rowIdx = -1;
   for (let i = 1; i < data.length; i++) {
-    if (String(data[i][ticketCol]) === String(entry.ticketId)) { rowIdx = i + 1; break; }
+    if (String(data[i][keyCol]) === relayKey) { rowIdx = i + 1; break; }
   }
   const row = [
-    new Date(), entry.ticketId, entry.caseId || '', entry.marketplace || '',
+    new Date(), relayKey, entry.ticketId, entry.caseId || '', entry.marketplace || '',
     entry.status || '', entry.attempts || 1, entry.lastError || '', entry.messageText || ''
   ];
   if (rowIdx === -1) sheet.appendRow(row);
@@ -200,6 +222,7 @@ function getAbmRelayPending_() {
       if (!ts || (now - ts) < ABM_PENDING_STALE_MS) continue; // still plausibly in-flight — leave it alone
     }
     out.push({
+      relayKey:    row[idx('RelayKey')],
       ticketId:    row[idx('TicketId')],
       caseId:      row[idx('CaseId')],
       marketplace: row[idx('Marketplace')],
@@ -210,6 +233,9 @@ function getAbmRelayPending_() {
   return out;
 }
 
+// A ticket can have multiple relay rows (one per reply) — returns ALL of
+// them, not just one, so nothing is hidden the way a single-row-per-ticket
+// lookup previously did.
 function getAbmRelayStatus_(ticketId) {
   if (!ticketId) return null;
   const sheet = getAbmLogSheet_();
@@ -217,17 +243,19 @@ function getAbmRelayStatus_(ticketId) {
   if (data.length < 2) return null;
   const headers = data[0];
   const idx = name => headers.indexOf(name);
+  const rows = [];
   for (let i = 1; i < data.length; i++) {
     if (String(data[i][idx('TicketId')]) === String(ticketId)) {
-      return {
+      rows.push({
+        relayKey:  data[i][idx('RelayKey')],
         status:    data[i][idx('Status')],
         attempts:  data[i][idx('Attempts')],
         lastError: data[i][idx('LastError')],
         timestamp: data[i][idx('Timestamp')],
-      };
+      });
     }
   }
-  return null;
+  return rows.length ? rows : null;
 }
 
 // POST-only: message text can be long enough to make a GET query string unwieldy.
