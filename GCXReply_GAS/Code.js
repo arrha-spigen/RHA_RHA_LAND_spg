@@ -87,6 +87,10 @@ function doGet(e) {
       return respond({ status: getAbmRelayStatus_(p.ticketId) });
     }
 
+    if (p.action === 'abmRelayAll') {
+      return respond({ rows: getAbmRelayAll_(Number(p.limit) || 50) });
+    }
+
     if (!orderId && !asin) {
       return respond({ error: 'Provide orderId and/or asin parameter' });
     }
@@ -258,6 +262,74 @@ function getAbmRelayStatus_(ticketId) {
   return rows.length ? rows : null;
 }
 
+// Full recent history (delivered + undelivered), newest first — backs the
+// agent-facing status panel in GCX Reply, which lists both groups and lets
+// agents edit a row's status (mark delivered / re-queue).
+function getAbmRelayAll_(limit) {
+  const sheet = getAbmLogSheet_();
+  const data = sheet.getDataRange().getValues();
+  if (data.length < 2) return [];
+  const headers = data[0];
+  const idx = name => headers.indexOf(name);
+  const out = [];
+  for (let i = 1; i < data.length; i++) {
+    const row = data[i];
+    if (!row[idx('TicketId')]) continue;
+    out.push({
+      relayKey:    row[idx('RelayKey')],
+      ticketId:    row[idx('TicketId')],
+      caseId:      row[idx('CaseId')],
+      marketplace: row[idx('Marketplace')],
+      status:      row[idx('Status')],
+      attempts:    row[idx('Attempts')],
+      lastError:   row[idx('LastError')],
+      timestamp:   row[idx('Timestamp')],
+      messageText: row[idx('MessageText')],
+    });
+  }
+  out.sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp));
+  return out.slice(0, limit || 50);
+}
+
+// Agent-initiated status edit from the panel. Marking 'success' takes a row
+// out of the retry sweep (agent confirmed/handled it manually); marking
+// 'failed' re-queues a delivered-looking row the agent knows didn't actually
+// arrive. Matched by RelayKey; bare-TicketId fallback covers pre-RelayKey rows.
+function setAbmRelayStatus_(relayKey, ticketId, status) {
+  const sheet = getAbmLogSheet_();
+  const data = sheet.getDataRange().getValues();
+  const headers = data[0];
+  const idx = name => headers.indexOf(name);
+  for (let i = 1; i < data.length; i++) {
+    const rk = String(data[i][idx('RelayKey')] || '');
+    const match = relayKey ? rk === String(relayKey)
+                           : String(data[i][idx('TicketId')]) === String(ticketId);
+    if (match) {
+      sheet.getRange(i + 1, idx('Status') + 1).setValue(status);
+      sheet.getRange(i + 1, idx('LastError') + 1).setValue('manually set by agent');
+      return true;
+    }
+  }
+  return false;
+}
+
+function deleteAbmRelayRows_(relayKey, ticketId) {
+  const sheet = getAbmLogSheet_();
+  const data = sheet.getDataRange().getValues();
+  const headers = data[0];
+  const idx = name => headers.indexOf(name);
+  let deleted = 0;
+  for (let i = data.length - 1; i >= 1; i--) {
+    const rk  = String(data[i][idx('RelayKey')] || '');
+    const tid = String(data[i][idx('TicketId')] || '');
+    if ((relayKey && rk === String(relayKey)) || (ticketId && tid === String(ticketId))) {
+      sheet.deleteRow(i + 1);
+      deleted++;
+    }
+  }
+  return deleted;
+}
+
 // POST-only: message text can be long enough to make a GET query string unwieldy.
 function doPost(e) {
   try {
@@ -265,6 +337,12 @@ function doPost(e) {
     if (body.action === 'logAbmRelay') {
       upsertAbmRelayLog_(body);
       return respond({ ok: true });
+    }
+    if (body.action === 'setAbmRelayStatus') {
+      return respond({ ok: setAbmRelayStatus_(body.relayKey, body.ticketId, body.status) });
+    }
+    if (body.action === 'deleteAbmRelayRow') {
+      return respond({ deleted: deleteAbmRelayRows_(body.relayKey, body.ticketId) });
     }
     return respond({ error: 'unknown action' });
   } catch (err) {
