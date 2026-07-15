@@ -12,7 +12,7 @@ buyer, so agents see one thread per ABM conversation, matching Seller Central.
 
 **Script ID:** `1gJu9O-8MNYWVItLYsr48eym0afY1P9n8lUjSwM_p457DIisZLwOXIWAj`
 **Web app URL:** `https://script.google.com/macros/s/AKfycbz2hQMj97voADUPYv6YBHzjZaLsogj1osFhFNpny5iQXtKjBJpn8P2i1pW3Af-6M89ZcA/exec`
-**Current version:** 2 (idempotency guard)
+**Current version:** 4 (reopen & merge, case-ID aware, search-index-lag guard)
 
 ## How it works
 
@@ -25,22 +25,50 @@ buyer, so agents see one thread per ABM conversation, matching Seller Central.
    query param (checked in `doPost`).
 3. `Code.js`:
    - Looks up the new ticket's requester email.
-   - Searches Zendesk for another **still-open** ticket (`status<solved`)
-     tagged `buyer_message_amazon` from the same requester (the oldest match
-     = the thread's "primary" ticket).
-   - If found: posts the new ticket's message as a **public comment on the
-     primary ticket**, authored as the requester (so it reads like the
-     customer's own follow-up) — then closes the new (duplicate) ticket with
-     an internal note pointing to the primary.
-   - If not found: leaves the new ticket untouched — it becomes the primary
-     for any future messages from that buyer.
-   - **Idempotency guard**: if the incoming ticket is already `closed`
-     (already processed by a prior invocation — e.g. a webhook retry), it's a
-     no-op. Without this, a retried webhook call would re-post a duplicate
-     comment on the primary ticket every time it fired.
+   - Searches Zendesk for the buyer's prior `buyer_message_amazon` tickets
+     that are **not closed** (`status<closed` — keeps new/open/pending/solved,
+     drops only terminal `closed`), newest first.
+   - **Primary selection is case-ID aware.** Amazon's buyer proxy from-address
+     embeds the Seller Central case ID
+     (`...+<uuid>@marketplace.amazon.<tld>`). When the new ticket has one, the
+     newest candidate with the **same** case ID wins (the exact key Seller
+     Central threads by); a candidate with a *different* explicit case ID is
+     never chosen; candidates with no resolvable case ID are a soft fallback.
+     With no case ID on the new ticket, it falls back to the newest
+     same-requester candidate.
+   - **Re-fetches the chosen primary fresh** before mutating — Zendesk's search
+     index lags live state, so a search result's `status` can be stale. If the
+     fresh fetch shows it's actually `closed`, it's skipped.
+   - If a usable primary is found: posts the new message as a **public comment
+     on the primary** (authored as the requester, so it reads as the
+     customer's follow-up), **reopening the primary to `open` if it was
+     `solved`** — then closes the new duplicate with an internal note pointing
+     to the primary.
+   - If none found: leaves the new ticket untouched — it becomes the primary
+     for future messages.
+   - **Idempotency guard**: an incoming ticket that's already `closed` (a
+     webhook retry re-firing after this script already processed & closed it)
+     is a no-op.
 
-No persistent state/mapping is kept — each invocation just searches Zendesk
-live via `requester:<email> tags:buyer_message_amazon status<solved`.
+No persistent state/mapping is kept — each invocation searches Zendesk live.
+
+### Reopen & merge (v3/v4) — the split-ticket fix
+
+The original v1/v2 only merged into a **still-open** ticket and never reopened.
+Because agents reply then **solve** a ticket, by the time the buyer wrote back
+the prior ticket was already solved, so the merge found nothing and a fresh
+unmerged ticket was created — producing the reported chains of split tickets
+(e.g. JP `#1000153447 → #1000153603 → #1000153740`, all solved between
+messages). v3 broadened selection to include solved tickets and reopens them;
+v4 added the fresh re-fetch so the reopen decision uses true (not
+index-lagged) status. Verified live end-to-end: a solved primary with a fake
+buyer's second message auto-reopened to `open` and now holds both messages,
+duplicate auto-closed.
+
+**Remaining limit:** a `closed` (terminal) prior ticket cannot be reopened or
+commented on in Zendesk, so if the buyer's previous ticket was already fully
+*closed* (not just solved) when they write again, a new primary is started.
+Solved is reopenable; closed is not.
 
 ## Files
 

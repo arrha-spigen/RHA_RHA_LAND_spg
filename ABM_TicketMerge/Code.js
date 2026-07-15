@@ -8,15 +8,34 @@
  *
  * A Zendesk Trigger (condition: ticket created AND tags contain
  * "buyer_message_amazon") calls this Web App via a Notify-target webhook,
- * passing the new ticket's ID. If the same requester already has another
- * open/pending ticket tagged buyer_message_amazon, this script:
- *   1. Posts the new ticket's message as a public comment on that older
- *      ticket (authored as the requester, so it reads like the customer's
- *      own follow-up — matching how Seller Central threads it).
+ * passing the new ticket's ID. If the same buyer already has a prior
+ * buyer_message_amazon ticket, this script:
+ *   1. Posts the new ticket's message as a public comment on that prior
+ *      ("primary") ticket (authored as the requester, so it reads like the
+ *      customer's own follow-up — matching how Seller Central threads it),
+ *      REOPENING the primary if it had already been solved.
  *   2. Closes the new (duplicate) ticket with an internal note pointing to
  *      the ticket it was merged into.
- * If no such ticket exists, the new ticket is left untouched — it becomes
- * the thread's primary ticket for any future follow-ups.
+ * If no reusable prior ticket exists, the new ticket is left untouched — it
+ * becomes the thread's primary ticket for any future follow-ups.
+ *
+ * Primary selection (v2 — reopen & merge, case-ID aware):
+ *   - Candidates = same-requester, buyer_message_amazon-tagged tickets that
+ *     are NOT closed (Zendesk 'closed' is terminal — can't be reopened or
+ *     commented on), newest first.
+ *   - Amazon's buyer proxy address embeds the Seller Central case ID
+ *     (e.g. "...+76c079d3-...@marketplace.amazon.co.jp"). When the NEW ticket
+ *     has one, prefer the newest candidate with the SAME case ID — that's the
+ *     exact key Seller Central threads by, and it avoids wrongly merging two
+ *     genuinely different open cases from the same buyer. Candidates whose
+ *     address has no resolvable case ID (older tickets, empty from-address)
+ *     are eligible as a soft fallback; a candidate with a DIFFERENT explicit
+ *     case ID is never chosen.
+ *   - Earlier behavior only matched still-OPEN tickets and never reopened,
+ *     so once an agent solved a ticket, the buyer's next message spawned a
+ *     fresh unmerged ticket. That was the root cause of the "New tickets keep
+ *     getting created" reports (e.g. JP chain #1000153447→603→740, all solved
+ *     between messages).
  ********************************/
 
 const ZENDESK_EMAIL = 'kjw@spigen.com';
@@ -63,15 +82,40 @@ function getFirstComment_(ticketId) {
   return comments.length ? comments[0] : null;
 }
 
-// Finds the oldest OTHER open/pending ticket tagged buyer_message_amazon from
-// the same requester — that's the thread's "primary" ticket to merge into.
-function findPrimaryTicket_(requesterEmail, excludeTicketId) {
+// Seller Central case ID embedded in the Amazon buyer proxy from-address,
+// e.g. "s0574jllj4n84kf+76c079d3-2f98-4aec-bc42-16aab22433ee@marketplace.amazon.co.jp".
+// null when the address has no such segment (older tickets, empty address).
+function caseIdFromTicket_(ticket) {
+  const addr = (ticket && ticket.via && ticket.via.source && ticket.via.source.from
+    && ticket.via.source.from.address) || '';
+  const m = addr.match(/\+([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})@marketplace\./i);
+  return m ? m[1] : null;
+}
+
+// Picks the prior ticket to thread the new message into — see the file header
+// for the full selection rationale. Returns the ticket object or null.
+function findPrimaryTicket_(requesterEmail, newTicket) {
+  // status<closed keeps new/open/pending/solved (all reusable) and drops only
+  // terminal 'closed' tickets, which Zendesk won't let us reopen or comment on.
   const query = encodeURIComponent(
-    `type:ticket tags:${ABM_TAG} requester:${requesterEmail} status<solved`
+    `type:ticket tags:${ABM_TAG} requester:${requesterEmail} status<closed`
   );
-  const data = zdFetch_(`/api/v2/search.json?query=${query}&sort_by=created_at&sort_order=asc`);
-  const results = (data.results || []).filter(t => t.id !== excludeTicketId);
-  return results.length ? results[0] : null;
+  const data = zdFetch_(`/api/v2/search.json?query=${query}&sort_by=created_at&sort_order=desc`);
+  const candidates = (data.results || []).filter(t => t.id !== newTicket.id);
+  if (!candidates.length) return null;
+
+  const newCaseId = caseIdFromTicket_(newTicket);
+  if (newCaseId) {
+    const sameCase = candidates.find(t => caseIdFromTicket_(t) === newCaseId);
+    if (sameCase) return sameCase;
+    // No same-case candidate. Only fall back to candidates with NO resolvable
+    // case ID (could plausibly be the same conversation); never merge into a
+    // candidate that carries a DIFFERENT explicit case ID.
+    const unknownCase = candidates.find(t => caseIdFromTicket_(t) === null);
+    return unknownCase || null;
+  }
+  // New ticket has no case ID → fall back to plain newest same-buyer candidate.
+  return candidates[0];
 }
 
 function mergeNewTicketIntoPrimary_(newTicket, primaryTicket) {
@@ -81,17 +125,17 @@ function mergeNewTicketIntoPrimary_(newTicket, primaryTicket) {
 
   // 1. Add the new message as a public comment on the primary ticket,
   //    authored as the requester so it reads as the customer's follow-up.
+  //    Reopen the primary (→ 'open') if it had already been solved, so the
+  //    thread comes back to the agents' queue instead of a new ticket.
+  const primaryPayload = {
+    comment: { html_body: htmlBody, public: true, author_id: requester.id }
+  };
+  const wasReopened = primaryTicket.status === 'solved';
+  if (wasReopened) primaryPayload.status = 'open';
+
   zdFetch_(`/api/v2/tickets/${primaryTicket.id}.json`, {
     method: 'put',
-    payload: JSON.stringify({
-      ticket: {
-        comment: {
-          html_body: htmlBody,
-          public: true,
-          author_id: requester.id
-        }
-      }
-    })
+    payload: JSON.stringify({ ticket: primaryPayload })
   });
 
   // 2. Close the duplicate with an internal note pointing to the primary.
@@ -101,14 +145,15 @@ function mergeNewTicketIntoPrimary_(newTicket, primaryTicket) {
       ticket: {
         status: 'closed',
         comment: {
-          html_body: `Auto-merged: this buyer already has an open ABM ticket #${primaryTicket.id}. Message moved there — see that ticket for the customer's reply.`,
+          html_body: `Auto-merged: this buyer already has ABM ticket #${primaryTicket.id}${wasReopened ? ' (reopened)' : ''}. Message moved there — see that ticket for the customer's reply.`,
           public: false
         }
       }
     })
   });
 
-  Logger.log(`Merged ticket #${newTicket.id} into #${primaryTicket.id}`);
+  Logger.log(`Merged ticket #${newTicket.id} into #${primaryTicket.id}${wasReopened ? ' (reopened)' : ''}`);
+  return { wasReopened };
 }
 
 function handleNewAbmTicket_(ticketId) {
@@ -129,13 +174,25 @@ function handleNewAbmTicket_(ticketId) {
     return { status: 'skipped_no_requester_email', ticketId };
   }
 
-  const primary = findPrimaryTicket_(requester.email, ticket.id);
+  const primary = findPrimaryTicket_(requester.email, ticket);
   if (!primary) {
     return { status: 'left_as_primary', ticketId };
   }
 
-  mergeNewTicketIntoPrimary_(ticket, primary);
-  return { status: 'merged', ticketId, primaryTicketId: primary.id };
+  // Zendesk's SEARCH index lags behind live ticket state — a search result's
+  // `status` can be stale (e.g. still shows 'new' seconds after a solve, or
+  // 'open' after a close). The reopen decision and the can-we-write check both
+  // depend on the TRUE current status, so re-fetch the chosen primary directly
+  // before mutating it. If it's actually already closed (terminal — a PUT
+  // would 422 "closed prevents ticket update"), don't merge into it; leave the
+  // new ticket as its own primary instead.
+  const freshPrimary = getTicket_(primary.id);
+  if (!freshPrimary || freshPrimary.status === 'closed') {
+    return { status: 'left_as_primary', ticketId, note: 'primary was closed on re-fetch' };
+  }
+
+  const { wasReopened } = mergeNewTicketIntoPrimary_(ticket, freshPrimary);
+  return { status: wasReopened ? 'merged_reopened' : 'merged', ticketId, primaryTicketId: freshPrimary.id };
 }
 
 /********************************
