@@ -171,24 +171,41 @@ function upsertAbmRelayLog_(entry) {
   else sheet.getRange(rowIdx, 1, 1, row.length).setValues([row]);
 }
 
+// A "pending" row is written the instant a relay starts (see
+// GCX Reply.user.js relayAbmReply_), before any send attempt — so a tab
+// closed/reloaded mid-flight still leaves a recoverable record. But that
+// means a fresh "pending" row is often just a completely normal send still
+// in progress a few seconds ago, not an abandoned one. Only surface it to
+// the cross-session sweep once it's old enough that the originating tab's
+// own retry loop (up to 3 attempts, each with network round trips + a
+// deliberate backoff — worst case comfortably under a minute) must already
+// be done one way or another. Without this, a second tab's sweep could pick
+// up a still-in-flight send and fire a genuine duplicate message to the buyer.
+const ABM_PENDING_STALE_MS = 90 * 1000;
+
 function getAbmRelayPending_() {
   const sheet = getAbmLogSheet_();
   const data = sheet.getDataRange().getValues();
   if (data.length < 2) return [];
   const headers = data[0];
   const idx = name => headers.indexOf(name);
+  const now = Date.now();
   const out = [];
   for (let i = 1; i < data.length; i++) {
     const row = data[i];
-    if (row[idx('TicketId')] && row[idx('Status')] !== 'success') {
-      out.push({
-        ticketId:    row[idx('TicketId')],
-        caseId:      row[idx('CaseId')],
-        marketplace: row[idx('Marketplace')],
-        attempts:    row[idx('Attempts')],
-        messageText: row[idx('MessageText')],
-      });
+    const status = row[idx('Status')];
+    if (!row[idx('TicketId')] || status === 'success') continue;
+    if (status === 'pending') {
+      const ts = new Date(row[idx('Timestamp')]).getTime();
+      if (!ts || (now - ts) < ABM_PENDING_STALE_MS) continue; // still plausibly in-flight — leave it alone
     }
+    out.push({
+      ticketId:    row[idx('TicketId')],
+      caseId:      row[idx('CaseId')],
+      marketplace: row[idx('Marketplace')],
+      attempts:    row[idx('Attempts')],
+      messageText: row[idx('MessageText')],
+    });
   }
   return out;
 }
