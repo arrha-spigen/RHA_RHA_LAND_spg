@@ -82,6 +82,51 @@ function getFirstComment_(ticketId) {
   return comments.length ? comments[0] : null;
 }
 
+// Re-hosts a source comment's attachments onto Zendesk so they can be attached
+// to the primary ticket's comment. A Zendesk comment can't reference another
+// ticket's attachment tokens directly — each file must be downloaded and
+// re-uploaded to get a fresh upload token. Returns an array of upload tokens
+// (one per successfully transferred file) to pass as `comment.uploads`.
+// Best-effort per file: a single download/upload failure is logged and skipped
+// so the rest of the message (text + other attachments) still merges.
+function transferAttachments_(attachments) {
+  const tokens = [];
+  (attachments || []).forEach(att => {
+    try {
+      // content_url carries its own access token, but send the API Basic auth
+      // too so private/agent-only attachments download reliably.
+      const dl = UrlFetchApp.fetch(att.content_url, {
+        headers: { Authorization: zdAuthHeader_() },
+        muteHttpExceptions: true
+      });
+      if (dl.getResponseCode() >= 300) {
+        Logger.log(`transferAttachments_: download failed for ${att.file_name} (${dl.getResponseCode()})`);
+        return;
+      }
+      const blob = dl.getBlob().setName(att.file_name);
+      const up = UrlFetchApp.fetch(
+        `https://${ZENDESK_SUBDOMAIN}.zendesk.com/api/v2/uploads.json?filename=${encodeURIComponent(att.file_name)}`,
+        {
+          method: 'post',
+          contentType: att.content_type || 'application/octet-stream',
+          payload: blob.getBytes(),
+          headers: { Authorization: zdAuthHeader_() },
+          muteHttpExceptions: true
+        }
+      );
+      if (up.getResponseCode() >= 300) {
+        Logger.log(`transferAttachments_: upload failed for ${att.file_name} (${up.getResponseCode()}): ${up.getContentText()}`);
+        return;
+      }
+      const token = JSON.parse(up.getContentText())?.upload?.token;
+      if (token) tokens.push(token);
+    } catch (err) {
+      Logger.log(`transferAttachments_: error on ${att && att.file_name} — ${err}`);
+    }
+  });
+  return tokens;
+}
+
 // Seller Central case ID embedded in the Amazon buyer proxy from-address,
 // e.g. "s0574jllj4n84kf+76c079d3-2f98-4aec-bc42-16aab22433ee@marketplace.amazon.co.jp".
 // null when the address has no such segment (older tickets, empty address).
@@ -123,13 +168,19 @@ function mergeNewTicketIntoPrimary_(newTicket, primaryTicket) {
   const firstComment = getFirstComment_(newTicket.id);
   const htmlBody = (firstComment && firstComment.html_body) || newTicket.description || '';
 
+  // Carry the customer's attachments (photos/video/PDFs) across too — the
+  // message body alone isn't enough (reported: 4 photos on #1000153766 didn't
+  // reach #1000153709). Re-host them and pass the resulting upload tokens on
+  // the primary's comment.
+  const uploadTokens = transferAttachments_(firstComment && firstComment.attachments);
+
   // 1. Add the new message as a public comment on the primary ticket,
   //    authored as the requester so it reads as the customer's follow-up.
   //    Reopen the primary (→ 'open') if it had already been solved, so the
   //    thread comes back to the agents' queue instead of a new ticket.
-  const primaryPayload = {
-    comment: { html_body: htmlBody, public: true, author_id: requester.id }
-  };
+  const primaryComment = { html_body: htmlBody, public: true, author_id: requester.id };
+  if (uploadTokens.length) primaryComment.uploads = uploadTokens;
+  const primaryPayload = { comment: primaryComment };
   const wasReopened = primaryTicket.status === 'solved';
   if (wasReopened) primaryPayload.status = 'open';
 
@@ -152,8 +203,9 @@ function mergeNewTicketIntoPrimary_(newTicket, primaryTicket) {
     })
   });
 
-  Logger.log(`Merged ticket #${newTicket.id} into #${primaryTicket.id}${wasReopened ? ' (reopened)' : ''}`);
-  return { wasReopened };
+  const srcAttachCount = (firstComment && firstComment.attachments || []).length;
+  Logger.log(`Merged ticket #${newTicket.id} into #${primaryTicket.id}${wasReopened ? ' (reopened)' : ''} — attachments ${uploadTokens.length}/${srcAttachCount} transferred`);
+  return { wasReopened, attachmentsTransferred: uploadTokens.length, attachmentsTotal: srcAttachCount };
 }
 
 function handleNewAbmTicket_(ticketId) {
@@ -191,8 +243,14 @@ function handleNewAbmTicket_(ticketId) {
     return { status: 'left_as_primary', ticketId, note: 'primary was closed on re-fetch' };
   }
 
-  const { wasReopened } = mergeNewTicketIntoPrimary_(ticket, freshPrimary);
-  return { status: wasReopened ? 'merged_reopened' : 'merged', ticketId, primaryTicketId: freshPrimary.id };
+  const merge = mergeNewTicketIntoPrimary_(ticket, freshPrimary);
+  return {
+    status: merge.wasReopened ? 'merged_reopened' : 'merged',
+    ticketId,
+    primaryTicketId: freshPrimary.id,
+    attachmentsTransferred: merge.attachmentsTransferred,
+    attachmentsTotal: merge.attachmentsTotal
+  };
 }
 
 /********************************

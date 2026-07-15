@@ -12,7 +12,7 @@ buyer, so agents see one thread per ABM conversation, matching Seller Central.
 
 **Script ID:** `1gJu9O-8MNYWVItLYsr48eym0afY1P9n8lUjSwM_p457DIisZLwOXIWAj`
 **Web app URL:** `https://script.google.com/macros/s/AKfycbz2hQMj97voADUPYv6YBHzjZaLsogj1osFhFNpny5iQXtKjBJpn8P2i1pW3Af-6M89ZcA/exec`
-**Current version:** 4 (reopen & merge, case-ID aware, search-index-lag guard)
+**Current version:** 5 (reopen & merge, case-ID aware, index-lag guard, attachment transfer)
 
 ## How it works
 
@@ -41,9 +41,11 @@ buyer, so agents see one thread per ABM conversation, matching Seller Central.
      fresh fetch shows it's actually `closed`, it's skipped.
    - If a usable primary is found: posts the new message as a **public comment
      on the primary** (authored as the requester, so it reads as the
-     customer's follow-up), **reopening the primary to `open` if it was
-     `solved`** — then closes the new duplicate with an internal note pointing
-     to the primary.
+     customer's follow-up), **carrying over the customer's attachments**
+     (photos/PDFs — re-downloaded from the source ticket and re-uploaded, since
+     Zendesk comments can't reference another ticket's attachment tokens), and
+     **reopening the primary to `open` if it was `solved`** — then closes the
+     new duplicate with an internal note pointing to the primary.
    - If none found: leaves the new ticket untouched — it becomes the primary
      for future messages.
    - **Idempotency guard**: an incoming ticket that's already `closed` (a
