@@ -80,7 +80,7 @@ function doGet(e) {
     }
 
     if (p.action === 'abmRelayPending') {
-      return respond({ pending: getAbmRelayPending_() });
+      return respond({ pending: getAbmRelayPending_(p.clientVersion) });
     }
 
     if (p.action === 'abmRelayStatus') {
@@ -219,7 +219,26 @@ const ABM_PENDING_STALE_MS = 90 * 1000;
 // claiming browser died mid-send (tab closed, crash) and let another retry.
 const ABM_SENDING_STALE_MS = 5 * 60 * 1000;
 
-function getAbmRelayPending_() {
+// Minimum userscript version that can correctly relay a queued reply's
+// attachments (fetch the specific comment's files + upload to SC). Reconciliation
+// queues rows carrying a CommentId; a pre-3.3.12 tab's sweep would send those
+// TEXT-ONLY and silently drop the attachments (exactly what dropped Wolfgang's
+// 3 invoice PDFs). So CommentId-bearing rows are withheld from any client that
+// doesn't declare it's at least this version — they wait for a capable browser.
+const ABM_ATTACH_MIN_VERSION = '3.3.12';
+
+function versionAtLeast_(v, min) {
+  const a = String(v || '').split('.').map(Number);
+  const b = String(min).split('.').map(Number);
+  for (let i = 0; i < b.length; i++) {
+    const x = a[i] || 0, y = b[i] || 0;
+    if (x !== y) return x > y;
+  }
+  return true;
+}
+
+function getAbmRelayPending_(clientVersion) {
+  const capable = versionAtLeast_(clientVersion, ABM_ATTACH_MIN_VERSION);
   const sheet = getAbmLogSheet_();
   const data = sheet.getDataRange().getValues();
   if (data.length < 2) return [];
@@ -236,6 +255,9 @@ function getAbmRelayPending_() {
     if (status === 'pending' && (!ts || (now - ts) < ABM_PENDING_STALE_MS)) continue;
     // claimed by another browser and still plausibly delivering — skip until stale
     if (status === 'sending' && (!ts || (now - ts) < ABM_SENDING_STALE_MS)) continue;
+    // attachment-capable send required — hide from too-old clients so they can't
+    // text-only-send it and drop the files.
+    if (row[idx('CommentId')] && !capable) continue;
     out.push({
       relayKey:    row[idx('RelayKey')],
       ticketId:    row[idx('TicketId')],
