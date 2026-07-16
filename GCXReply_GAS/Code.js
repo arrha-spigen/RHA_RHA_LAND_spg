@@ -155,7 +155,11 @@ function respond(data) {
 // agent's browser, not necessarily the one that first tried) can resend
 // without needing to re-open the original ticket.
 const ABM_LOG_SHEET_NAME = 'ABM_Relay_Log';
-const ABM_LOG_HEADERS = ['Timestamp', 'RelayKey', 'TicketId', 'CaseId', 'Marketplace', 'Status', 'Attempts', 'LastError', 'MessageText'];
+// CommentId ties a row to the specific Zendesk comment it relays — needed by
+// the reconciliation job (reconcileAbmRelays_ in ABM_TicketMerge) so an
+// auto-resent reply can re-fetch that exact comment's attachments, and so its
+// dedup can tell one agent reply apart from another on the same ticket.
+const ABM_LOG_HEADERS = ['Timestamp', 'RelayKey', 'TicketId', 'CommentId', 'CaseId', 'Marketplace', 'Status', 'Attempts', 'LastError', 'MessageText'];
 
 function getAbmLogSheet_() {
   const ss = SpreadsheetApp.openById(SHEET_ID);
@@ -165,16 +169,17 @@ function getAbmLogSheet_() {
     sheet.getRange(1, 1, 1, ABM_LOG_HEADERS.length).setValues([ABM_LOG_HEADERS]);
     return sheet;
   }
-  // Self-repairing migration: the sheet was created before RelayKey existed
-  // (8-column header). Without this, every column lookup below silently
-  // reads the wrong cell against real existing rows (e.g. the 1000153623/
-  // 1000153609 test data) instead of erroring loudly. Insert the missing
-  // column once, in place, preserving all existing rows/data.
-  const existingHeaders = sheet.getRange(1, 1, 1, sheet.getLastColumn()).getValues()[0];
-  if (existingHeaders.indexOf('RelayKey') === -1) {
-    sheet.insertColumnBefore(2); // right after Timestamp
-    sheet.getRange(1, 1, 1, ABM_LOG_HEADERS.length).setValues([ABM_LOG_HEADERS]);
-  }
+  // Self-repairing migration: insert any expected column that doesn't exist
+  // yet, at its target index, preserving existing rows/data. Handles both the
+  // original pre-RelayKey (8-col) sheet and the pre-CommentId (9-col) one —
+  // without this, column lookups would silently read the wrong cell against
+  // existing rows. Only this code writes the sheet, so header order is
+  // otherwise stable.
+  ABM_LOG_HEADERS.forEach((h, idx) => {
+    const existing = sheet.getRange(1, 1, 1, Math.max(sheet.getLastColumn(), 1)).getValues()[0];
+    if (existing.indexOf(h) === -1) sheet.insertColumnBefore(idx + 1);
+  });
+  sheet.getRange(1, 1, 1, ABM_LOG_HEADERS.length).setValues([ABM_LOG_HEADERS]);
   return sheet;
 }
 
@@ -190,7 +195,7 @@ function upsertAbmRelayLog_(entry) {
     if (String(data[i][keyCol]) === relayKey) { rowIdx = i + 1; break; }
   }
   const row = [
-    new Date(), relayKey, entry.ticketId, entry.caseId || '', entry.marketplace || '',
+    new Date(), relayKey, entry.ticketId, entry.commentId || '', entry.caseId || '', entry.marketplace || '',
     entry.status || '', entry.attempts || 1, entry.lastError || '', entry.messageText || ''
   ];
   if (rowIdx === -1) sheet.appendRow(row);
@@ -208,6 +213,11 @@ function upsertAbmRelayLog_(entry) {
 // be done one way or another. Without this, a second tab's sweep could pick
 // up a still-in-flight send and fire a genuine duplicate message to the buyer.
 const ABM_PENDING_STALE_MS = 90 * 1000;
+// A 'sending' row is one a browser has atomically claimed (claimAbmRelay) and
+// is actively delivering. Hidden from the pending list so no other browser
+// grabs the same reply — until this long passes, at which point we assume the
+// claiming browser died mid-send (tab closed, crash) and let another retry.
+const ABM_SENDING_STALE_MS = 5 * 60 * 1000;
 
 function getAbmRelayPending_() {
   const sheet = getAbmLogSheet_();
@@ -221,13 +231,15 @@ function getAbmRelayPending_() {
     const row = data[i];
     const status = row[idx('Status')];
     if (!row[idx('TicketId')] || status === 'success') continue;
-    if (status === 'pending') {
-      const ts = new Date(row[idx('Timestamp')]).getTime();
-      if (!ts || (now - ts) < ABM_PENDING_STALE_MS) continue; // still plausibly in-flight — leave it alone
-    }
+    const ts = new Date(row[idx('Timestamp')]).getTime();
+    // in-flight browser send — leave it alone briefly
+    if (status === 'pending' && (!ts || (now - ts) < ABM_PENDING_STALE_MS)) continue;
+    // claimed by another browser and still plausibly delivering — skip until stale
+    if (status === 'sending' && (!ts || (now - ts) < ABM_SENDING_STALE_MS)) continue;
     out.push({
       relayKey:    row[idx('RelayKey')],
       ticketId:    row[idx('TicketId')],
+      commentId:   row[idx('CommentId')],
       caseId:      row[idx('CaseId')],
       marketplace: row[idx('Marketplace')],
       attempts:    row[idx('Attempts')],
@@ -235,6 +247,38 @@ function getAbmRelayPending_() {
     });
   }
   return out;
+}
+
+// Atomic claim so only ONE browser sends a given queued reply — critical now
+// that reconciliation can auto-queue real-customer replies that any agent's
+// tab might pick up. Uses LockService to serialize the read-modify-write:
+// grants the claim (flips the row to 'sending' with a fresh timestamp) only if
+// the row is still pending/failed/stale-sending. Returns { claimed: bool }.
+function claimAbmRelay_(relayKey) {
+  const lock = LockService.getScriptLock();
+  try { lock.waitLock(10000); } catch (e) { return { claimed: false, reason: 'lock_timeout' }; }
+  try {
+    const sheet = getAbmLogSheet_();
+    const data = sheet.getDataRange().getValues();
+    const headers = data[0];
+    const idx = name => headers.indexOf(name);
+    const now = Date.now();
+    for (let i = 1; i < data.length; i++) {
+      if (String(data[i][idx('RelayKey')]) !== String(relayKey)) continue;
+      const status = data[i][idx('Status')];
+      const ts = new Date(data[i][idx('Timestamp')]).getTime();
+      const claimable = status === 'pending' || status === 'failed' ||
+        (status === 'sending' && (!ts || (now - ts) >= ABM_SENDING_STALE_MS));
+      if (!claimable) return { claimed: false, reason: 'already_' + status };
+      sheet.getRange(i + 1, idx('Status') + 1).setValue('sending');
+      sheet.getRange(i + 1, idx('Timestamp') + 1).setValue(new Date());
+      SpreadsheetApp.flush();
+      return { claimed: true };
+    }
+    return { claimed: false, reason: 'not_found' };
+  } finally {
+    lock.releaseLock();
+  }
 }
 
 // A ticket can have multiple relay rows (one per reply) — returns ALL of
@@ -278,6 +322,7 @@ function getAbmRelayAll_(limit) {
     out.push({
       relayKey:    row[idx('RelayKey')],
       ticketId:    row[idx('TicketId')],
+      commentId:   row[idx('CommentId')],
       caseId:      row[idx('CaseId')],
       marketplace: row[idx('Marketplace')],
       status:      row[idx('Status')],
@@ -343,6 +388,9 @@ function doPost(e) {
     }
     if (body.action === 'deleteAbmRelayRow') {
       return respond({ deleted: deleteAbmRelayRows_(body.relayKey, body.ticketId) });
+    }
+    if (body.action === 'claimAbmRelay') {
+      return respond(claimAbmRelay_(body.relayKey));
     }
     return respond({ error: 'unknown action' });
   } catch (err) {

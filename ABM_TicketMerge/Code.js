@@ -265,6 +265,22 @@ function doPost(e) {
     }
 
     const body = JSON.parse(e.postData.contents || '{}');
+
+    // Secret-guarded manual reconciliation trigger (for testing/on-demand runs).
+    if (body.action === 'reconcile') {
+      const summary = reconcileAbmRelays_(Number(body.lookbackHours) || 6);
+      return ContentService.createTextOutput(JSON.stringify(summary))
+        .setMimeType(ContentService.MimeType.JSON);
+    }
+
+    // Secret-guarded one-time trigger installer.
+    if (body.action === 'setupTrigger') {
+      const exists = ScriptApp.getProjectTriggers().some(t => t.getHandlerFunction() === 'reconcileAbmRelays_');
+      if (!exists) ScriptApp.newTrigger('reconcileAbmRelays_').timeBased().everyMinutes(30).create();
+      return ContentService.createTextOutput(JSON.stringify({ installed: !exists, alreadyExisted: exists }))
+        .setMimeType(ContentService.MimeType.JSON);
+    }
+
     const ticketId = body.ticket_id;
     if (!ticketId) {
       return ContentService.createTextOutput(JSON.stringify({ error: 'missing ticket_id' }))
@@ -289,4 +305,167 @@ function testMergeOnTicket(ticketId) {
   const result = handleNewAbmTicket_(ticketId);
   Logger.log(JSON.stringify(result, null, 2));
   return result;
+}
+
+/********************************
+ * ABM relay reconciliation
+ * ------------------------------
+ * Safety net for the outgoing relay. GCX Reply relays an agent's public reply
+ * to the buyer via Seller Central ONLY from a browser running the updated
+ * userscript with a live SC session. If an agent's browser is stale/old/not
+ * logged into SC, their reply silently never reaches the buyer AND never gets
+ * logged (the relay never ran to log a failure) — exactly what happened on
+ * ticket #1000153794 (agent sent an invoice reply + 3 PDFs; buyer never got
+ * it; zero rows in ABM_Relay_Log).
+ *
+ * This scheduled job closes that gap: it scans recently-updated ABM tickets,
+ * finds each ticket's latest public AGENT reply, and if that reply isn't
+ * already accounted for in ABM_Relay_Log (by CommentId, or by matching text
+ * for browser-relayed rows that predate CommentId), it queues a 'pending' row
+ * in the log. Any updated agent browser with a valid SC session then claims
+ * (atomic) and delivers it — text AND attachments — via the existing sweep.
+ *
+ * Dedup is deliberately conservative (favours "already handled" to avoid a
+ * duplicate send to a real buyer). Sends are NOT performed here — this only
+ * queues; the browser sweep does the actual delivery, one claimant per row.
+ ********************************/
+
+// GCX Reply web app (owns the ABM_Relay_Log sheet + its endpoints).
+const GCX_GAS_URL = 'https://script.google.com/macros/s/AKfycbw2Vdwk197LXB6oUAzuHS8sKamD5uqKZJDLvcHzbftWJk-M65XV1fAnTqiZo7ZEm4hk/exec';
+
+// EU marketplaces whose Seller Central messaging is served from amazon.de
+// (single EU login covers them via marketplaceId) — mirrors GCX Reply's
+// EU_SC_REDIRECT so the queued row's marketplace matches what the browser
+// sweep will actually hit.
+const EU_SC_REDIRECT_TO_DE = ['amazon.fr', 'amazon.it', 'amazon.es', 'amazon.nl', 'amazon.pl', 'amazon.se', 'amazon.be'];
+
+function abmMarketplaceFromAddress_(address) {
+  const m = (address || '').match(/@marketplace\.(amazon\.[a-z.]+)$/i);
+  if (!m) return null;
+  const domain = m[1].toLowerCase();
+  return EU_SC_REDIRECT_TO_DE.indexOf(domain) !== -1 ? 'amazon.de' : domain;
+}
+
+// Aggressive normalization for dedup: the browser relay stores the DECODED
+// message text (htmlToPlainText_ turns &nbsp; into an actual nbsp char, etc.),
+// while Zendesk's comment.plain_body keeps literal HTML entities like
+// "&nbsp;". Comparing raw would falsely treat the same reply as different and
+// risk a duplicate send. So strip HTML entities first, then drop everything
+// that isn't a letter or digit, then lowercase — two encodings of the same
+// message collapse to the same key. Erring toward "already handled" (a false
+// match just skips a resend) is the safe direction for real-customer sends.
+function normalizeForDedup_(s) {
+  return String(s || '')
+    .replace(/&[a-z]+;|&#\d+;/gi, ' ')   // HTML entities → space (so "nbsp" letters don't linger)
+    .replace(/[^\p{L}\p{N}]+/gu, '')     // keep only letters/digits
+    .toLowerCase();
+}
+
+function gcxGet_(action, params) {
+  let url = `${GCX_GAS_URL}?action=${encodeURIComponent(action)}`;
+  Object.keys(params || {}).forEach(k => { url += `&${k}=${encodeURIComponent(params[k])}`; });
+  const res = UrlFetchApp.fetch(url, { muteHttpExceptions: true, followRedirects: true });
+  return JSON.parse(res.getContentText());
+}
+
+function gcxPost_(payload) {
+  const res = UrlFetchApp.fetch(GCX_GAS_URL, {
+    method: 'post', contentType: 'application/json',
+    payload: JSON.stringify(payload), muteHttpExceptions: true, followRedirects: true
+  });
+  return JSON.parse(res.getContentText());
+}
+
+// Latest PUBLIC agent reply on a ticket — i.e. an outbound message that should
+// have reached the buyer. Excludes the customer's own inbound messages and the
+// merge-injected customer follow-ups (both authored by end-users, not agents).
+function latestAgentPublicComment_(ticketId, requesterId) {
+  const data = zdFetch_(`/api/v2/tickets/${ticketId}/comments.json?include=users&sort_order=desc`);
+  const roleById = {};
+  (data.users || []).forEach(u => { roleById[u.id] = u.role; });
+  const comments = data.comments || [];
+  for (const c of comments) {
+    if (!c.public) continue;
+    if (c.author_id === requesterId) continue;             // customer / merge-injected
+    const role = roleById[c.author_id];
+    if (role === 'agent' || role === 'admin') return c;    // outbound agent reply
+  }
+  return null;
+}
+
+function reconcileAbmRelays_(lookbackHours) {
+  // Time-based triggers invoke this with an event object as the first arg, not
+  // a number — only honour a real numeric override (from runReconcileNow).
+  const hours = (typeof lookbackHours === 'number' && lookbackHours > 0) ? lookbackHours : 6;
+  const cutoff = new Date(Date.now() - hours * 3600 * 1000).toISOString().replace(/\.\d+Z$/, 'Z');
+  const query = encodeURIComponent(`type:ticket tags:${ABM_TAG} updated>${cutoff}`);
+
+  // Existing log rows, indexed per ticket for dedup.
+  const logRows = (gcxGet_('abmRelayAll', { limit: 200 }).rows) || [];
+  const byTicket = {};
+  logRows.forEach(r => {
+    const t = String(r.ticketId);
+    (byTicket[t] = byTicket[t] || []).push(r);
+  });
+
+  const summary = { scanned: 0, queued: 0, skippedNoCase: 0, skippedNoReply: 0, alreadyLogged: 0, queuedTickets: [] };
+
+  let url = `/api/v2/search.json?query=${query}&sort_by=updated_at&sort_order=desc`;
+  let guard = 0;
+  while (url && guard++ < 10) {
+    const page = zdFetch_(url);
+    (page.results || []).forEach(t => {
+      if (!t || t.id === undefined) return;
+      summary.scanned++;
+      const fromAddr = (t.via && t.via.source && t.via.source.from && t.via.source.from.address) || '';
+      const caseId = caseIdFromTicket_(t);
+      const marketplace = abmMarketplaceFromAddress_(fromAddr);
+      if (!caseId || !marketplace) { summary.skippedNoCase++; return; }
+
+      const reply = latestAgentPublicComment_(t.id, t.requester_id);
+      if (!reply) { summary.skippedNoReply++; return; }
+      const text = (reply.plain_body || '').trim();
+      if (!text) { summary.skippedNoReply++; return; }
+
+      const existing = byTicket[String(t.id)] || [];
+      const norm = normalizeForDedup_(text);
+      const dup = existing.some(r =>
+        String(r.commentId) === String(reply.id) ||          // same comment already logged
+        normalizeForDedup_(r.messageText) === norm            // browser-relayed row (no commentId) with same text
+      );
+      if (dup) { summary.alreadyLogged++; return; }
+
+      gcxPost_({
+        action: 'logAbmRelay',
+        relayKey: `${t.id}_c${reply.id}`,
+        ticketId: t.id,
+        commentId: reply.id,
+        caseId: caseId,
+        marketplace: marketplace,
+        status: 'pending',
+        attempts: 0,
+        lastError: 'queued by reconciliation (relay never logged a result)',
+        messageText: text
+      });
+      summary.queued++;
+      summary.queuedTickets.push(t.id);
+    });
+    url = page.next_page || null;
+  }
+
+  Logger.log('reconcileAbmRelays_: ' + JSON.stringify(summary));
+  return summary;
+}
+
+// Manual runner (dry-run visibility) — run from the Apps Script editor.
+function runReconcileNow() {
+  return reconcileAbmRelays_(24);
+}
+
+// Install the scheduled reconciliation (run ONCE from the editor).
+function setupReconcileTrigger() {
+  const exists = ScriptApp.getProjectTriggers().some(t => t.getHandlerFunction() === 'reconcileAbmRelays_');
+  if (exists) { Logger.log('reconcile trigger already exists'); return; }
+  ScriptApp.newTrigger('reconcileAbmRelays_').timeBased().everyMinutes(30).create();
+  Logger.log('reconcile trigger created — every 30 min');
 }
