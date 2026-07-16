@@ -59,6 +59,7 @@ spigen-gcx-automation/
 | [MasterTrigger](MasterTrigger/) | All | Daily job that reads the `"finalize"` filter view from each product's source sheet and distributes new reviews into destination spreadsheets. Handles dedup, `=dr()` formula injection, and `tem` sheet refresh. | [README](MasterTrigger/README.md) |
 | [Apify/APIFY_Axesso](Apify/APIFY_Axesso/) | All | Legacy master script (same logic as MasterTrigger). Also contains `Code.gs` for Apify run lifecycle and `Product.gs` for aggregate rating/review fetch. | [README](Apify/APIFY_Axesso/README.md) |
 | [Glx26_Monday](Glx26_Monday/) | Galaxy S26 | Per-product Apify trigger + Monday.com board sync for Galaxy S26 review sheet. | [README](Glx26_Monday/README.md) |
+| [Apify/GlxZ8_Apify](Apify/GlxZ8_Apify/) | Galaxy Z8 | Per-product Apify trigger + Monday.com board sync (board 18421346787, 📌Galaxy Z8 Case+CP) for the Galaxy Z Fold 8 / Flip 8 / Fold 8 Ultra review sheet. Copy of the Glx26 project with Z8 sheet/board/group config. | — |
 | [Apify/Pixel10a_Apify](Apify/Pixel10a_Apify/) | Pixel 10a | Per-product Apify trigger for Pixel 10a review sheet. | [README](Apify/Pixel10a_Apify/README.md) |
 | [Apify/iPh17e_Apify](Apify/iPh17e_Apify/) | iPhone 17e | Per-product Apify trigger for iPhone 17e review sheet. | [README](Apify/iPh17e_Apify/README.md) |
 | [Apify/SDA_Apify](Apify/SDA_Apify/) | SDA | Per-product Apify trigger for Screen & Display Accessories review sheet. | [README](Apify/SDA_Apify/README.md) |
