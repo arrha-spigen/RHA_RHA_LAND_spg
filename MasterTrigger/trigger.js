@@ -135,11 +135,11 @@ function testSendTriggerStatus() {
   sendAllTriggerStatus(STATUS_WEBHOOK);
 }
 
-// ── Recreate all masterDailyJob triggers at 09:00 KST, skip weekends + holidays
+// ── Recreate all masterDailyJob triggers at 04:00 KST, skip weekends + holidays
 function createTriggers() {
   const endDate = new Date(MASTER_END_DATE + 'T23:59:59+09:00');
   let date = new Date();
-  date.setHours(9, 0, 0, 0); // 04:00 KST
+  date.setHours(4, 0, 0, 0); // 04:00 KST
 
   // Delete ALL existing masterDailyJob triggers in this project
   ScriptApp.getProjectTriggers().forEach(t => ScriptApp.deleteTrigger(t));
@@ -166,10 +166,10 @@ function createTriggers() {
     }
 
     date.setDate(date.getDate() + 1);
-    date.setHours(9, 0, 0, 0);
+    date.setHours(4, 0, 0, 0);
   }
 
-  Logger.log('Created %s working-day 09:00 KST triggers until %s', created, MASTER_END_DATE);
+  Logger.log('Created %s working-day 04:00 KST triggers until %s', created, MASTER_END_DATE);
 }
 
 // ── Daily entry point ─────────────────────────────────────────────────────────
