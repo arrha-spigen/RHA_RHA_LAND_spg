@@ -127,6 +127,144 @@ function transferAttachments_(attachments) {
   return tokens;
 }
 
+/********************************
+ * ABM inbound cleanup
+ * ------------------------------
+ * Amazon's "You have received a message" notification email buries the
+ * buyer's own typed text inside a full marketing/legal HTML template (logo,
+ * order table, "did this email help" survey buttons, footer copyright,
+ * opt-out text, commMgrTok/SPC-xxAmazon tracking IDs) — the ticket comment
+ * Zendesk creates from it looks nothing like a normal claim, even though
+ * Zendesk's own inbound mail parsing already attaches the buyer's real
+ * photos/PDFs correctly (verified live on ticket #1000154136 — no fix
+ * needed there).
+ *
+ * Investigated live 2026-07-21 by diffing the raw html_body of several real
+ * ABM tickets across JP/EN/DE: every sample wraps the buyer's own text in
+ * exactly one <pre> block with an IDENTICAL inline style across every
+ * marketplace/language sampled — only the surrounding template strings are
+ * translated, this wrapper is not. That makes it a reliable, locale-agnostic
+ * extraction anchor, so no Seller Central lookup (and therefore no live
+ * agent browser session) is needed at all — this runs entirely server-side.
+ *
+ * Rather than mutate/redact the original raw comment (Zendesk's comment
+ * "redact" API only blanks out matched substrings with block characters —
+ * permanent, irreversible, and requires the "Agents can delete tickets"
+ * permission; the actual "Ticket Comments" API has no way to replace a
+ * comment's visible content with new text), this posts a SEPARATE clean
+ * public comment authored as the requester (same technique already proven
+ * in mergeNewTicketIntoPrimary_) with the buyer's real attachments re-hosted
+ * onto it. The original raw comment is left fully intact — zero data loss,
+ * fully auditable, nothing destructive.
+ ********************************/
+
+// Same inline style Amazon's template applies to the buyer's own message
+// text, confirmed identical (byte-for-byte on this substring) across every
+// JP/EN/DE sample checked — a couple of samples drop the single leading
+// space before "color: black" (seemingly whenever the message body is just
+// a bare URL), hence \s* rather than a literal space.
+const ABM_RAW_PRE_RE = /<pre[^>]*white-space:\s*-o-pre-wrap[^>]*>([\s\S]*?)<\/pre>/i;
+
+function decodeHtmlEntities_(s) {
+  return String(s || '')
+    .replace(/&nbsp;/gi, ' ')
+    .replace(/&#39;|&apos;/gi, "'")
+    .replace(/&quot;/gi, '"')
+    .replace(/&lt;/gi, '<')
+    .replace(/&gt;/gi, '>')
+    .replace(/&#(\d+);/g, (_, n) => String.fromCharCode(Number(n)))
+    .replace(/&#x([0-9a-f]+);/gi, (_, n) => String.fromCharCode(parseInt(n, 16)))
+    .replace(/&amp;/gi, '&'); // last: avoid double-decoding entities that start with &amp;
+}
+
+// Extracts just the buyer's own typed text from a raw ABM notification
+// email's html_body. Returns:
+//   null       — the <pre> marker wasn't found at all (not a raw ABM
+//                template — e.g. already cleaned, or a shape we haven't
+//                seen) — callers must NOT touch the comment in this case.
+//   ''         — marker found but empty (e.g. a photo-only message with no
+//                typed text) — callers should still surface a clean copy so
+//                the real attachments aren't stranded inside the raw wall
+//                of HTML, just with a placeholder line instead of blank text.
+//   non-empty  — the buyer's real message, tags stripped, entities decoded.
+function cleanAbmMessageText_(html) {
+  const m = ABM_RAW_PRE_RE.exec(html || '');
+  if (!m) return null;
+  const stripped = m[1].replace(/<[^>]+>/g, '');
+  return decodeHtmlEntities_(stripped).trim();
+}
+
+// Every auto-added clean comment embeds the source comment's own ID in this
+// exact phrase — doubles as a human-readable audit trail (which raw email
+// this text came from) AND as the idempotency check below, with no separate
+// tracking sheet needed.
+function abmCleanMarker_(sourceCommentId) {
+  return `[Amazon Buyer Message — auto-cleaned copy of comment ${sourceCommentId}]`;
+}
+
+function alreadyCleanedSourceIds_(comments) {
+  const ids = new Set();
+  const re = /auto-cleaned copy of comment (\d+)/g;
+  comments.forEach(c => {
+    const text = c.body || c.plain_body || '';
+    let m;
+    while ((m = re.exec(text)) !== null) ids.add(m[1]);
+  });
+  return ids;
+}
+
+// Scans a ticket for public, requester-authored comments that are still raw
+// ABM template and don't already have a clean copy, and adds one clean
+// public comment per such source comment — buyer's real text + re-hosted
+// real attachments, authored as the requester so it reads as their own
+// message. Fully idempotent (safe to re-run/backfill): each source comment
+// gets at most one clean copy, tracked via abmCleanMarker_/
+// alreadyCleanedSourceIds_ above. Covers both a ticket's own first
+// (creation-time) comment and any raw comments mergeNewTicketIntoPrimary_
+// posts onto an existing primary — same function handles both call sites.
+function cleanupExistingAbmTicket_(ticketId) {
+  const ticket = getTicket_(ticketId);
+  if (!ticket) return { status: 'not_found', ticketId };
+  const requester = getUser_(ticket.requester_id);
+  if (!requester) return { status: 'no_requester', ticketId };
+
+  const data = zdFetch_(`/api/v2/tickets/${ticketId}/comments.json?sort_order=asc`);
+  const comments = data.comments || [];
+  const done = alreadyCleanedSourceIds_(comments);
+
+  const cleaned = [];
+  comments.forEach(c => {
+    if (!c.public || c.author_id !== requester.id) return;
+    if (done.has(String(c.id))) return;
+    const cleanText = cleanAbmMessageText_(c.html_body || '');
+    if (cleanText === null) return; // not a raw ABM template comment — leave untouched
+
+    const uploadTokens = transferAttachments_(c.attachments);
+    const hasContent = cleanText || uploadTokens.length;
+    if (!hasContent) return; // empty message, no attachments — nothing worth surfacing
+
+    const bodyText = cleanText || '(메시지 텍스트 없음 — 첨부파일 참고)';
+    const comment = { body: `${abmCleanMarker_(c.id)}\n\n${bodyText}`, public: true, author_id: requester.id };
+    if (uploadTokens.length) comment.uploads = uploadTokens;
+
+    zdFetch_(`/api/v2/tickets/${ticketId}.json`, {
+      method: 'put',
+      payload: JSON.stringify({ ticket: { comment } })
+    });
+    cleaned.push({ sourceCommentId: c.id, attachmentsTransferred: uploadTokens.length, attachmentsTotal: (c.attachments || []).length });
+  });
+  return { status: 'ok', ticketId, cleaned };
+}
+
+// Manual runner — run from the Apps Script editor (bypasses the webhook/
+// secret entirely; calls the same logic directly). Used for backfilling
+// tickets created before this feature existed.
+function testCleanupOnTicket(ticketId) {
+  const result = cleanupExistingAbmTicket_(ticketId);
+  Logger.log(JSON.stringify(result, null, 2));
+  return result;
+}
+
 // Seller Central case ID embedded in the Amazon buyer proxy from-address,
 // e.g. "s0574jllj4n84kf+76c079d3-2f98-4aec-bc42-16aab22433ee@marketplace.amazon.co.jp".
 // null when the address has no such segment (older tickets, empty address).
@@ -228,7 +366,11 @@ function handleNewAbmTicket_(ticketId) {
 
   const primary = findPrimaryTicket_(requester.email, ticket);
   if (!primary) {
-    return { status: 'left_as_primary', ticketId };
+    // This ticket's own first comment is still the raw Amazon template —
+    // clean it up here too (see the "ABM inbound cleanup" section above),
+    // same as a merged follow-up gets below.
+    const cleanup = cleanupExistingAbmTicket_(ticketId);
+    return { status: 'left_as_primary', ticketId, cleanup };
   }
 
   // Zendesk's SEARCH index lags behind live ticket state — a search result's
@@ -244,12 +386,18 @@ function handleNewAbmTicket_(ticketId) {
   }
 
   const merge = mergeNewTicketIntoPrimary_(ticket, freshPrimary);
+  // The comment mergeNewTicketIntoPrimary_ just posted onto the primary
+  // carries the SAME raw Amazon template html_body as the source ticket's
+  // own first comment — clean it up on the primary right away, same
+  // function used for the standalone (left_as_primary) case above.
+  const cleanup = cleanupExistingAbmTicket_(freshPrimary.id);
   return {
     status: merge.wasReopened ? 'merged_reopened' : 'merged',
     ticketId,
     primaryTicketId: freshPrimary.id,
     attachmentsTransferred: merge.attachmentsTransferred,
-    attachmentsTotal: merge.attachmentsTotal
+    attachmentsTotal: merge.attachmentsTotal,
+    cleanup
   };
 }
 
@@ -265,6 +413,15 @@ function doPost(e) {
     }
 
     const body = JSON.parse(e.postData.contents || '{}');
+
+    // Secret-guarded on-demand backfill trigger — cleans up a ticket created
+    // before the inbound-cleanup feature existed (or any ticket the live
+    // webhook path missed for any reason). Idempotent, safe to call repeatedly.
+    if (body.action === 'cleanupTicket') {
+      const result = cleanupExistingAbmTicket_(body.ticketId);
+      return ContentService.createTextOutput(JSON.stringify(result))
+        .setMimeType(ContentService.MimeType.JSON);
+    }
 
     // Secret-guarded manual reconciliation trigger (for testing/on-demand runs).
     if (body.action === 'reconcile') {

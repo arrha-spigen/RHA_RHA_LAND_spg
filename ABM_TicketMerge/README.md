@@ -12,7 +12,7 @@ buyer, so agents see one thread per ABM conversation, matching Seller Central.
 
 **Script ID:** `1gJu9O-8MNYWVItLYsr48eym0afY1P9n8lUjSwM_p457DIisZLwOXIWAj`
 **Web app URL:** `https://script.google.com/macros/s/AKfycbz2hQMj97voADUPYv6YBHzjZaLsogj1osFhFNpny5iQXtKjBJpn8P2i1pW3Af-6M89ZcA/exec`
-**Current version:** 5 (reopen & merge, case-ID aware, index-lag guard, attachment transfer)
+**Current version:** 10 (adds inbound ABM message cleanup — see below)
 
 ## How it works
 
@@ -71,6 +71,61 @@ duplicate auto-closed.
 commented on in Zendesk, so if the buyer's previous ticket was already fully
 *closed* (not just solved) when they write again, a new primary is started.
 Solved is reopenable; closed is not.
+
+## Inbound ABM message cleanup (v10)
+
+Amazon's "You have received a message" notification email buries the buyer's
+own typed text inside a full marketing/legal HTML template (logo, order
+table, survey buttons, footer copyright, `commMgrTok`/`SPC-xxAmazon-...`
+tracking IDs) — the resulting ticket comment looks nothing like a normal
+claim, even though Zendesk's own inbound mail parsing already attaches the
+buyer's real photos/PDFs correctly (verified — no fix needed there).
+
+Investigated live 2026-07-21 by diffing the raw `html_body` of real ABM
+tickets across JP/EN/DE: every sample wraps the buyer's own text in exactly
+one `<pre>` block with an identical inline style regardless of marketplace/
+language — only the surrounding template strings are translated, this
+wrapper isn't. That makes it a reliable, locale-agnostic extraction anchor,
+so this runs entirely server-side — no Seller Central lookup, no live agent
+browser session needed.
+
+Zendesk's Comments API has no way to replace a comment's visible text (the
+"redact" endpoints only blank out matched substrings with block characters,
+permanently, and need the "Agents can delete tickets" permission) — so rather
+than mutate the original, this **adds a separate clean public comment**
+(customer's real message + attachments re-hosted onto it, authored as the
+requester) right after any raw-template comment is detected. The original is
+left fully intact: zero data loss, fully auditable via
+`[Amazon Buyer Message — auto-cleaned copy of comment {id}]` at the top of
+every clean comment, which also makes the whole thing idempotent (safe to
+re-run/backfill — each source comment gets at most one clean copy).
+
+Runs automatically from both existing webhook code paths:
+- `handleNewAbmTicket_`'s `left_as_primary` branch (a ticket's own first,
+  creation-time comment).
+- Right after `mergeNewTicketIntoPrimary_` (a merged follow-up posted onto an
+  existing primary carries the same raw template).
+
+**Manual backfill** (tickets created before this existed, or any ticket the
+live path missed) — from the Apps Script editor: `testCleanupOnTicket(ticketId)`.
+Remotely via the same secret-guarded webhook:
+```bash
+curl -X POST "$WEB_APP_URL?secret=$WEBHOOK_SECRET" \
+  -H "Content-Type: application/json" \
+  -d '{"action":"cleanupTicket","ticketId":1000154136}'
+```
+(GAS's own 302 redirect on this webapp's POST response doesn't resolve
+cleanly via `curl -L`/`urllib` — a known quirk, not a failure; `doPost`
+already executed server-side by the time the redirect returns. Verify by
+checking the ticket in Zendesk directly rather than trusting the curl output.)
+
+Verified end-to-end (2026-07-21) against real production data: backfilled
+tickets #1000153609/623/627/636 (14 real historical inbound messages across
+JP/EN, including one with an embedded link) — 100% correct extraction, zero
+duplicates on re-run. Attachment re-hosting verified separately with a real
+JPEG posted as a synthetic raw-template comment on #1000153636 — the new
+clean comment carried the exact same file (byte-identical size), original
+untouched.
 
 ## Files
 
