@@ -95,10 +95,10 @@ permanently, and need the "Agents can delete tickets" permission) — so rather
 than mutate the original, this **adds a separate clean public comment**
 (customer's real message + attachments re-hosted onto it, authored as the
 requester) right after any raw-template comment is detected. The original is
-left fully intact: zero data loss, fully auditable via
-`[Amazon Buyer Message — auto-cleaned copy of comment {id}]` at the top of
-every clean comment, which also makes the whole thing idempotent (safe to
-re-run/backfill — each source comment gets at most one clean copy).
+left fully intact: zero data loss. Idempotency (safe to re-run/backfill — each
+source comment gets at most one clean copy) is tracked via an `abm_cleaned_{id}`
+tag added to the ticket in the same API call that posts the clean comment —
+not visible text, so the public comment is just the buyer's real message.
 
 Runs automatically from both existing webhook code paths:
 - `handleNewAbmTicket_`'s `left_as_primary` branch (a ticket's own first,

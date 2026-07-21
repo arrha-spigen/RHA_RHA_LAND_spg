@@ -194,21 +194,35 @@ function cleanAbmMessageText_(html) {
   return decodeHtmlEntities_(stripped).trim();
 }
 
-// Every auto-added clean comment embeds the source comment's own ID in this
-// exact phrase — doubles as a human-readable audit trail (which raw email
-// this text came from) AND as the idempotency check below, with no separate
-// tracking sheet needed.
-function abmCleanMarker_(sourceCommentId) {
-  return `[Amazon Buyer Message — auto-cleaned copy of comment ${sourceCommentId}]`;
+// Idempotency tag for a cleaned source comment — added to the ticket's own
+// `additional_tags` (server-side merge, never clobbers existing tags) in the
+// SAME PUT that posts the clean comment. Previously this tracking marker was
+// embedded as a visible first line of the public comment itself ("[Amazon
+// Buyer Message — auto-cleaned copy of comment N]"), which showed up at the
+// top of every cleaned message in the ticket's own conversation thread —
+// moved to a tag instead so the public comment is just the buyer's real
+// message, nothing else, while still needing no separate tracking sheet.
+function abmCleanedTag_(sourceCommentId) {
+  return `abm_cleaned_${sourceCommentId}`;
 }
 
-function alreadyCleanedSourceIds_(comments) {
+function alreadyCleanedSourceIds_(ticket, comments) {
   const ids = new Set();
-  const re = /auto-cleaned copy of comment (\d+)/g;
-  comments.forEach(c => {
+  const tagRe = /^abm_cleaned_(\d+)$/;
+  (ticket.tags || []).forEach(t => {
+    const m = tagRe.exec(t);
+    if (m) ids.add(m[1]);
+  });
+  // Back-compat: tickets cleaned before this tag existed still carry the old
+  // visible "[Amazon Buyer Message — auto-cleaned copy of comment N]" marker
+  // in their clean comment's body instead of a tag — keep recognizing those
+  // too so this migration doesn't re-post duplicates on tickets cleaned under
+  // the old scheme. New cleanups only ever add the tag, never this text.
+  const legacyRe = /auto-cleaned copy of comment (\d+)/g;
+  (comments || []).forEach(c => {
     const text = c.body || c.plain_body || '';
     let m;
-    while ((m = re.exec(text)) !== null) ids.add(m[1]);
+    while ((m = legacyRe.exec(text)) !== null) ids.add(m[1]);
   });
   return ids;
 }
@@ -218,7 +232,7 @@ function alreadyCleanedSourceIds_(comments) {
 // public comment per such source comment — buyer's real text + re-hosted
 // real attachments, authored as the requester so it reads as their own
 // message. Fully idempotent (safe to re-run/backfill): each source comment
-// gets at most one clean copy, tracked via abmCleanMarker_/
+// gets at most one clean copy, tracked via abmCleanedTag_/
 // alreadyCleanedSourceIds_ above. Covers both a ticket's own first
 // (creation-time) comment and any raw comments mergeNewTicketIntoPrimary_
 // posts onto an existing primary — same function handles both call sites.
@@ -230,7 +244,7 @@ function cleanupExistingAbmTicket_(ticketId) {
 
   const data = zdFetch_(`/api/v2/tickets/${ticketId}/comments.json?sort_order=asc`);
   const comments = data.comments || [];
-  const done = alreadyCleanedSourceIds_(comments);
+  const done = alreadyCleanedSourceIds_(ticket, comments);
 
   const cleaned = [];
   comments.forEach(c => {
@@ -244,12 +258,12 @@ function cleanupExistingAbmTicket_(ticketId) {
     if (!hasContent) return; // empty message, no attachments — nothing worth surfacing
 
     const bodyText = cleanText || '(메시지 텍스트 없음 — 첨부파일 참고)';
-    const comment = { body: `${abmCleanMarker_(c.id)}\n\n${bodyText}`, public: true, author_id: requester.id };
+    const comment = { body: bodyText, public: true, author_id: requester.id };
     if (uploadTokens.length) comment.uploads = uploadTokens;
 
     zdFetch_(`/api/v2/tickets/${ticketId}.json`, {
       method: 'put',
-      payload: JSON.stringify({ ticket: { comment } })
+      payload: JSON.stringify({ ticket: { comment, additional_tags: [abmCleanedTag_(c.id)] } })
     });
     cleaned.push({ sourceCommentId: c.id, attachmentsTransferred: uploadTokens.length, attachmentsTotal: (c.attachments || []).length });
   });
