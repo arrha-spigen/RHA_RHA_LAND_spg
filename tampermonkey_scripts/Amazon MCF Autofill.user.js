@@ -1,6 +1,6 @@
 // ==UserScript==
 // @name         Amazon MCF Autofill
-// @version      1.4.2
+// @version      1.4.3
 // @updateURL    https://raw.githubusercontent.com/codingintheusa0402/spigen-gcx-automation/main/tampermonkey_scripts/Amazon%20MCF%20Autofill.user.js
 // @downloadURL  https://raw.githubusercontent.com/codingintheusa0402/spigen-gcx-automation/main/tampermonkey_scripts/Amazon%20MCF%20Autofill.user.js
 // @match        https://sellercentral.amazon.*/mcf/orders/create-order*
@@ -593,10 +593,13 @@ async function fetchOrderIdByEmail(email) {
       }
 
       // Parse fulfillable count from each result row; exclude amzn.* internal SKUs
+      // Quantity badge always leads with the number (e.g. "1,234 fulfillable" in English,
+      // "192 주문 처리 가능" in Korean) — match the leading digits instead of the localized
+      // unit text so this works regardless of the Seller Central UI language.
       const entries = components.map(comp => {
         const qtyEl = comp.querySelector('.search-result-component-quantity');
         const text = (qtyEl ? qtyEl.textContent : '').trim();
-        const m = text.match(/([\d,]+)\s+fulfillable/i);
+        const m = text.match(/^([\d,]+)/);
         const count = m ? parseInt(m[1].replace(/,/g, ''), 10) : 0;
         return { count, comp };
       }).filter(({ comp }) => !/\bamzn[.\-]/i.test(comp.textContent || ''));
