@@ -205,8 +205,70 @@ function uploadOnePlannedItem(planned) {
     throw new Error(JSON.stringify(json.errors));
   }
 
-  return { ok: true };
+  const itemId = json.data && json.data.create_item && json.data.create_item.id;
+
+  // Board automation stamps Created/Update 날짜 with today's date right after
+  // creation, overwriting what we just sent. Hand the item id and the sheet's
+  // real date values back to the sidebar so it can re-apply them once, after
+  // the whole upload loop finishes (see reapplyDateColumns below).
+  const dateFix = {};
+  [DATE_CREATED_COLUMN_ID, DATE_UPDATE_COLUMN_ID].forEach(colId => {
+    if (colId && planned.column_values[colId] != null) {
+      dateFix[colId] = planned.column_values[colId];
+    }
+  });
+
+  return { ok: true, itemId, dateFix };
 }
+
+/**
+ * Sidebar → final pass: re-writes Created 날짜 / Update 날짜 on every item
+ * just created, after the board's "when item created" automation has had
+ * time to stamp them with today's date. Call once, after the create loop
+ * (uploadOnePlannedItem) finishes for the whole batch.
+ */
+function reapplyDateColumns(entries) {
+  const apiKey = _requireMondayApiKey_();
+
+  if (DRY_RUN) return { ok: true, dryRun: true, fixed: 0 };
+
+  const usable = (entries || []).filter(
+    e => e && e.itemId && e.dateFix && Object.keys(e.dateFix).length
+  );
+  if (!usable.length) return { ok: true, fixed: 0 };
+
+  Utilities.sleep(DATE_FIX_DELAY_MS);
+
+  const BATCH_SIZE = 20;
+  let fixed = 0;
+  const errors = [];
+
+  for (let i = 0; i < usable.length; i += BATCH_SIZE) {
+    const batch = usable.slice(i, i + BATCH_SIZE);
+
+    const varDefs = batch.map((_, j) => `$i${j}: ID!, $cv${j}: JSON!`).join(', ');
+
+    const aliases = batch.map((_, j) =>
+      `fix${j}: change_multiple_column_values(board_id: "${BOARD_ID}", item_id: $i${j}, column_values: $cv${j}) { id }`
+    ).join('\n      ');
+
+    const variables = {};
+    batch.forEach((e, j) => {
+      variables[`i${j}`] = String(e.itemId);
+      variables[`cv${j}`] = JSON.stringify(e.dateFix);
+    });
+
+    try {
+      mondayCallRawWithRetry(apiKey, `mutation FixDates(${varDefs}) { ${aliases} }`, variables);
+      fixed += batch.length;
+    } catch (e) {
+      errors.push(e.message || String(e));
+    }
+  }
+
+  return { ok: errors.length === 0, fixed, errors };
+}
+
 function uiRunProductNow() {
   SpreadsheetApp.getActive().toast(
     'Starting Product task…',

@@ -21,6 +21,14 @@ const COUNTRY_COLUMN_ID = 'color_mm0fcch4';
 const PHOTO_COLUMN_ID = 'color_mm0ffgz8';
 const CHANNEL_COLUMN_ID = 'color_mm0ft7a5';
 
+// Board has an active "when item created, set Created/Update 날짜 to today"
+// automation that overwrites these two columns right after create_item runs.
+// We re-apply the sheet's real values in a follow-up call — see
+// reapplyDateColumns() in UI.js.
+const DATE_CREATED_COLUMN_ID = 'date_mm0f80th'; // "Created 날짜"
+const DATE_UPDATE_COLUMN_ID = 'date_mm0fyd4a';  // "Update 날짜"
+const DATE_FIX_DELAY_MS = 3000; // grace period before the re-apply pass, so it lands after the automation fires
+
 
 /* ===== SHEET HEADER NAMES ===== */
 const ITEM_NAME_HEADER = 'Review Title';

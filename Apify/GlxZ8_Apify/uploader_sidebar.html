@@ -243,6 +243,7 @@
         log('Starting upload…');
 
         let okCount = 0, failCount = 0;
+        const dateFixQueue = [];
 
         for (let i = 0; i < plan.length; i++) {
           const item = plan[i];
@@ -252,6 +253,9 @@
             if (res && res.ok) {
               okCount++;
               setStatus(i, 'ok', 'Success');
+              if (res.itemId && res.dateFix && Object.keys(res.dateFix).length) {
+                dateFixQueue.push({ itemId: res.itemId, dateFix: res.dateFix });
+              }
             } else {
               failCount++;
               const err = (res && res.error) ? res.error : 'Unknown error';
@@ -270,6 +274,18 @@
         }
 
         log(`Done. Success: ${okCount}, Failed: ${failCount}`);
+
+        if (dateFixQueue.length) {
+          log(`Re-applying Created 날짜/Update 날짜 on ${dateFixQueue.length} item(s) (board automation overwrites them on creation)…`);
+          try {
+            const fixRes = await gsr('reapplyDateColumns', dateFixQueue);
+            const errNote = fixRes.errors && fixRes.errors.length ? `, errors: ${fixRes.errors.length}` : '';
+            log(`Date re-apply done. Fixed: ${fixRes.fixed || 0}${errNote}`);
+          } catch (e) {
+            log('Date re-apply failed: ' + (e && e.message ? e.message : e));
+          }
+        }
+
         setBusy('runBtn', false);
       }
 
