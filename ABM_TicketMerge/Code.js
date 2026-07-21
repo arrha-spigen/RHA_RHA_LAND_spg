@@ -194,16 +194,34 @@ function cleanAbmMessageText_(html) {
   return decodeHtmlEntities_(stripped).trim();
 }
 
-// Idempotency tag for a cleaned source comment — added to the ticket's own
-// `additional_tags` (server-side merge, never clobbers existing tags) in the
-// SAME PUT that posts the clean comment. Previously this tracking marker was
-// embedded as a visible first line of the public comment itself ("[Amazon
-// Buyer Message — auto-cleaned copy of comment N]"), which showed up at the
-// top of every cleaned message in the ticket's own conversation thread —
-// moved to a tag instead so the public comment is just the buyer's real
-// message, nothing else, while still needing no separate tracking sheet.
+// Idempotency tag for a cleaned source comment. Previously this tracking
+// marker was embedded as a visible first line of the public comment itself
+// ("[Amazon Buyer Message — auto-cleaned copy of comment N]"), which showed
+// up at the top of every cleaned message in the ticket's own conversation
+// thread — moved to a tag instead so the public comment is just the buyer's
+// real message, nothing else.
 function abmCleanedTag_(sourceCommentId) {
   return `abm_cleaned_${sourceCommentId}`;
+}
+
+// Adds a tag to a ticket WITHOUT replacing its existing tags. The single-
+// ticket update endpoint (PUT /api/v2/tickets/{id}.json) has no
+// `additional_tags` field — only a plain `tags` field that REPLACES the
+// whole array (confirmed via Zendesk's own API docs after the first version
+// of this fix silently no-opped: passing `additional_tags` alongside
+// `comment` in that same PUT was just an unrecognized/ignored field, so NO
+// tag was ever actually added in production, and every subsequent cleanup
+// run had zero idempotency signal — reproduced live on ticket #1000153636,
+// where two ABM messages 23 seconds apart each triggered their own
+// cleanupExistingAbmTicket_ run, both saw the first message as un-cleaned,
+// and both posted a duplicate clean copy of it). Adding tags without
+// clobbering existing ones requires the DEDICATED tags endpoint instead:
+// PUT /api/v2/tickets/{id}/tags.json with body {tags: [...]}.
+function addTicketTag_(ticketId, tag) {
+  zdFetch_(`/api/v2/tickets/${ticketId}/tags.json`, {
+    method: 'put',
+    payload: JSON.stringify({ tags: [tag] })
+  });
 }
 
 function alreadyCleanedSourceIds_(ticket, comments) {
@@ -236,38 +254,72 @@ function alreadyCleanedSourceIds_(ticket, comments) {
 // alreadyCleanedSourceIds_ above. Covers both a ticket's own first
 // (creation-time) comment and any raw comments mergeNewTicketIntoPrimary_
 // posts onto an existing primary — same function handles both call sites.
+//
+// LockService-guarded: two ABM messages arriving seconds apart each trigger
+// their own call to this function on the SAME ticket (handleNewAbmTicket_ /
+// mergeNewTicketIntoPrimary_ per message) — without a lock, both could read
+// the same "not yet cleaned" state before either had written its tag,
+// racing into a duplicate clean copy of the same source comment (exactly
+// what happened live on #1000153636 before this fix).
 function cleanupExistingAbmTicket_(ticketId) {
-  const ticket = getTicket_(ticketId);
-  if (!ticket) return { status: 'not_found', ticketId };
-  const requester = getUser_(ticket.requester_id);
-  if (!requester) return { status: 'no_requester', ticketId };
+  const lock = LockService.getScriptLock();
+  if (!lock.tryLock(20000)) return { status: 'locked', ticketId };
+  try {
+    const ticket = getTicket_(ticketId);
+    if (!ticket) return { status: 'not_found', ticketId };
+    const requester = getUser_(ticket.requester_id);
+    if (!requester) return { status: 'no_requester', ticketId };
 
-  const data = zdFetch_(`/api/v2/tickets/${ticketId}/comments.json?sort_order=asc`);
-  const comments = data.comments || [];
-  const done = alreadyCleanedSourceIds_(ticket, comments);
+    const data = zdFetch_(`/api/v2/tickets/${ticketId}/comments.json?sort_order=asc`);
+    const comments = data.comments || [];
+    const done = alreadyCleanedSourceIds_(ticket, comments);
+    // Defense in depth, independent of tag/marker bookkeeping: if a public,
+    // requester-authored comment with this EXACT clean text already exists,
+    // treat it as already cleaned regardless — this is what actually caught
+    // (and would have prevented) the #1000153636 duplicates, since the tag
+    // write was silently failing at the time. Trade-off: a buyer who
+    // legitimately repeats the exact same short message verbatim would only
+    // get one clean copy — acceptable, this is a safety net, not the
+    // primary mechanism (the tag is).
+    const existingBodies = new Set(
+      comments.filter(c => c.public && c.author_id === requester.id)
+        .map(c => (c.plain_body || c.body || '').trim())
+    );
 
-  const cleaned = [];
-  comments.forEach(c => {
-    if (!c.public || c.author_id !== requester.id) return;
-    if (done.has(String(c.id))) return;
-    const cleanText = cleanAbmMessageText_(c.html_body || '');
-    if (cleanText === null) return; // not a raw ABM template comment — leave untouched
+    const cleaned = [];
+    comments.forEach(c => {
+      if (!c.public || c.author_id !== requester.id) return;
+      if (done.has(String(c.id))) return;
+      const cleanText = cleanAbmMessageText_(c.html_body || '');
+      if (cleanText === null) return; // not a raw ABM template comment — leave untouched
 
-    const uploadTokens = transferAttachments_(c.attachments);
-    const hasContent = cleanText || uploadTokens.length;
-    if (!hasContent) return; // empty message, no attachments — nothing worth surfacing
+      const uploadTokens = transferAttachments_(c.attachments);
+      const hasContent = cleanText || uploadTokens.length;
+      if (!hasContent) return; // empty message, no attachments — nothing worth surfacing
 
-    const bodyText = cleanText || '(메시지 텍스트 없음 — 첨부파일 참고)';
-    const comment = { body: bodyText, public: true, author_id: requester.id };
-    if (uploadTokens.length) comment.uploads = uploadTokens;
+      const bodyText = cleanText || '(메시지 텍스트 없음 — 첨부파일 참고)';
+      if (existingBodies.has(bodyText.trim())) {
+        // A clean copy already exists (created before the tag mechanism was
+        // fixed) — just backfill the tag, don't post another one.
+        addTicketTag_(ticketId, abmCleanedTag_(c.id));
+        return;
+      }
 
-    zdFetch_(`/api/v2/tickets/${ticketId}.json`, {
-      method: 'put',
-      payload: JSON.stringify({ ticket: { comment, additional_tags: [abmCleanedTag_(c.id)] } })
+      const comment = { body: bodyText, public: true, author_id: requester.id };
+      if (uploadTokens.length) comment.uploads = uploadTokens;
+
+      zdFetch_(`/api/v2/tickets/${ticketId}.json`, {
+        method: 'put',
+        payload: JSON.stringify({ ticket: { comment } })
+      });
+      addTicketTag_(ticketId, abmCleanedTag_(c.id));
+      existingBodies.add(bodyText.trim());
+      cleaned.push({ sourceCommentId: c.id, attachmentsTransferred: uploadTokens.length, attachmentsTotal: (c.attachments || []).length });
     });
-    cleaned.push({ sourceCommentId: c.id, attachmentsTransferred: uploadTokens.length, attachmentsTotal: (c.attachments || []).length });
-  });
-  return { status: 'ok', ticketId, cleaned };
+    return { status: 'ok', ticketId, cleaned };
+  } finally {
+    lock.releaseLock();
+  }
 }
 
 // Manual runner — run from the Apps Script editor (bypasses the webhook/
