@@ -6,7 +6,7 @@ Tampermonkey userscripts for the Spigen GCX Amazon operations workflow.
 
 ## Scripts
 
-### GCX Reply (`v3.4.2`)
+### GCX Reply (`v3.4.3`)
 **Matches:** `spigenhelp.zendesk.com/agent/tickets/*`
 
 Floating panel on Zendesk tickets. Fetches Amazon order data and Spigen product info, then fills all relevant ticket fields in one click. Also handles Amazon Buyer Message (ABM) replies and "No Response Needed" directly against Seller Central — no ChannelReply dependency.
