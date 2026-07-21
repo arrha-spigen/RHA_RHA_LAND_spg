@@ -12,7 +12,7 @@ buyer, so agents see one thread per ABM conversation, matching Seller Central.
 
 **Script ID:** `1gJu9O-8MNYWVItLYsr48eym0afY1P9n8lUjSwM_p457DIisZLwOXIWAj`
 **Web app URL:** `https://script.google.com/macros/s/AKfycbz2hQMj97voADUPYv6YBHzjZaLsogj1osFhFNpny5iQXtKjBJpn8P2i1pW3Af-6M89ZcA/exec`
-**Current version:** 10 (adds inbound ABM message cleanup — see below)
+**Current version:** 12 (moves the inbound-cleanup idempotency marker from visible comment text to an `abm_cleaned_{id}` ticket tag — see below)
 
 ## How it works
 
