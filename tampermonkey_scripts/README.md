@@ -6,7 +6,7 @@ Tampermonkey userscripts for the Spigen GCX Amazon operations workflow.
 
 ## Scripts
 
-### GCX Reply (`v3.4.3`)
+### GCX Reply (`v3.5.0`)
 **Matches:** `spigenhelp.zendesk.com/agent/tickets/*`
 
 Floating panel on Zendesk tickets. Fetches Amazon order data and Spigen product info, then fills all relevant ticket fields in one click. Also handles Amazon Buyer Message (ABM) replies and "No Response Needed" directly against Seller Central — no ChannelReply dependency.
@@ -40,8 +40,9 @@ Floating panel on Zendesk tickets. Fetches Amazon order data and Spigen product 
 - Also runs its own embedded MCF-page autofill (SKU search + auto-select highest-fulfillable-quantity result, shipping speed, Order ID lookup) independent of the standalone MCF Autofill script below
 
 **Amazon Buyer Message (ABM) handling:**
-- "Mark as NRN" button calls Seller Central's own internal messaging API directly (no ChannelReply) to mark a case resolved
+- "Mark as NRN" button calls Seller Central's own internal messaging API directly (no ChannelReply) to mark a case resolved — works on any ABM ticket, order or not (case resolved from the buyer proxy address's embedded case ID)
 - Public replies to ABM tickets are auto-relayed to the matching Seller Central case via the agent's own SC session; a reconciliation sweep catches replies that failed to relay (no SC session, page not open, etc.)
+- Relay success/failure toasts and the floating "N replies not yet delivered" badge can be muted per-agent (⚙ → Alerts → ABM 전송 알림); the panel header's static **ABM** button always shows the undelivered count and opens the full relay-status log (per-ticket links, Retry, Mark delivered) on demand
 - Persistent banner warns when a required marketplace's Seller Central login session is missing, with direct login links
 
 **Panel UX:**

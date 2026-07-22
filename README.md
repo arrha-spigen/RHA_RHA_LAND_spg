@@ -103,7 +103,7 @@ spigen-gcx-automation/
 
 | Project | Description | README |
 |---------|-------------|--------|
-| [tampermonkey_scripts](tampermonkey_scripts/) | **GCX Reply** (`v3.4.3`) — Zendesk order/product lookup panel, Auto-Fill, MCF handoff, ABM auto-relay + NRN. **Amazon MCF Autofill** (`v1.4.3`) — EU Seller Central MCF order-page autofill. **Amazon JP MCF Autofill** (`v1.5.2`) — JP variant. **Amazon Invoice Automation** (`v1.5`) — Amazon.de invoice download. Install `.user.js` files via Tampermonkey Dashboard → Import. | [README](tampermonkey_scripts/README.md) |
+| [tampermonkey_scripts](tampermonkey_scripts/) | **GCX Reply** (`v3.5.0`) — Zendesk order/product lookup panel, Auto-Fill, MCF handoff, ABM auto-relay + NRN. **Amazon MCF Autofill** (`v1.4.3`) — EU Seller Central MCF order-page autofill. **Amazon JP MCF Autofill** (`v1.5.2`) — JP variant. **Amazon Invoice Automation** (`v1.5`) — Amazon.de invoice download. Install `.user.js` files via Tampermonkey Dashboard → Import. | [README](tampermonkey_scripts/README.md) |
 | [gcx-reply-extension](gcx-reply-extension/) | Native Chrome extension (MV3) port of GCX Reply — in-progress migration off Tampermonkey; not yet feature-complete (MCF-page autofill code is currently dead — not wired into `content_scripts.matches`). Dev/testing only, load unpacked. | [README](gcx-reply-extension/README.md) |
 
 ---
