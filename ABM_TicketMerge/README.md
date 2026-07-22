@@ -12,7 +12,7 @@ buyer, so agents see one thread per ABM conversation, matching Seller Central.
 
 **Script ID:** `1gJu9O-8MNYWVItLYsr48eym0afY1P9n8lUjSwM_p457DIisZLwOXIWAj`
 **Web app URL:** `https://script.google.com/macros/s/AKfycbz2hQMj97voADUPYv6YBHzjZaLsogj1osFhFNpny5iQXtKjBJpn8P2i1pW3Af-6M89ZcA/exec`
-**Current version:** 13 (fixes v12's tag write, which was silently a no-op — adds tags via the dedicated tags endpoint, plus a lock guard against concurrent cleanup races — see below)
+**Current version:** 18 (redacts the raw Amazon-block comment's text after cleaning it, and auto-fills Order ID / Customer Full Name / Country / Amazon Fulfillment Methods on new ABM tickets — see below)
 
 ## How it works
 
@@ -89,16 +89,32 @@ wrapper isn't. That makes it a reliable, locale-agnostic extraction anchor,
 so this runs entirely server-side — no Seller Central lookup, no live agent
 browser session needed.
 
-Zendesk's Comments API has no way to replace a comment's visible text (the
-"redact" endpoints only blank out matched substrings with block characters,
-permanently, and need the "Agents can delete tickets" permission) — so rather
-than mutate the original, this **adds a separate clean public comment**
-(customer's real message + attachments re-hosted onto it, authored as the
-requester) right after any raw-template comment is detected. The original is
-left fully intact: zero data loss. Idempotency (safe to re-run/backfill — each
-source comment gets at most one clean copy) is tracked via an `abm_cleaned_{id}`
-tag added to the ticket in the same API call that posts the clean comment —
-not visible text, so the public comment is just the buyer's real message.
+Zendesk's Comments API has no way to *replace* a comment's visible text, so
+this **adds a separate clean public comment** (customer's real message +
+attachments re-hosted onto it, authored as the requester) right after any
+raw-template comment is detected, then **redacts the raw original's text**
+via the comment "redact" endpoint (v18+) — permanent, blanks matched
+substrings with block characters, requires the account's admin role.
+Agents only ever see the clean message going forward. Idempotency (safe to
+re-run/backfill — each source comment gets at most one clean copy) is
+tracked via an `abm_cleaned_{id}` tag added to the ticket, not visible text.
+
+The redact step has real constraints, discovered live: it 400s if the text
+contains a newline (the raw email's plain_body is split into per-line calls
+instead), a too-short/generic line would redact that substring EVERYWHERE
+in the comment (guarded with a minimum length), and Zendesk enforces a
+**per-ticket rolling-window update quota** (~30, resets ~5-6 min) shared by
+every write against that ticket — so redaction is capped to one shared
+budget per cleanup run, prioritizing the buyer's message text and the
+structural markers ("You have received a message", Order ID/ASIN/Product
+Name) over footer boilerplate. Anything that doesn't fit the budget
+self-heals on the next run.
+
+**v18 also auto-fills Order ID / Customer Full Name / Country / Amazon
+Fulfillment Methods** on the ticket from the same order-lookup GCX Reply's
+own Auto-Fill button uses (`GCXReply_GAS`'s `?orderId=` endpoint) — only
+ever fills fields that are currently empty, never overwrites an agent's or
+earlier run's value.
 
 Runs automatically from both existing webhook code paths:
 - `handleNewAbmTicket_`'s `left_as_primary` branch (a ticket's own first,
