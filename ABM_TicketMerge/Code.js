@@ -147,15 +147,20 @@ function transferAttachments_(attachments) {
  * extraction anchor, so no Seller Central lookup (and therefore no live
  * agent browser session) is needed at all — this runs entirely server-side.
  *
- * Rather than mutate/redact the original raw comment (Zendesk's comment
- * "redact" API only blanks out matched substrings with block characters —
- * permanent, irreversible, and requires the "Agents can delete tickets"
- * permission; the actual "Ticket Comments" API has no way to replace a
- * comment's visible content with new text), this posts a SEPARATE clean
- * public comment authored as the requester (same technique already proven
- * in mergeNewTicketIntoPrimary_) with the buyer's real attachments re-hosted
- * onto it. The original raw comment is left fully intact — zero data loss,
- * fully auditable, nothing destructive.
+ * Zendesk's "Ticket Comments" API has no way to replace a comment's visible
+ * content with new text, so this posts a SEPARATE clean public comment
+ * authored as the requester (same technique already proven in
+ * mergeNewTicketIntoPrimary_) with the buyer's real attachments re-hosted
+ * onto it — then redacts the raw original's text via the comment "redact"
+ * API (PUT .../comments/{id}/redact), which blanks out the matched text
+ * with block characters (▇). This IS permanent/irreversible — confirmed
+ * working live 2026-07-22 with this account's admin role (an earlier
+ * attempt on a different ticket had 400'd for an undiagnosed reason).
+ * User explicitly confirmed this trade-off (agents should only ever see the
+ * clean message, not the raw Amazon template) over the original "zero data
+ * loss" design this feature shipped with — the original text is genuinely
+ * gone after this, not just hidden; only the comment's existence, its
+ * attachments, and the new clean copy survive.
  ********************************/
 
 // Same inline style Amazon's template applies to the buyer's own message
@@ -224,6 +229,88 @@ function addTicketTag_(ticketId, tag) {
   });
 }
 
+// Blanks a comment's visible text to block characters (▇) — PERMANENT,
+// irreversible. Used right after posting a clean copy of a raw ABM template
+// comment, so agents only ever see the clean message going forward, not the
+// full Amazon marketing-template wall of text. Attachments are untouched
+// (confirmed live: redacting a comment with a photo left the photo intact,
+// only the text body was blanked). Requires the exact current text/plain_body
+// — the endpoint does a substring match and only blanks what matches; passing
+// the wrong text would silently redact nothing.
+// Confirmed live (2026-07-22, ticket #1000154560): the redact endpoint 400s
+// the instant `text` contains a newline character — the EXACT same request
+// with the \n removed succeeds. The raw ABM email's plain_body is a
+// multi-line wall of text, so it can't be redacted in one call. Redact does
+// a substring match-and-replace within the comment's CURRENT stored content
+// (confirmed: passing just "Order ID:" correctly blanked only that word,
+// leaving the rest of that line and the whole rest of the comment intact) —
+// so this splits into lines and redacts each one with its own call.
+//
+// Minimum length guard: a trimmed line that reduces to something very short
+// and generic (a lone digit, "#", etc. — e.g. the item table's quantity
+// cell) would redact EVERY occurrence of that substring anywhere in the
+// comment, not just that cell — confirmed live: manually testing a short
+// slice against this same ticket accidentally blanked stray digits inside
+// unrelated numbers ("L-1855 Luxembourg" → "L-▇855 Luxembourg", matching a
+// lone "1" that also happened to appear in the footer's legal address).
+// Short/generic tokens like that aren't sensitive content anyway, so
+// skipping them is a safe trade-off.
+//
+// Shared budget + priority ordering: also confirmed live — Zendesk enforces
+// a PER-TICKET rolling-window update quota (`zendesk-ratelimit-per-ticket-
+// updates: total=30`, resets ~5-6 min), shared with EVERY write ANY call
+// makes on that ticket — the clean-copy comment post, the tag add, up to 4
+// field-auto-fill custom_field PUTs, AND every redact call across EVERY
+// comment processed in one cleanupExistingAbmTicket_ run. A single raw ABM
+// email's plain_body can split into 25-30+ distinct lines on its own — a
+// per-comment cap alone still blew through the quota the moment a ticket
+// had 2+ un-redacted raw comments backfilling at once (confirmed live on
+// #1000154560, a 3-raw-comment backfill case: capping at 15 lines/comment
+// still 429'd on the 3rd comment, since 15+15 already used up the ticket's
+// entire ~30-update budget for that run). Callers now pass one shared
+// `budget` object (see cleanupExistingAbmTicket_) so the total redact calls
+// across the WHOLE run stay bounded, however many comments need it — any
+// comment whose budget runs out this run just stays partially/un-redacted
+// until the NEXT run (still un-tagged-for-redaction, so it's naturally
+// retried — this self-heals over however many runs it takes, one ABM
+// ticket's backfill at a time). Within whatever budget is left, priority
+// goes to the buyer's own message text (`priorityText`, the already-
+// extracted clean message) and the structural markers that most make this
+// "look like the Amazon template" — Order ID/ASIN/Product Name labels, the
+// "You have received a message" header — ahead of lower-value legal/footer
+// boilerplate.
+function redactCommentText_(ticketId, commentId, text, priorityText, budget) {
+  if (!text || !budget || budget.remaining <= 0) return;
+  const MIN_LINE_LEN = 4;
+  const STRUCTURAL_MARKERS = ['you have received a message', 'order id', 'asin', 'product name', 'message:'];
+
+  const allLines = Array.from(new Set(
+    String(text).split('\n').map(l => l.trim()).filter(l => l.length >= MIN_LINE_LEN)
+  ));
+  const isStructural = l => STRUCTURAL_MARKERS.some(m => l.toLowerCase().startsWith(m));
+
+  const priority = (priorityText && priorityText.trim() && priorityText.indexOf('\n') === -1)
+    ? [priorityText.trim()] : [];
+  const lines = Array.from(new Set([
+    ...priority,
+    ...allLines.filter(isStructural),
+    ...allLines.filter(l => !isStructural(l)),
+  ])).slice(0, budget.remaining);
+
+  for (const line of lines) {
+    if (budget.remaining <= 0) break;
+    try {
+      zdFetch_(`/api/v2/tickets/${ticketId}/comments/${commentId}/redact`, {
+        method: 'put',
+        payload: JSON.stringify({ text: line })
+      });
+      budget.remaining--;
+    } catch (e) {
+      Logger.log(`redactCommentText_: line failed, skipping — ${e.message}`);
+    }
+  }
+}
+
 function alreadyCleanedSourceIds_(ticket, comments) {
   const ids = new Set();
   const tagRe = /^abm_cleaned_(\d+)$/;
@@ -245,6 +332,103 @@ function alreadyCleanedSourceIds_(ticket, comments) {
   return ids;
 }
 
+// ── Auto-fill ticket fields from the order GCX Reply's Auto-Fill would resolve ──
+// User's ask: Order ID / Customer Full Name / Amazon Fulfillment Methods /
+// Country should already be filled in by the time an agent opens a new ABM
+// ticket, not require them to click GCX Reply's Auto-Fill button first — only
+// the buyer's actual message should read as "what was received."
+//
+// Field IDs must match tampermonkey_scripts/GCX Reply.user.js's ZD constant
+// exactly (same Zendesk instance, same custom fields).
+const ZD_ORDER_ID    = 360021934132;
+const ZD_CUST_NAME   = 360021999951;
+const ZD_COUNTRY     = 4513936822297;
+const ZD_FULFILLMENT = 900002781823;
+
+// Mirrors GCX Reply's COUNTRY_MAP exactly — must match, since these are the
+// literal Zendesk tagger field option values (confirmed live against
+// ticket_fields/4513936822297.json: de/uk/fr/it/es/nl/se/ie/pl/tr/be/in/jp/
+// sg/au/us/ca/mx/kr).
+const ABM_COUNTRY_MAP = {
+  US: 'us', GB: 'uk', DE: 'de', FR: 'fr', IT: 'it', ES: 'es', JP: 'jp',
+  NL: 'nl', SE: 'se', IE: 'ie', PL: 'pl', TR: 'tr', BE: 'be', IN: 'in',
+  SG: 'sg', AU: 'au', CA: 'ca', MX: 'mx', KR: 'kr',
+};
+
+// Calls GCX Reply's OWN order-lookup endpoint (GCXReply_GAS's `?orderId=`,
+// same SP-API-backed data GCX Reply's Auto-Fill button uses) rather than
+// re-implementing SP-API SigV4 signing in this project too.
+function fetchGcxOrderData_(orderId) {
+  const res = UrlFetchApp.fetch(`${GCX_GAS_URL}?orderId=${encodeURIComponent(orderId)}`,
+    { muteHttpExceptions: true, followRedirects: true });
+  try {
+    const d = JSON.parse(res.getContentText());
+    return d && !d.error ? d : null;
+  } catch (_) { return null; }
+}
+
+// Same precedence GCX Reply's own Auto-Fill uses (buildAndShow's
+// fulfillmentReady): a PAN EU seller SKU suffix wins regardless of
+// FulfillmentChannel; otherwise AFN→fba, MFN→merchant__fbm_. Confirmed live
+// against ticket_fields/900002781823.json for the exact tag values.
+function abmFulfillmentTag_(fulfillmentChannel, sellerSku) {
+  if (/pan|eup/i.test(sellerSku || '')) return 'pan_eu';
+  if (fulfillmentChannel === 'AFN') return 'fba';
+  if (fulfillmentChannel === 'MFN') return 'merchant__fbm_';
+  return null;
+}
+
+// Fills Order ID / Customer Full Name / Country / Amazon Fulfillment Methods
+// from the order GCX Reply's own Auto-Fill would resolve — but ONLY fields
+// that are CURRENTLY EMPTY, so this never overwrites a value an agent (or an
+// earlier run) already set. Safe/idempotent to call on every cleanup run;
+// no-ops instantly (no HTTP calls) once all 4 fields are already populated.
+function autoFillAbmTicketFields_(ticket, orderId) {
+  if (!orderId) return;
+  const cf = ticket.custom_fields || [];
+  const valueOf_ = id => { const f = cf.find(x => x.id === id); return f ? f.value : null; };
+  const needs = {
+    orderId:     !valueOf_(ZD_ORDER_ID),
+    custName:    !valueOf_(ZD_CUST_NAME),
+    country:     !valueOf_(ZD_COUNTRY),
+    fulfillment: !valueOf_(ZD_FULFILLMENT),
+  };
+  if (!needs.orderId && !needs.custName && !needs.country && !needs.fulfillment) return;
+
+  const data = fetchGcxOrderData_(orderId);
+  if (!data) return; // order lookup failed/unavailable — leave fields as-is, nothing to fill with
+
+  const custom_fields = [];
+  if (needs.orderId) custom_fields.push({ id: ZD_ORDER_ID, value: orderId });
+  if (needs.custName) {
+    // Falls back to the requester's name (what Zendesk parsed from the ABM
+    // email's From-name) when SP-API has no BuyerName — same fallback
+    // ladder GCX Reply's own panel uses.
+    const name = (data.buyer && data.buyer.BuyerName) || (ticket.via && ticket.via.source && ticket.via.source.from && ticket.via.source.from.name) || null;
+    if (name) custom_fields.push({ id: ZD_CUST_NAME, value: name });
+  }
+  if (needs.country) {
+    const countryVal = ABM_COUNTRY_MAP[data.address && data.address.CountryCode];
+    if (countryVal) custom_fields.push({ id: ZD_COUNTRY, value: countryVal });
+  }
+  if (needs.fulfillment) {
+    const sellerSku = data.items && data.items[0] ? data.items[0].SellerSKU : '';
+    const fv = abmFulfillmentTag_(data.order && data.order.FulfillmentChannel, sellerSku);
+    if (fv) custom_fields.push({ id: ZD_FULFILLMENT, value: fv });
+  }
+  if (!custom_fields.length) return;
+
+  // Confirmed live (2026-07-22): a partial `custom_fields` array in a ticket
+  // PUT updates ONLY the listed field IDs — every other custom field on the
+  // ticket is left untouched (unlike `tags`, which replaces the whole array;
+  // see addTicketTag_'s history of getting this exact distinction wrong for
+  // a different field).
+  zdFetch_(`/api/v2/tickets/${ticket.id}.json`, {
+    method: 'put',
+    payload: JSON.stringify({ ticket: { custom_fields } })
+  });
+}
+
 // Scans a ticket for public, requester-authored comments that are still raw
 // ABM template and don't already have a clean copy, and adds one clean
 // public comment per such source comment — buyer's real text + re-hosted
@@ -254,6 +438,8 @@ function alreadyCleanedSourceIds_(ticket, comments) {
 // alreadyCleanedSourceIds_ above. Covers both a ticket's own first
 // (creation-time) comment and any raw comments mergeNewTicketIntoPrimary_
 // posts onto an existing primary — same function handles both call sites.
+// Also auto-fills Order ID/Customer Full Name/Country/Amazon Fulfillment
+// Methods (see autoFillAbmTicketFields_) — only empty fields, every run.
 //
 // LockService-guarded: two ABM messages arriving seconds apart each trigger
 // their own call to this function on the SAME ticket (handleNewAbmTicket_ /
@@ -269,6 +455,14 @@ function cleanupExistingAbmTicket_(ticketId) {
     if (!ticket) return { status: 'not_found', ticketId };
     const requester = getUser_(ticket.requester_id);
     if (!requester) return { status: 'no_requester', ticketId };
+
+    // ticket.description is Zendesk's own copy of the ticket's originating
+    // comment's plain text — for an ABM ticket that's the raw "You have
+    // received a message" email, which always embeds the Order ID (confirmed
+    // live on #1000154560: description contains "402-1366488-5457149"
+    // verbatim). Same regex handleNewAbmTicket_/relayAbmReply_ use elsewhere.
+    const orderIdMatch = (ticket.description || '').match(/\b(\d{3}-\d{7}-\d{7})\b/);
+    autoFillAbmTicketFields_(ticket, orderIdMatch ? orderIdMatch[1] : null);
 
     const data = zdFetch_(`/api/v2/tickets/${ticketId}/comments.json?sort_order=asc`);
     const comments = data.comments || [];
@@ -286,12 +480,31 @@ function cleanupExistingAbmTicket_(ticketId) {
         .map(c => (c.plain_body || c.body || '').trim())
     );
 
+    // Shared across every comment processed THIS run — see redactCommentText_
+    // for why this can't be a per-comment cap. 20 (not 30) leaves headroom
+    // for the tag add / comment post / field auto-fill PUTs this same run
+    // may also make against the ticket's shared per-ticket quota.
+    const redactBudget = { remaining: 20 };
+
     const cleaned = [];
     comments.forEach(c => {
       if (!c.public || c.author_id !== requester.id) return;
-      if (done.has(String(c.id))) return;
       const cleanText = cleanAbmMessageText_(c.html_body || '');
-      if (cleanText === null) return; // not a raw ABM template comment — leave untouched
+      // Not (or no longer) a raw ABM template — either never was one, or it
+      // already got redacted on a prior run (redaction strips the <pre>
+      // marker entirely, so this naturally becomes a permanent no-op for it).
+      if (cleanText === null) return;
+
+      if (done.has(String(c.id))) {
+        // Already cleaned (tag or legacy marker present) — but this ticket
+        // may have been cleaned before the redact step existed, leaving the
+        // raw original still fully visible. Backfill just the redaction,
+        // no new comment/tag. Confirmed live on #1000154560: three raw
+        // comments cleaned before this fix all still showed the full
+        // Amazon block text until this backfill ran.
+        redactCommentText_(ticketId, c.id, c.plain_body || c.body, cleanText, redactBudget);
+        return;
+      }
 
       const uploadTokens = transferAttachments_(c.attachments);
       const hasContent = cleanText || uploadTokens.length;
@@ -300,8 +513,10 @@ function cleanupExistingAbmTicket_(ticketId) {
       const bodyText = cleanText || '(메시지 텍스트 없음 — 첨부파일 참고)';
       if (existingBodies.has(bodyText.trim())) {
         // A clean copy already exists (created before the tag mechanism was
-        // fixed) — just backfill the tag, don't post another one.
+        // fixed) — just backfill the tag and redact the still-visible raw
+        // original, don't post another clean copy.
         addTicketTag_(ticketId, abmCleanedTag_(c.id));
+        redactCommentText_(ticketId, c.id, c.plain_body || c.body, cleanText, redactBudget);
         return;
       }
 
@@ -313,6 +528,11 @@ function cleanupExistingAbmTicket_(ticketId) {
         payload: JSON.stringify({ ticket: { comment } })
       });
       addTicketTag_(ticketId, abmCleanedTag_(c.id));
+      // Redact the raw original's text now that the clean copy is live —
+      // agents only ever see the clean message. Permanent; see
+      // redactCommentText_ and the file header for the trade-off this
+      // reverses (this feature originally kept the raw comment untouched).
+      redactCommentText_(ticketId, c.id, c.plain_body || c.body, cleanText, redactBudget);
       existingBodies.add(bodyText.trim());
       cleaned.push({ sourceCommentId: c.id, attachmentsTransferred: uploadTokens.length, attachmentsTotal: (c.attachments || []).length });
     });
