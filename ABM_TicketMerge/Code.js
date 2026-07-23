@@ -151,16 +151,19 @@ function transferAttachments_(attachments) {
  * content with new text, so this posts a SEPARATE clean public comment
  * authored as the requester (same technique already proven in
  * mergeNewTicketIntoPrimary_) with the buyer's real attachments re-hosted
- * onto it — then redacts the raw original's text via the comment "redact"
- * API (PUT .../comments/{id}/redact), which blanks out the matched text
- * with block characters (▇). This IS permanent/irreversible — confirmed
- * working live 2026-07-22 with this account's admin role (an earlier
- * attempt on a different ticket had 400'd for an undiagnosed reason).
- * User explicitly confirmed this trade-off (agents should only ever see the
- * clean message, not the raw Amazon template) over the original "zero data
- * loss" design this feature shipped with — the original text is genuinely
- * gone after this, not just hidden; only the comment's existence, its
- * attachments, and the new clean copy survive.
+ * onto it. The original raw comment is left fully intact — zero data loss,
+ * fully auditable, nothing destructive.
+ *
+ * (Briefly tried also redacting the raw original's text, GAS v14-v18,
+ * 2026-07-22 — reverted the same day after discovering Zendesk's own native
+ * "merge tickets" feature quotes a merged ticket's last comment by its
+ * CURRENT stored text, so an agent manually merging a duplicate ABM ticket
+ * whose raw comment had already been redacted produced a merge-quote system
+ * note full of garbled block characters instead of the real message.
+ * Redaction is permanent/global — it doesn't just affect this feature's own
+ * view of the comment. Not worth that risk; see the removed
+ * redactCommentText_ function's final comment and [[abm_ticket_merge]]
+ * memory for the full incident writeup.)
  ********************************/
 
 // Same inline style Amazon's template applies to the buyer's own message
@@ -229,87 +232,27 @@ function addTicketTag_(ticketId, tag) {
   });
 }
 
-// Blanks a comment's visible text to block characters (▇) — PERMANENT,
-// irreversible. Used right after posting a clean copy of a raw ABM template
-// comment, so agents only ever see the clean message going forward, not the
-// full Amazon marketing-template wall of text. Attachments are untouched
-// (confirmed live: redacting a comment with a photo left the photo intact,
-// only the text body was blanked). Requires the exact current text/plain_body
-// — the endpoint does a substring match and only blanks what matches; passing
-// the wrong text would silently redact nothing.
-// Confirmed live (2026-07-22, ticket #1000154560): the redact endpoint 400s
-// the instant `text` contains a newline character — the EXACT same request
-// with the \n removed succeeds. The raw ABM email's plain_body is a
-// multi-line wall of text, so it can't be redacted in one call. Redact does
-// a substring match-and-replace within the comment's CURRENT stored content
-// (confirmed: passing just "Order ID:" correctly blanked only that word,
-// leaving the rest of that line and the whole rest of the comment intact) —
-// so this splits into lines and redacts each one with its own call.
-//
-// Minimum length guard: a trimmed line that reduces to something very short
-// and generic (a lone digit, "#", etc. — e.g. the item table's quantity
-// cell) would redact EVERY occurrence of that substring anywhere in the
-// comment, not just that cell — confirmed live: manually testing a short
-// slice against this same ticket accidentally blanked stray digits inside
-// unrelated numbers ("L-1855 Luxembourg" → "L-▇855 Luxembourg", matching a
-// lone "1" that also happened to appear in the footer's legal address).
-// Short/generic tokens like that aren't sensitive content anyway, so
-// skipping them is a safe trade-off.
-//
-// Shared budget + priority ordering: also confirmed live — Zendesk enforces
-// a PER-TICKET rolling-window update quota (`zendesk-ratelimit-per-ticket-
-// updates: total=30`, resets ~5-6 min), shared with EVERY write ANY call
-// makes on that ticket — the clean-copy comment post, the tag add, up to 4
-// field-auto-fill custom_field PUTs, AND every redact call across EVERY
-// comment processed in one cleanupExistingAbmTicket_ run. A single raw ABM
-// email's plain_body can split into 25-30+ distinct lines on its own — a
-// per-comment cap alone still blew through the quota the moment a ticket
-// had 2+ un-redacted raw comments backfilling at once (confirmed live on
-// #1000154560, a 3-raw-comment backfill case: capping at 15 lines/comment
-// still 429'd on the 3rd comment, since 15+15 already used up the ticket's
-// entire ~30-update budget for that run). Callers now pass one shared
-// `budget` object (see cleanupExistingAbmTicket_) so the total redact calls
-// across the WHOLE run stay bounded, however many comments need it — any
-// comment whose budget runs out this run just stays partially/un-redacted
-// until the NEXT run (still un-tagged-for-redaction, so it's naturally
-// retried — this self-heals over however many runs it takes, one ABM
-// ticket's backfill at a time). Within whatever budget is left, priority
-// goes to the buyer's own message text (`priorityText`, the already-
-// extracted clean message) and the structural markers that most make this
-// "look like the Amazon template" — Order ID/ASIN/Product Name labels, the
-// "You have received a message" header — ahead of lower-value legal/footer
-// boilerplate.
-function redactCommentText_(ticketId, commentId, text, priorityText, budget) {
-  if (!text || !budget || budget.remaining <= 0) return;
-  const MIN_LINE_LEN = 4;
-  const STRUCTURAL_MARKERS = ['you have received a message', 'order id', 'asin', 'product name', 'message:'];
-
-  const allLines = Array.from(new Set(
-    String(text).split('\n').map(l => l.trim()).filter(l => l.length >= MIN_LINE_LEN)
-  ));
-  const isStructural = l => STRUCTURAL_MARKERS.some(m => l.toLowerCase().startsWith(m));
-
-  const priority = (priorityText && priorityText.trim() && priorityText.indexOf('\n') === -1)
-    ? [priorityText.trim()] : [];
-  const lines = Array.from(new Set([
-    ...priority,
-    ...allLines.filter(isStructural),
-    ...allLines.filter(l => !isStructural(l)),
-  ])).slice(0, budget.remaining);
-
-  for (const line of lines) {
-    if (budget.remaining <= 0) break;
-    try {
-      zdFetch_(`/api/v2/tickets/${ticketId}/comments/${commentId}/redact`, {
-        method: 'put',
-        payload: JSON.stringify({ text: line })
-      });
-      budget.remaining--;
-    } catch (e) {
-      Logger.log(`redactCommentText_: line failed, skipping — ${e.message}`);
-    }
-  }
-}
+// REVERTED 2026-07-23 (was live briefly as redactCommentText_, GAS v14-v18):
+// tried auto-redacting the raw comment's text right after posting its clean
+// copy, so only the clean message would be visible. Discovered a real,
+// unrelated side effect that made this not worth the risk: Zendesk's own
+// NATIVE "merge tickets" feature (an agent manually merging a duplicate ABM
+// ticket via the Zendesk UI — a completely different mechanism from this
+// project's own auto-merge) quotes the merged ticket's "last comment" by
+// reading whatever its CURRENTLY STORED text is. On ticket #1000154651, an
+// agent natively merged in ticket #1000154652 hours after its raw comment
+// had already been redacted — the resulting merge-quote system note showed
+// the redacted block-character garbage verbatim, not the original message.
+// Redaction is permanent/global: it doesn't just affect how a comment looks
+// in its own ticket, it destroys the text for ANY other Zendesk feature that
+// might read it later (native merges being the one that surfaced first).
+// User's call, given that risk: keep the original (pre-v14) design — post
+// the clean copy ALONGSIDE the untouched raw comment, never redact.
+// Tickets processed while v14-v18 was live (roughly 2026-07-22 08:00 through
+// 2026-07-23) have their raw comments PERMANENTLY blanked already — Zendesk
+// redaction cannot be undone via the API. That set of affected real tickets
+// was small (this feature was live under a day); see [[abm_ticket_merge]]
+// memory for the full incident writeup and any tickets identified.
 
 function alreadyCleanedSourceIds_(ticket, comments) {
   const ids = new Set();
@@ -480,31 +423,12 @@ function cleanupExistingAbmTicket_(ticketId) {
         .map(c => (c.plain_body || c.body || '').trim())
     );
 
-    // Shared across every comment processed THIS run — see redactCommentText_
-    // for why this can't be a per-comment cap. 20 (not 30) leaves headroom
-    // for the tag add / comment post / field auto-fill PUTs this same run
-    // may also make against the ticket's shared per-ticket quota.
-    const redactBudget = { remaining: 20 };
-
     const cleaned = [];
     comments.forEach(c => {
       if (!c.public || c.author_id !== requester.id) return;
+      if (done.has(String(c.id))) return;
       const cleanText = cleanAbmMessageText_(c.html_body || '');
-      // Not (or no longer) a raw ABM template — either never was one, or it
-      // already got redacted on a prior run (redaction strips the <pre>
-      // marker entirely, so this naturally becomes a permanent no-op for it).
-      if (cleanText === null) return;
-
-      if (done.has(String(c.id))) {
-        // Already cleaned (tag or legacy marker present) — but this ticket
-        // may have been cleaned before the redact step existed, leaving the
-        // raw original still fully visible. Backfill just the redaction,
-        // no new comment/tag. Confirmed live on #1000154560: three raw
-        // comments cleaned before this fix all still showed the full
-        // Amazon block text until this backfill ran.
-        redactCommentText_(ticketId, c.id, c.plain_body || c.body, cleanText, redactBudget);
-        return;
-      }
+      if (cleanText === null) return; // not a raw ABM template comment — leave untouched
 
       const uploadTokens = transferAttachments_(c.attachments);
       const hasContent = cleanText || uploadTokens.length;
@@ -513,10 +437,8 @@ function cleanupExistingAbmTicket_(ticketId) {
       const bodyText = cleanText || '(메시지 텍스트 없음 — 첨부파일 참고)';
       if (existingBodies.has(bodyText.trim())) {
         // A clean copy already exists (created before the tag mechanism was
-        // fixed) — just backfill the tag and redact the still-visible raw
-        // original, don't post another clean copy.
+        // fixed) — just backfill the tag, don't post another one.
         addTicketTag_(ticketId, abmCleanedTag_(c.id));
-        redactCommentText_(ticketId, c.id, c.plain_body || c.body, cleanText, redactBudget);
         return;
       }
 
@@ -528,11 +450,6 @@ function cleanupExistingAbmTicket_(ticketId) {
         payload: JSON.stringify({ ticket: { comment } })
       });
       addTicketTag_(ticketId, abmCleanedTag_(c.id));
-      // Redact the raw original's text now that the clean copy is live —
-      // agents only ever see the clean message. Permanent; see
-      // redactCommentText_ and the file header for the trade-off this
-      // reverses (this feature originally kept the raw comment untouched).
-      redactCommentText_(ticketId, c.id, c.plain_body || c.body, cleanText, redactBudget);
       existingBodies.add(bodyText.trim());
       cleaned.push({ sourceCommentId: c.id, attachmentsTransferred: uploadTokens.length, attachmentsTotal: (c.attachments || []).length });
     });
