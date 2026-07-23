@@ -350,3 +350,7 @@ function repairLatestRun(taskKey) {
   createResultSheet_(task.sheetPrefix, defaultDatasetId, new Date(startedAt));
   Logger.log(`Recreated sheet: ${staleName}`);
 }
+
+// Editor's Run button calls functions with no arguments, so repairLatestRun
+// (which takes a taskKey) can't be invoked directly from there — use this instead.
+function repairGlxZ8Sheet() { repairLatestRun('GlxZ8'); }
