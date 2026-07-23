@@ -12,7 +12,7 @@ buyer, so agents see one thread per ABM conversation, matching Seller Central.
 
 **Script ID:** `1gJu9O-8MNYWVItLYsr48eym0afY1P9n8lUjSwM_p457DIisZLwOXIWAj`
 **Web app URL:** `https://script.google.com/macros/s/AKfycbz2hQMj97voADUPYv6YBHzjZaLsogj1osFhFNpny5iQXtKjBJpn8P2i1pW3Af-6M89ZcA/exec`
-**Current version:** 18 (redacts the raw Amazon-block comment's text after cleaning it, and auto-fills Order ID / Customer Full Name / Country / Amazon Fulfillment Methods on new ABM tickets — see below)
+**Current version:** 20 (posts a clean copy of the raw Amazon-block comment alongside the untouched original — redaction was tried in v14-v18 and reverted in v19, see below — and auto-fills Order ID / Customer Full Name / Country / Amazon Fulfillment Methods / ASIN on new ABM tickets)
 
 ## How it works
 
@@ -92,29 +92,39 @@ browser session needed.
 Zendesk's Comments API has no way to *replace* a comment's visible text, so
 this **adds a separate clean public comment** (customer's real message +
 attachments re-hosted onto it, authored as the requester) right after any
-raw-template comment is detected, then **redacts the raw original's text**
-via the comment "redact" endpoint (v18+) — permanent, blanks matched
-substrings with block characters, requires the account's admin role.
-Agents only ever see the clean message going forward. Idempotency (safe to
-re-run/backfill — each source comment gets at most one clean copy) is
-tracked via an `abm_cleaned_{id}` tag added to the ticket, not visible text.
+raw-template comment is detected. **The raw original is left fully intact —
+by design, both the raw Amazon-template comment and the clean copy are
+visible in the ticket.** Idempotency (safe to re-run/backfill — each source
+comment gets at most one clean copy) is tracked via an `abm_cleaned_{id}`
+tag added to the ticket, not visible text.
 
-The redact step has real constraints, discovered live: it 400s if the text
-contains a newline (the raw email's plain_body is split into per-line calls
-instead), a too-short/generic line would redact that substring EVERYWHERE
-in the comment (guarded with a minimum length), and Zendesk enforces a
-**per-ticket rolling-window update quota** (~30, resets ~5-6 min) shared by
-every write against that ticket — so redaction is capped to one shared
-budget per cleanup run, prioritizing the buyer's message text and the
-structural markers ("You have received a message", Order ID/ASIN/Product
-Name) over footer boilerplate. Anything that doesn't fit the budget
-self-heals on the next run.
+**v14-v18 also redacted the raw original's text** via the comment "redact"
+endpoint (permanent, blanks matched substrings with block characters) so
+agents would only ever see the clean copy. **Reverted in v19** (2026-07-23):
+Zendesk's own *native* "merge tickets" feature (an agent manually merging a
+duplicate ABM ticket via the Zendesk UI — unrelated to this project's own
+auto-merge) quotes the merged ticket's last comment by its *currently
+stored* text — on a ticket whose raw comment had already been redacted, the
+merge-quote system note showed the redacted block-character garbage instead
+of the real message. Redaction turned out to be permanent/global, not
+scoped to this feature's own view of the comment, so it was reverted.
+**Comments redacted while v14-v18 was live (~2026-07-22 08:00 through
+2026-07-23) cannot be restored** — Zendesk redaction has no undo via the
+API. That window was under a day, so the affected set is small.
 
-**v18 also auto-fills Order ID / Customer Full Name / Country / Amazon
-Fulfillment Methods** on the ticket from the same order-lookup GCX Reply's
-own Auto-Fill button uses (`GCXReply_GAS`'s `?orderId=` endpoint) — only
-ever fills fields that are currently empty, never overwrites an agent's or
-earlier run's value.
+**Auto-fills Order ID / Customer Full Name / Country / Amazon Fulfillment
+Methods / ASIN** on the ticket from the same order-lookup GCX Reply's own
+Auto-Fill button uses (`GCXReply_GAS`'s `?orderId=` endpoint) — only ever
+fills fields that are currently empty, never overwrites an agent's or
+earlier run's value. **Order ID / Country / Fulfillment require a resolved
+order** (extracted from `ticket.description`, then looked up via SP-API) —
+but **Customer Full Name and ASIN fill even for order-less ABM tickets**
+(e.g. a pre-purchase compatibility question with no Order ID anywhere in
+the message, confirmed live on #1000154672): Customer Full Name falls back
+to the ticket requester's from-name, and ASIN is regex-extracted directly
+from the raw ABM email regardless of whether the message concerns an actual
+order. (v18 originally gated ALL fields behind a resolved order, including
+these two, which never needed one — fixed in v20.)
 
 Runs automatically from both existing webhook code paths:
 - `handleNewAbmTicket_`'s `left_as_primary` branch (a ticket's own first,
