@@ -200,9 +200,19 @@ function pollApifyRuns() {
     const headers = Array.from(headerSet);
     sh.getRange(1, 1, 1, headers.length).setValues([headers]);
 
-    const values = filtered.map(r => headers.map(h => r[h] ?? ''));                               
+    // Some Axesso fields (filters, reviewSummary, imageUrlList, variationList,
+    // videoUrlList) are nested objects/arrays, not scalars — Range.setValues()
+    // can't write those directly, so they're JSON-stringified for the cell.
+    const values = filtered.map(r => headers.map(h => _toCellValue_(r[h])));
     sh.getRange(2, 1, values.length, headers.length).setValues(values);
-  }  
+  }
+
+  function _toCellValue_(v) {
+    if (v === null || v === undefined) return '';
+    if (v instanceof Date) return v;
+    if (typeof v === 'object') return JSON.stringify(v);
+    return v;
+  }
 
 /*************************************************
  * UNIQUE SHEET NAME
