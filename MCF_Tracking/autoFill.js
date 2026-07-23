@@ -22,6 +22,8 @@ function backfillTrackingNumbers() {
   var sheet = ss.getSheetByName(BF_SHEET_NAME);
   if (!sheet) throw new Error('Sheet not found: ' + BF_SHEET_NAME);
 
+  _warmLwaTokens(); // fetch EU+JP tokens once before the loop to avoid per-row rate-limit 401s
+
   var lastRow = sheet.getLastRow();
   if (lastRow < BF_START_ROW) return;
 
@@ -41,24 +43,34 @@ function backfillTrackingNumbers() {
     var isJP      = String(regions[i][0] || '').trim().toUpperCase() === 'JP';
     var endpoints = isJP ? ['FE', 'EU'] : ['EU', 'FE'];
 
-    try {
-      var tracks = _tracksWithFallbacks(orderId, endpoints);
-      var tn = (tracks && tracks.length && (tracks[0].trackingNumber || '').trim())
-        ? tracks[0].trackingNumber.trim()
-        : '';
-
-      if (tn) {
-        sheet.getRange(BF_START_ROW + i, BF_COL_RESULT).setValue(tn);
-        Logger.log('Row ' + (BF_START_ROW + i) + ': wrote ' + tn);
+    var tn = '';
+    var retries429b = 0;
+    var fetchOkB = false;
+    while (!fetchOkB) {
+      try {
+        var tracks = _tracksWithFallbacks(orderId, endpoints);
+        tn = (tracks && tracks.length && (tracks[0].trackingNumber || '').trim())
+          ? tracks[0].trackingNumber.trim() : '';
+        Utilities.sleep(400);
+        fetchOkB = true;
+      } catch (e) {
+        if (_isRateLimit429(e) && retries429b < 3) {
+          retries429b++;
+          Logger.log('Row ' + (BF_START_ROW + i) + ': 429 — waiting 45 s (retry ' + retries429b + '/3)');
+          Utilities.sleep(45000);
+        } else {
+          var errMsg = (isJP ? 'JP' : 'EU') + ' ERR: ' + (e.message || e);
+          sheet.getRange(BF_START_ROW + i, BF_COL_RESULT).setValue(errMsg);
+          Logger.log('Row ' + (BF_START_ROW + i) + ': ' + errMsg);
+          fetchOkB = true; // stop retrying, move on
+        }
       }
-    } catch (e) {
-      var errMsg = (isJP ? 'JP' : 'EU') + ' ERR: ' + (e.message || e);
-      // Write error back so the next backfill run retries this row.
-      sheet.getRange(BF_START_ROW + i, BF_COL_RESULT).setValue(errMsg);
-      Logger.log('Row ' + (BF_START_ROW + i) + ': ' + errMsg);
     }
 
-    Utilities.sleep(400); // stay under SP-API rate limit
+    if (tn) {
+      sheet.getRange(BF_START_ROW + i, BF_COL_RESULT).setValue(tn);
+      Logger.log('Row ' + (BF_START_ROW + i) + ': wrote ' + tn);
+    }
   }
 }
 
@@ -221,6 +233,147 @@ function backfillMCFFees() {
   }
 
   Logger.log('backfillMCFFees done — written: %s, not settled: %s', written, notSettled);
+}
+
+/**
+ * STEP 1 — run this first to undo the bad freeze.
+ * Scans for HYPERLINK formulas whose "tracking number" looks like a price
+ * (pure decimal number < 1000, e.g. "22.99") and restores the original
+ * =IF(OR(B…,Q…),"",IF(B…<>"JP", HYPERLINK(…AMZTK…), HYPERLINK(…AMZTK_JP…))) formula.
+ */
+function unfreezeAmztkFormulas() {
+  var sheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName(BF_SHEET_NAME);
+  if (!sheet) throw new Error('Sheet not found: ' + BF_SHEET_NAME);
+
+  var lastRow = sheet.getLastRow();
+  var lastCol = sheet.getLastColumn();
+  if (lastRow < BF_START_ROW) return;
+
+  var numRows     = lastRow - BF_START_ROW + 1;
+  var allFormulas = sheet.getRange(BF_START_ROW, 1, numRows, lastCol).getFormulas();
+  // Matches =HYPERLINK("https://www.swiship.XX/track?id=22.99","22.99")
+  var feePattern  = /^=HYPERLINK\("https:\/\/www\.swiship\.(de|jp)\/track\?id=(\d+\.?\d*)","(\d+\.?\d*)"\)$/i;
+
+  var restored = 0;
+  for (var i = 0; i < numRows; i++) {
+    var rowNum = BF_START_ROW + i;
+    var bRef = 'B' + rowNum;
+    var qRef = 'Q' + rowNum;
+    for (var c = 0; c < lastCol; c++) {
+      var f = allFormulas[i][c] || '';
+      var m = f.match(feePattern);
+      if (!m) continue;
+      // Tracking numbers are never plain small decimals — prices are (< 500 €/¥)
+      if (parseFloat(m[2]) >= 500) continue;
+      var orig =
+        '=IF(OR(' + bRef + '="",' + qRef + '=""),"",IF(' + bRef + '<>"JP",' +
+        'HYPERLINK("https://www.swiship.de/track?id="&AMZTK(' + qRef + '),AMZTK(' + qRef + ')),' +
+        'HYPERLINK("https://www.swiship.jp/track?id="&AMZTK_JP(' + qRef + '),AMZTK_JP(' + qRef + '))))';
+      sheet.getRange(rowNum, c + 1).setFormula(orig);
+      restored++;
+    }
+  }
+  Logger.log('unfreezeAmztkFormulas done — restored: ' + restored + ' cells');
+  SpreadsheetApp.getUi().alert('수식 복원 완료: ' + restored + '개 셀');
+}
+
+/**
+ * STEP 2 — run after unfreezeAmztkFormulas() (and after EU LWA is fixed).
+ * Fetches real tracking numbers from SP-API only (never reads col Z as a source,
+ * since col Z contains fees in this sheet).
+ *
+ * - JP rows: fetched via FE endpoint immediately.
+ * - EU rows: skipped until EU LWA refresh token is re-authorised.
+ * - Replaces each AMZTK formula cell with =HYPERLINK("swiship.XX/…","TN").
+ * - Safe to run multiple times — skips cells that already have a non-AMZTK formula.
+ */
+function freezeAmztkFormulas() {
+  var ss    = SpreadsheetApp.getActiveSpreadsheet();
+  var sheet = ss.getSheetByName(BF_SHEET_NAME);
+  if (!sheet) throw new Error('Sheet not found: ' + BF_SHEET_NAME);
+
+  _warmLwaTokens();
+
+  var lastRow = sheet.getLastRow();
+  var lastCol = sheet.getLastColumn();
+  if (lastRow < BF_START_ROW) { Logger.log('No data rows.'); return; }
+
+  var numRows = lastRow - BF_START_ROW + 1;
+
+  var allFormulas = sheet.getRange(BF_START_ROW, 1, numRows, lastCol).getFormulas();
+  var regions     = sheet.getRange(BF_START_ROW, BF_COL_REGION, numRows, 1).getValues();
+  var orderIds    = sheet.getRange(BF_START_ROW, BF_COL_ORDER,  numRows, 1).getValues();
+
+  var frozen = 0, pending = 0, skippedEU = 0;
+
+  for (var i = 0; i < numRows; i++) {
+    var orderId = String(orderIds[i][0] || '').trim();
+    if (!orderId) continue;
+
+    var amztkCols = [];
+    for (var c = 0; c < lastCol; c++) {
+      if ((allFormulas[i][c] || '').toUpperCase().indexOf('AMZTK') !== -1) {
+        amztkCols.push(c + 1);
+      }
+    }
+    if (!amztkCols.length) continue;
+
+    var isJP = String(regions[i][0] || '').trim().toUpperCase() === 'JP';
+
+    // EU rows: skip until LWA is re-authorised.
+    if (!isJP) {
+      Logger.log('Row ' + (BF_START_ROW + i) + ': EU — skipping (LWA broken)');
+      skippedEU++;
+      continue;
+    }
+
+    // JP rows: fetch from FE endpoint, with outer 429 retry (45 s backoff, up to 3×).
+    var tn = '';
+    var retries429 = 0;
+    var fetchOk = false;
+    while (!fetchOk) {
+      try {
+        var tracks = _tracksWithFallbacks(orderId, isJP ? ['FE', 'EU'] : ['EU', 'FE']);
+        tn = (tracks && tracks.length && (tracks[0].trackingNumber || '').trim())
+          ? tracks[0].trackingNumber.trim() : '';
+        Utilities.sleep(400);
+        fetchOk = true;
+      } catch (e) {
+        if (_isRateLimit429(e) && retries429 < 3) {
+          retries429++;
+          Logger.log('Row ' + (BF_START_ROW + i) + ': 429 — waiting 45 s (retry ' + retries429 + '/3)');
+          Utilities.sleep(45000);
+        } else {
+          Logger.log('Row ' + (BF_START_ROW + i) + ': fetch error — ' + e.message);
+          pending++;
+          break;
+        }
+      }
+    }
+    if (!fetchOk) continue;
+
+    if (!tn) { pending++; continue; }
+
+    var url           = 'https://www.swiship.jp/track?id=' + tn;
+    var staticFormula = '=HYPERLINK("' + url + '","' + tn + '")';
+    for (var ci = 0; ci < amztkCols.length; ci++) {
+      sheet.getRange(BF_START_ROW + i, amztkCols[ci]).setFormula(staticFormula);
+    }
+    Logger.log('Row ' + (BF_START_ROW + i) + ': frozen → ' + tn);
+    frozen++;
+  }
+
+  Logger.log(
+    'freezeAmztkFormulas done — frozen: ' + frozen +
+    ', EU skipped: ' + skippedEU +
+    ', pending (no TN yet): ' + pending
+  );
+  SpreadsheetApp.getUi().alert(
+    '완료\n\n' +
+    '✅ 고정됨 (JP): ' + frozen + '행\n' +
+    '⏭ EU 스킵 (LWA 재인증 필요): ' + skippedEU + '행\n' +
+    '⏳ 아직 운송장 없음: ' + pending + '행'
+  );
 }
 
 function onEdit_mcf(e) {

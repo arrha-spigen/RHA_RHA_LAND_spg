@@ -1,6 +1,6 @@
 // ==UserScript==
 // @name         Amazon MCF Autofill
-// @version      1.3.1
+// @version      1.4.3
 // @updateURL    https://raw.githubusercontent.com/codingintheusa0402/spigen-gcx-automation/main/tampermonkey_scripts/Amazon%20MCF%20Autofill.user.js
 // @downloadURL  https://raw.githubusercontent.com/codingintheusa0402/spigen-gcx-automation/main/tampermonkey_scripts/Amazon%20MCF%20Autofill.user.js
 // @match        https://sellercentral.amazon.*/mcf/orders/create-order*
@@ -273,7 +273,9 @@
       .replace(/[ \t]+/g, ' ')
       .trim();
 
-      const asin = (t.match(/\bASIN\b[^\w]{0,5}(B[A-Z0-9]{9})\b/i) || [])[1];
+      const allLabeledAsins = [...t.matchAll(/\bASIN\b[^\w]{0,5}(B[A-Z0-9]{9})\b/gi)].map(m => m[1]);
+      const asins = [...new Set(allLabeledAsins)];
+      const asin = asins[0] || '';
       const sku  = (t.match(/\bSKU\b[^\w]{0,5}([\w.-]{5,})/i) || [])[1];
       const q = asin || sku || '';
 
@@ -312,43 +314,45 @@
        .replace(/^(.+?)\s+--?\s*/i, '')
        .trim();
 
+    const labelOf = s => {
+      const m = s.match(/^(.+?):\s*/) || s.match(/^(.+?)\s+--?\s*/);
+      return (m ? m[1] : '').trim();
+    };
+
     for (const line of t.split('\n').map(s => s.trim()).filter(Boolean)) {
       const m = line.match(numberedLine);
       if (!m) continue;
 
       const idx = parseInt(m[1], 10);
-      const val = unlabel(m[2].trim());
+      const content = m[2].trim();
+      const val = unlabel(content);
 
-      if (idx === 1) {
+      // Only open a NEW block when line 1 reads as "Full Name" — a ticket can
+      // contain other, unrelated numbered lists (e.g. an internal "1. 2. 3."
+      // processing note with no field labels) that would otherwise masquerade
+      // as the start of an address block and, since only the LAST block is
+      // kept, silently override a real, already-parsed address.
+      if (idx === 1 && /full\s*name|\bname\b/i.test(labelOf(content))) {
         pushCur();
         cur = { name:'', street:'', city:'', state:'', postal:'', phone:'' };
       }
-      if (!cur) cur = { name:'', street:'', city:'', state:'', postal:'', phone:'' };
+      if (!cur) continue;
 
       setByIndex(cur, idx, val);
       if (idx === 6) pushCur();
     }
+    pushCur();
 
     let addr = { name:'', street:'', city:'', state:'', postal:'', phone:'' };
     if (blocks.length > 0) addr = blocks[blocks.length - 1];
 
     const country = ticketCountry || countryFromPhone(addr.phone);
-    return { ...addr, email, q, country, countryRaw: ticketCountryRaw };
+    return { ...addr, email, q, asins, country, countryRaw: ticketCountryRaw };
   }
   // ---------------------------------
-  // SHIPPING SPEED (Expedited)
+  // SHIPPING SPEED (Standard)
   // ---------------------------------
-  function clickShowMoreIfAny(next) {
-    const btn = document.querySelector('kat-button.toggle-inferior-ship-options-button');
-    if (btn && btn.offsetParent !== null) {
-      btn.click();
-      setTimeout(next, 300);
-    } else {
-      next();
-    }
-  }
-
-  function clickExpeditedKatLabel() {
+  function clickStandardKatLabel() {
     const labels = [
       ...document.querySelectorAll('kat-label[part="radiobutton-label"], kat-label[for]')
     ];
@@ -356,8 +360,8 @@
     for (const el of labels) {
       const attrText = (el.getAttribute('text') || '').trim().toLowerCase();
       const txt = (el.textContent || '').trim().toLowerCase();
-      const isExpedited = attrText === 'expedited' || /\bexpedited\b/.test(txt) || txt.includes('빠른 배송');
-      if (!isExpedited) continue;
+      const isStandard = attrText === 'standard' || /\bstandard\b/.test(txt);
+      if (!isStandard) continue;
 
       const nativeLabel = el.querySelector('label[for]');
       if (nativeLabel) {
@@ -379,18 +383,18 @@
       }
     }
 
-    return pickExpeditedByGroup();
+    return pickStandardByGroup();
   }
 
-  function pickExpeditedByGroup() {
+  function pickStandardByGroup() {
     const grp =
       document.querySelector('kat-radiobutton-group[name="shipping-speed"]') ||
       document.querySelector('kat-radiobutton-group');
     if (!grp) return false;
 
     try {
-      grp.value = 'Expedited';
-      grp.setAttribute('value', 'Expedited');
+      grp.value = 'Standard';
+      grp.setAttribute('value', 'Standard');
       grp.dispatchEvent(new Event('input', { bubbles:true }));
       grp.dispatchEvent(new Event('change', { bubbles:true }));
       return true;
@@ -399,34 +403,32 @@
     }
   }
 
-  function pickExpedited() {
+  function pickStandard() {
     const rb = [...document.querySelectorAll('kat-radiobutton')]
-      .find(rb => (rb.getAttribute('value') || '').toLowerCase() === 'expedited');
+      .find(rb => (rb.getAttribute('value') || '').toLowerCase() === 'standard');
     if (rb) { rb.click(); return true; }
 
     const grp = document.querySelector('kat-radiobutton-group[name="shipping-speed"]');
     const radio =
-      grp && grp.querySelector('input[type="radio"][name="shipping-speed"][value="Expedited"]');
+      grp && grp.querySelector('input[type="radio"][name="shipping-speed"][value="Standard"]');
     if (radio) { radio.click(); return true; }
 
     return false;
   }
 
-  function forceExpedited({ attempts=80, everyMs=350 } = {}) {
+  function forceStandard({ attempts=80, everyMs=350 } = {}) {
     let left = attempts;
     const timer = setInterval(() => {
-      clickShowMoreIfAny(() => {
-        if (clickExpeditedKatLabel() || pickExpeditedByGroup() || pickExpedited()) {
-          const grp =
-            document.querySelector('kat-radiobutton-group[name="shipping-speed"]') ||
-            document.querySelector('kat-radiobutton-group');
-          if (!grp || (grp.value || '').toLowerCase() === 'expedited') {
-            msg('Shipping speed set to: Expedited');
-            clearInterval(timer);
-            return;
-          }
+      if (clickStandardKatLabel() || pickStandardByGroup() || pickStandard()) {
+        const grp =
+          document.querySelector('kat-radiobutton-group[name="shipping-speed"]') ||
+          document.querySelector('kat-radiobutton-group');
+        if (!grp || (grp.value || '').toLowerCase() === 'standard') {
+          msg('Shipping speed set to: Standard');
+          clearInterval(timer);
+          return;
         }
-      });
+      }
 
       if (--left <= 0) clearInterval(timer);
     }, everyMs);
@@ -446,15 +448,15 @@
   }
 
   let shippingWaiterStarted = false;
-  function ensureExpeditedAfterReady({ attempts=150, everyMs=400 } = {}) {
+  function ensureStandardAfterReady({ attempts=150, everyMs=400 } = {}) {
     if (shippingWaiterStarted) return;
     shippingWaiterStarted = true;
 
     let left = attempts;
     const timer = setInterval(() => {
       if (hasItemSelected() && isOrderIdFilled()) {
-        LOG('Item + Order ID ready → Select Expedited.');
-        forceExpedited();
+        LOG('Item + Order ID ready → Select Standard.');
+        forceStandard();
         clearInterval(timer);
         return;
       }
@@ -591,10 +593,13 @@ async function fetchOrderIdByEmail(email) {
       }
 
       // Parse fulfillable count from each result row; exclude amzn.* internal SKUs
+      // Quantity badge always leads with the number (e.g. "1,234 fulfillable" in English,
+      // "192 주문 처리 가능" in Korean) — match the leading digits instead of the localized
+      // unit text so this works regardless of the Seller Central UI language.
       const entries = components.map(comp => {
         const qtyEl = comp.querySelector('.search-result-component-quantity');
         const text = (qtyEl ? qtyEl.textContent : '').trim();
-        const m = text.match(/([\d,]+)\s+fulfillable/i);
+        const m = text.match(/^([\d,]+)/);
         const count = m ? parseInt(m[1].replace(/,/g, ''), 10) : 0;
         return { count, comp };
       }).filter(({ comp }) => !/\bamzn[.\-]/i.test(comp.textContent || ''));
@@ -692,6 +697,74 @@ async function fetchOrderIdByEmail(email) {
 
 
   // ---------------------------------
+  // ASIN PICKER (multi-ASIN)
+  // ---------------------------------
+  function showAsinPicker(asins, onPick) {
+    const existing = document.getElementById('mcf-asin-picker');
+    if (existing) existing.remove();
+
+    const overlay = document.createElement('div');
+    overlay.id = 'mcf-asin-picker';
+    Object.assign(overlay.style, {
+      position: 'fixed', top: '0', left: '0', right: '0', bottom: '0',
+      background: 'rgba(0,0,0,0.72)', zIndex: '2147483646',
+      display: 'flex', alignItems: 'center', justifyContent: 'center',
+    });
+
+    const box = document.createElement('div');
+    Object.assign(box.style, {
+      background: '#0b0f0c', color: '#00ff9c',
+      border: '1px solid #00ff9c', borderRadius: '12px',
+      padding: '20px 24px', minWidth: '300px',
+      fontFamily: 'Consolas, Menlo, monospace', fontSize: '13px',
+      boxShadow: '0 0 20px rgba(0,255,156,.4)',
+    });
+
+    const title = document.createElement('div');
+    Object.assign(title.style, { fontWeight: '700', fontSize: '14px', marginBottom: '12px' });
+    title.textContent = '어떤 ASIN을 자동입력할까요?';
+    box.appendChild(title);
+
+    asins.forEach((a, i) => {
+      const btn = document.createElement('button');
+      Object.assign(btn.style, {
+        display: 'block', width: '100%', textAlign: 'left',
+        background: '#0b0f0c', color: '#00ff9c', border: '1px solid #00ff9c44',
+        padding: '9px 14px', marginBottom: '8px', borderRadius: '8px',
+        cursor: 'pointer', fontFamily: 'Consolas,Menlo,monospace',
+        fontSize: '13px', letterSpacing: '0.5px',
+      });
+      btn.textContent = `${i + 1}. ${a}`;
+      btn.addEventListener('mouseenter', () => { btn.style.borderColor = '#00ff9c'; btn.style.background = '#00ff9c18'; });
+      btn.addEventListener('mouseleave', () => { btn.style.borderColor = '#00ff9c44'; btn.style.background = '#0b0f0c'; });
+      btn.addEventListener('click', () => { overlay.remove(); onPick(a); });
+      box.appendChild(btn);
+    });
+
+    const cancel = document.createElement('button');
+    Object.assign(cancel.style, {
+      display: 'block', width: '100%', textAlign: 'center',
+      background: 'transparent', color: '#4ce6b4', border: '1px solid #4ce6b444',
+      padding: '7px 14px', borderRadius: '8px', cursor: 'pointer',
+      fontFamily: 'Consolas,Menlo,monospace', fontSize: '12px', marginTop: '4px',
+    });
+    cancel.textContent = '취소';
+    cancel.addEventListener('click', () => overlay.remove());
+    box.appendChild(cancel);
+
+    overlay.appendChild(box);
+    overlay.addEventListener('click', e => { if (e.target === overlay) overlay.remove(); });
+    document.body.appendChild(overlay);
+  }
+
+  function pickAsin(asins) {
+    return new Promise(resolve => {
+      if (!asins || asins.length <= 1) { resolve((asins && asins[0]) || null); return; }
+      showAsinPicker(asins, resolve);
+    });
+  }
+
+  // ---------------------------------
   // MAIN CLIPBOARD PASTE
   // ---------------------------------
   async function pasteFromClipboard() {
@@ -703,22 +776,25 @@ async function fetchOrderIdByEmail(email) {
       }
 
       const d = parseClipboard(text);
+
+      const chosenAsin = await pickAsin(d.asins);
+      const fd = { ...d, q: chosenAsin || d.q };
+
       msg('Parsed. Filling…');
+      fillAll(fd);
 
-      fillAll(d);
-
-      if (d.q) autoSelectBestSku();
+      if (fd.q) autoSelectBestSku();
 
       // Country must be set AFTER all other field events have settled.
       // setById/setByLabel fire bubbling input+change events; the kat-dropdown
       // closes itself when it sees events outside its boundary. Delay 800ms.
-      if (d.country && d.countryRaw?.toLowerCase() !== 'united kingdom') {
-        setTimeout(() => setCountry(d.country), 800);
+      if (fd.country && fd.countryRaw?.toLowerCase() !== 'united kingdom') {
+        setTimeout(() => setCountry(fd.country), 800);
       }
 
-      if (d.email) {
+      if (fd.email) {
         msg('시트 업데이트 중…');
-        const orderId = await markRowMcfByEmail(d.email);
+        const orderId = await markRowMcfByEmail(fd.email);
         if (orderId) {
           setOrderIdInput(orderId);
           msg('Order ID 자동입력 완료: ' + orderId);
@@ -727,7 +803,7 @@ async function fetchOrderIdByEmail(email) {
         }
       }
 
-      ensureExpeditedAfterReady();
+      ensureStandardAfterReady();
 
     } catch (e) {
       msg('Clipboard error.');
@@ -760,16 +836,19 @@ async function fetchOrderIdByEmail(email) {
     const d = parseClipboard(text);
     if (!d.name && !d.q && !d.email) return;
 
-    msg('클립보드 자동입력 중…');
-    fillAll(d);
+    const chosenAsin = await pickAsin(d.asins);
+    const fd = { ...d, q: chosenAsin || d.q };
 
-    if (d.q) autoSelectBestSku();
-    if (d.country && d.countryRaw?.toLowerCase() !== 'united kingdom') {
-      setTimeout(() => setCountry(d.country), 800);
+    msg('클립보드 자동입력 중…');
+    fillAll(fd);
+
+    if (fd.q) autoSelectBestSku();
+    if (fd.country && fd.countryRaw?.toLowerCase() !== 'united kingdom') {
+      setTimeout(() => setCountry(fd.country), 800);
     }
-    if (d.email) {
+    if (fd.email) {
       msg('시트 업데이트 중…');
-      const orderId = await markRowMcfByEmail(d.email);
+      const orderId = await markRowMcfByEmail(fd.email);
       if (orderId) {
         setOrderIdInput(orderId);
         msg('Order ID 자동입력 완료: ' + orderId);
@@ -777,7 +856,7 @@ async function fetchOrderIdByEmail(email) {
         msg('시트 업데이트 완료 (Order ID 없음)');
       }
     }
-    ensureExpeditedAfterReady();
+    ensureStandardAfterReady();
   });
 
   // ── URL 해시 브릿지: Zendesk GCX Reply → MCF 자동입력 ───────────────────
@@ -846,7 +925,7 @@ async function fetchOrderIdByEmail(email) {
       } else {
         msg('✓ Zendesk 자동입력 완료');
       }
-      ensureExpeditedAfterReady();
+      ensureStandardAfterReady();
     } catch(e) { LOG('autoFillFromUrlHash error', e); }
   }
 

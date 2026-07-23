@@ -146,12 +146,12 @@ function fetchZendeskViewToKsheet() {
     const msPerWeek = 7 * 24 * 60 * 60 * 1000;
     const weekIndex = Math.floor((nowKST - baseDateKST) / msPerWeek);
 
-    // Even week index → KJW, Odd week index → LYS for Group A
+    // Even week index → LYS, Odd week index → KJW for Group A (switched 2026-06-29)
     const assignKJWThisWeek = (weekIndex % 2 === 0);
 
     return groupA.includes(country)
-      ? (assignKJWThisWeek ? 'KJW' : 'LYS')
-      : (assignKJWThisWeek ? 'LYS' : 'KJW');
+      ? (assignKJWThisWeek ? 'LYS' : 'KJW')
+      : (assignKJWThisWeek ? 'KJW' : 'LYS');
   };
 
   // Process rows

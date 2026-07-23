@@ -1,3 +1,4 @@
+
 /***** ========= CONFIG + AUTH HELPERS ========= *****/
 function _prop(key, fallback) {
   var v = PropertiesService.getScriptProperties().getProperty(key);
@@ -33,6 +34,15 @@ function _sessionToken() {
 }
 
 /***** ========= LWA (Login With Amazon) ========= *****/
+// In-process token store — survives for the lifetime of one script execution.
+// Prevents repeated LWA fetches (and Amazon rate-limit 401s) within a single run.
+var _lwaTokenInProcess = {};
+
+function _warmLwaTokens() {
+  getLwaAccessToken('EU');
+  getLwaAccessToken('JP');
+}
+
 function _resolveLwaProfileKey(endpointKey) {
   // Return 'JP' when endpoint implies FE/JP; otherwise 'EU'.
   var k = (endpointKey || '').toString().toUpperCase();
@@ -48,8 +58,12 @@ function getLwaAccessToken(endpointKey) {
   // Concurrent formula cells reuse the same token instead of each fetching a new one.
   var cacheKey = 'LWA_TOKEN_' + prof;
   var cache = CacheService.getScriptCache();
+  // 1. In-process store (reliable within one execution)
+  if (_lwaTokenInProcess[prof]) return _lwaTokenInProcess[prof];
+
+  // 2. ScriptCache (shared across executions, best-effort)
   var cached = cache.get(cacheKey);
-  if (cached) return cached;
+  if (cached) { _lwaTokenInProcess[prof] = cached; return cached; }
 
   var clientId, clientSecret, refreshToken;
   if (prof === 'JP') {
@@ -83,6 +97,7 @@ function getLwaAccessToken(endpointKey) {
   }
 
   cache.put(cacheKey, body.access_token, 3300); // 55 min TTL
+  _lwaTokenInProcess[prof] = body.access_token; // in-process store
   return body.access_token;
 }
 

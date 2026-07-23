@@ -104,6 +104,17 @@ const SHEET_CONFIGS = [
     pasteReviewId: false, // Review ID is formula-generated — do not overwrite
   },
   {
+    filterSheet:   "GlxZ8_filter",
+    destId:        "19OhswglYMx_dxSFFDtWI1WYPWq2jONJn6RK84KITwy4",
+    countries:     new Set(["US","FR","ES","JP","UK","IN","DE","IT"]),
+    numCols:       13,
+    has15:         true,
+    seriesFilter:  null,
+    temCol:        "GlxZ8",
+    drFormula:     true,
+    pasteReviewId: true,   // Review ID is a plain value in this sheet — paste from source
+  },
+  {
     filterSheet:   "SDA_filter",
     destId:        "1sxapIqJgXcJdeqyCf9bAxCNXrVMsVjsZE9QWPwEm0R4",
     countries:     new Set(["FR","ES","JP","UK","DE","IT"]),
@@ -186,6 +197,7 @@ function dailyJob() {
 function dailyJob_Glx26()       { _runSingle("Glx26_filter"); }
 function dailyJob_iPh17e()      { _runSingle("iPh17e_filter"); }
 function dailyJob_Pixel10a()    { _runSingle("Pixel10a_filter"); }
+function dailyJob_GlxZ8()       { _runSingle("GlxZ8_filter"); }
 function dailyJob_SDA()         { _runSingle("SDA_filter"); }
 function dailyJob_AutoAcc()     { _runSingle("Auto_Acc_filter"); }
 function dailyJob_PowerAcc()    { _runSingle("Power_Acc_filter"); }

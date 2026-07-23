@@ -1,10 +1,19 @@
-// GCX Reply — Apps Script Web App (v2.5.0)
+// GCX Reply — Apps Script Web App (v2.6.4)
 // Endpoint: ?orderId=XXX  |  ?asin=XXX  |  ?orderId=XXX&asin=XXX
 // Deploy as: Execute as Me, Access: Anyone (or Anyone anonymous)
 // Script Properties required: AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY,
 //   LWA_CLIENT_ID, LWA_CLIENT_SECRET, LWA_REFRESH_TOKEN,         ← EU + NA
 //   LWA_CLIENT_ID_JP, LWA_CLIENT_SECRET_JP, LWA_REFRESH_TOKEN_JP ← Japan (FE)
 //   LWA_CLIENT_ID_IN, LWA_CLIENT_SECRET_IN, LWA_REFRESH_TOKEN_IN ← India
+
+// Script Properties are themselves a network-backed GAS service call, not an
+// in-memory read — memoize per execution so building N signed SP-API requests
+// in one doGet() invocation only pays this cost once, not N times.
+let _scriptPropsCache_ = null;
+function scriptProps_() {
+  if (!_scriptPropsCache_) _scriptPropsCache_ = PropertiesService.getScriptProperties().getProperties();
+  return _scriptPropsCache_;
+}
 
 const SHEET_ID    = '1fx9K4r2T9SeZK076zy9kMHoLzAKDgmlRp-C2VtnTKVo';
 const SHEET_NAME  = 'Data';
@@ -70,6 +79,18 @@ function doGet(e) {
       return respond({ reason: inferReason_(review, category) });
     }
 
+    if (p.action === 'abmRelayPending') {
+      return respond({ pending: getAbmRelayPending_(p.clientVersion) });
+    }
+
+    if (p.action === 'abmRelayStatus') {
+      return respond({ status: getAbmRelayStatus_(p.ticketId) });
+    }
+
+    if (p.action === 'abmRelayAll') {
+      return respond({ rows: getAbmRelayAll_(Number(p.limit) || 50) });
+    }
+
     if (!orderId && !asin) {
       return respond({ error: 'Provide orderId and/or asin parameter' });
     }
@@ -115,6 +136,290 @@ function respond(data) {
     .setMimeType(ContentService.MimeType.JSON);
 }
 
+// ── ABM relay status log ──────────────────────────────────────────────────────
+// Durable, cross-browser-session record of whether each ABM ticket's Public
+// reply was actually relayed to the Amazon buyer via Seller Central — a toast
+// in the agent's browser at send-time isn't enough on its own: it's gone the
+// moment the agent navigates away, and doesn't help if the whole relay attempt
+// silently died (tab closed mid-flight, etc.).
+//
+// Upserted by `RelayKey` (`${ticketId}_${startTimeMs}`, generated once per
+// relay invocation client-side), NOT by bare TicketId — a single ticket can
+// get multiple agent replies over time, each triggering its own separate
+// relay. An earlier version keyed by TicketId alone, so a second reply's log
+// entry silently overwrote the first reply's row, making it impossible to
+// tell which of two same-ticket messages actually failed (confirmed live:
+// exactly this ambiguity on tickets #1000153623/#1000153609 — two replies
+// each, only one `success` row survived per ticket with no way to tell which
+// send it corresponded to). `MessageText` is kept so a later retry sweep (any
+// agent's browser, not necessarily the one that first tried) can resend
+// without needing to re-open the original ticket.
+const ABM_LOG_SHEET_NAME = 'ABM_Relay_Log';
+// CommentId ties a row to the specific Zendesk comment it relays — needed by
+// the reconciliation job (reconcileAbmRelays_ in ABM_TicketMerge) so an
+// auto-resent reply can re-fetch that exact comment's attachments, and so its
+// dedup can tell one agent reply apart from another on the same ticket.
+const ABM_LOG_HEADERS = ['Timestamp', 'RelayKey', 'TicketId', 'CommentId', 'CaseId', 'Marketplace', 'Status', 'Attempts', 'LastError', 'MessageText'];
+
+function getAbmLogSheet_() {
+  const ss = SpreadsheetApp.openById(SHEET_ID);
+  let sheet = ss.getSheetByName(ABM_LOG_SHEET_NAME);
+  if (!sheet) {
+    sheet = ss.insertSheet(ABM_LOG_SHEET_NAME);
+    sheet.getRange(1, 1, 1, ABM_LOG_HEADERS.length).setValues([ABM_LOG_HEADERS]);
+    return sheet;
+  }
+  // Self-repairing migration: insert any expected column that doesn't exist
+  // yet, at its target index, preserving existing rows/data. Handles both the
+  // original pre-RelayKey (8-col) sheet and the pre-CommentId (9-col) one —
+  // without this, column lookups would silently read the wrong cell against
+  // existing rows. Only this code writes the sheet, so header order is
+  // otherwise stable.
+  ABM_LOG_HEADERS.forEach((h, idx) => {
+    const existing = sheet.getRange(1, 1, 1, Math.max(sheet.getLastColumn(), 1)).getValues()[0];
+    if (existing.indexOf(h) === -1) sheet.insertColumnBefore(idx + 1);
+  });
+  sheet.getRange(1, 1, 1, ABM_LOG_HEADERS.length).setValues([ABM_LOG_HEADERS]);
+  return sheet;
+}
+
+function upsertAbmRelayLog_(entry) {
+  const sheet = getAbmLogSheet_();
+  const data = sheet.getDataRange().getValues();
+  const keyCol = ABM_LOG_HEADERS.indexOf('RelayKey');
+  // Fallback so a pre-migration row (old TicketId-only key, or a client still
+  // running a pre-RelayKey version) doesn't get duplicated on its next update.
+  const relayKey = entry.relayKey || String(entry.ticketId);
+  let rowIdx = -1;
+  for (let i = 1; i < data.length; i++) {
+    if (String(data[i][keyCol]) === relayKey) { rowIdx = i + 1; break; }
+  }
+  const row = [
+    new Date(), relayKey, entry.ticketId, entry.commentId || '', entry.caseId || '', entry.marketplace || '',
+    entry.status || '', entry.attempts || 1, entry.lastError || '', entry.messageText || ''
+  ];
+  if (rowIdx === -1) sheet.appendRow(row);
+  else sheet.getRange(rowIdx, 1, 1, row.length).setValues([row]);
+}
+
+// A "pending" row is written the instant a relay starts (see
+// GCX Reply.user.js relayAbmReply_), before any send attempt — so a tab
+// closed/reloaded mid-flight still leaves a recoverable record. But that
+// means a fresh "pending" row is often just a completely normal send still
+// in progress a few seconds ago, not an abandoned one. Only surface it to
+// the cross-session sweep once it's old enough that the originating tab's
+// own retry loop (up to 3 attempts, each with network round trips + a
+// deliberate backoff — worst case comfortably under a minute) must already
+// be done one way or another. Without this, a second tab's sweep could pick
+// up a still-in-flight send and fire a genuine duplicate message to the buyer.
+const ABM_PENDING_STALE_MS = 90 * 1000;
+// A 'sending' row is one a browser has atomically claimed (claimAbmRelay) and
+// is actively delivering. Hidden from the pending list so no other browser
+// grabs the same reply — until this long passes, at which point we assume the
+// claiming browser died mid-send (tab closed, crash) and let another retry.
+const ABM_SENDING_STALE_MS = 5 * 60 * 1000;
+
+// Minimum userscript version that can correctly relay a queued reply's
+// attachments (fetch the specific comment's files + upload to SC). Reconciliation
+// queues rows carrying a CommentId; a pre-3.3.12 tab's sweep would send those
+// TEXT-ONLY and silently drop the attachments (exactly what dropped Wolfgang's
+// 3 invoice PDFs). So CommentId-bearing rows are withheld from any client that
+// doesn't declare it's at least this version — they wait for a capable browser.
+const ABM_ATTACH_MIN_VERSION = '3.3.12';
+
+function versionAtLeast_(v, min) {
+  const a = String(v || '').split('.').map(Number);
+  const b = String(min).split('.').map(Number);
+  for (let i = 0; i < b.length; i++) {
+    const x = a[i] || 0, y = b[i] || 0;
+    if (x !== y) return x > y;
+  }
+  return true;
+}
+
+function getAbmRelayPending_(clientVersion) {
+  const capable = versionAtLeast_(clientVersion, ABM_ATTACH_MIN_VERSION);
+  const sheet = getAbmLogSheet_();
+  const data = sheet.getDataRange().getValues();
+  if (data.length < 2) return [];
+  const headers = data[0];
+  const idx = name => headers.indexOf(name);
+  const now = Date.now();
+  const out = [];
+  for (let i = 1; i < data.length; i++) {
+    const row = data[i];
+    const status = row[idx('Status')];
+    if (!row[idx('TicketId')] || status === 'success') continue;
+    const ts = new Date(row[idx('Timestamp')]).getTime();
+    // in-flight browser send — leave it alone briefly
+    if (status === 'pending' && (!ts || (now - ts) < ABM_PENDING_STALE_MS)) continue;
+    // claimed by another browser and still plausibly delivering — skip until stale
+    if (status === 'sending' && (!ts || (now - ts) < ABM_SENDING_STALE_MS)) continue;
+    // attachment-capable send required — hide from too-old clients so they can't
+    // text-only-send it and drop the files.
+    if (row[idx('CommentId')] && !capable) continue;
+    out.push({
+      relayKey:    row[idx('RelayKey')],
+      ticketId:    row[idx('TicketId')],
+      commentId:   row[idx('CommentId')],
+      caseId:      row[idx('CaseId')],
+      marketplace: row[idx('Marketplace')],
+      attempts:    row[idx('Attempts')],
+      messageText: row[idx('MessageText')],
+    });
+  }
+  return out;
+}
+
+// Atomic claim so only ONE browser sends a given queued reply — critical now
+// that reconciliation can auto-queue real-customer replies that any agent's
+// tab might pick up. Uses LockService to serialize the read-modify-write:
+// grants the claim (flips the row to 'sending' with a fresh timestamp) only if
+// the row is still pending/failed/stale-sending. Returns { claimed: bool }.
+function claimAbmRelay_(relayKey) {
+  const lock = LockService.getScriptLock();
+  try { lock.waitLock(10000); } catch (e) { return { claimed: false, reason: 'lock_timeout' }; }
+  try {
+    const sheet = getAbmLogSheet_();
+    const data = sheet.getDataRange().getValues();
+    const headers = data[0];
+    const idx = name => headers.indexOf(name);
+    const now = Date.now();
+    for (let i = 1; i < data.length; i++) {
+      if (String(data[i][idx('RelayKey')]) !== String(relayKey)) continue;
+      const status = data[i][idx('Status')];
+      const ts = new Date(data[i][idx('Timestamp')]).getTime();
+      const claimable = status === 'pending' || status === 'failed' ||
+        (status === 'sending' && (!ts || (now - ts) >= ABM_SENDING_STALE_MS));
+      if (!claimable) return { claimed: false, reason: 'already_' + status };
+      sheet.getRange(i + 1, idx('Status') + 1).setValue('sending');
+      sheet.getRange(i + 1, idx('Timestamp') + 1).setValue(new Date());
+      SpreadsheetApp.flush();
+      return { claimed: true };
+    }
+    return { claimed: false, reason: 'not_found' };
+  } finally {
+    lock.releaseLock();
+  }
+}
+
+// A ticket can have multiple relay rows (one per reply) — returns ALL of
+// them, not just one, so nothing is hidden the way a single-row-per-ticket
+// lookup previously did.
+function getAbmRelayStatus_(ticketId) {
+  if (!ticketId) return null;
+  const sheet = getAbmLogSheet_();
+  const data = sheet.getDataRange().getValues();
+  if (data.length < 2) return null;
+  const headers = data[0];
+  const idx = name => headers.indexOf(name);
+  const rows = [];
+  for (let i = 1; i < data.length; i++) {
+    if (String(data[i][idx('TicketId')]) === String(ticketId)) {
+      rows.push({
+        relayKey:  data[i][idx('RelayKey')],
+        status:    data[i][idx('Status')],
+        attempts:  data[i][idx('Attempts')],
+        lastError: data[i][idx('LastError')],
+        timestamp: data[i][idx('Timestamp')],
+      });
+    }
+  }
+  return rows.length ? rows : null;
+}
+
+// Full recent history (delivered + undelivered), newest first — backs the
+// agent-facing status panel in GCX Reply, which lists both groups and lets
+// agents edit a row's status (mark delivered / re-queue).
+function getAbmRelayAll_(limit) {
+  const sheet = getAbmLogSheet_();
+  const data = sheet.getDataRange().getValues();
+  if (data.length < 2) return [];
+  const headers = data[0];
+  const idx = name => headers.indexOf(name);
+  const out = [];
+  for (let i = 1; i < data.length; i++) {
+    const row = data[i];
+    if (!row[idx('TicketId')]) continue;
+    out.push({
+      relayKey:    row[idx('RelayKey')],
+      ticketId:    row[idx('TicketId')],
+      commentId:   row[idx('CommentId')],
+      caseId:      row[idx('CaseId')],
+      marketplace: row[idx('Marketplace')],
+      status:      row[idx('Status')],
+      attempts:    row[idx('Attempts')],
+      lastError:   row[idx('LastError')],
+      timestamp:   row[idx('Timestamp')],
+      messageText: row[idx('MessageText')],
+    });
+  }
+  out.sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp));
+  return out.slice(0, limit || 50);
+}
+
+// Agent-initiated status edit from the panel. Marking 'success' takes a row
+// out of the retry sweep (agent confirmed/handled it manually); marking
+// 'failed' re-queues a delivered-looking row the agent knows didn't actually
+// arrive. Matched by RelayKey; bare-TicketId fallback covers pre-RelayKey rows.
+function setAbmRelayStatus_(relayKey, ticketId, status) {
+  const sheet = getAbmLogSheet_();
+  const data = sheet.getDataRange().getValues();
+  const headers = data[0];
+  const idx = name => headers.indexOf(name);
+  for (let i = 1; i < data.length; i++) {
+    const rk = String(data[i][idx('RelayKey')] || '');
+    const match = relayKey ? rk === String(relayKey)
+                           : String(data[i][idx('TicketId')]) === String(ticketId);
+    if (match) {
+      sheet.getRange(i + 1, idx('Status') + 1).setValue(status);
+      sheet.getRange(i + 1, idx('LastError') + 1).setValue('manually set by agent');
+      return true;
+    }
+  }
+  return false;
+}
+
+function deleteAbmRelayRows_(relayKey, ticketId) {
+  const sheet = getAbmLogSheet_();
+  const data = sheet.getDataRange().getValues();
+  const headers = data[0];
+  const idx = name => headers.indexOf(name);
+  let deleted = 0;
+  for (let i = data.length - 1; i >= 1; i--) {
+    const rk  = String(data[i][idx('RelayKey')] || '');
+    const tid = String(data[i][idx('TicketId')] || '');
+    if ((relayKey && rk === String(relayKey)) || (ticketId && tid === String(ticketId))) {
+      sheet.deleteRow(i + 1);
+      deleted++;
+    }
+  }
+  return deleted;
+}
+
+// POST-only: message text can be long enough to make a GET query string unwieldy.
+function doPost(e) {
+  try {
+    const body = JSON.parse((e && e.postData && e.postData.contents) || '{}');
+    if (body.action === 'logAbmRelay') {
+      upsertAbmRelayLog_(body);
+      return respond({ ok: true });
+    }
+    if (body.action === 'setAbmRelayStatus') {
+      return respond({ ok: setAbmRelayStatus_(body.relayKey, body.ticketId, body.status) });
+    }
+    if (body.action === 'deleteAbmRelayRow') {
+      return respond({ deleted: deleteAbmRelayRows_(body.relayKey, body.ticketId) });
+    }
+    if (body.action === 'claimAbmRelay') {
+      return respond(claimAbmRelay_(body.relayKey));
+    }
+    return respond({ error: 'unknown action' });
+  } catch (err) {
+    return respond({ error: err.message });
+  }
+}
+
 // ── Keep-warm: prevents GAS cold starts during business hours ─────────────────
 // Run setupKeepWarmTrigger() ONCE from the GAS editor to install it.
 function keepWarm() {
@@ -135,7 +440,7 @@ function diagJP() {
   CacheService.getScriptCache().remove('lwa_jp');
   Logger.log('Cache cleared.');
 
-  const props = PropertiesService.getScriptProperties().getProperties();
+  const props = scriptProps_();
   Logger.log('CLIENT_ID_JP present:      ' + !!props['LWA_CLIENT_ID_JP']);
   Logger.log('CLIENT_SECRET_JP present:  ' + !!props['LWA_CLIENT_SECRET_JP']);
   Logger.log('CLIENT_SECRET_JP prefix:   ' + (props['LWA_CLIENT_SECRET_JP'] || '').slice(0, 30));
@@ -165,7 +470,7 @@ function getLwaToken_(cred) {
   const hit      = cache.get(cacheKey);
   if (hit) return hit;
 
-  const props  = PropertiesService.getScriptProperties().getProperties();
+  const props  = scriptProps_();
   const sfx    = cred === 'jp' ? '_JP' : cred === 'in' ? '_IN' : '';
   const resp   = UrlFetchApp.fetch('https://api.amazon.com/auth/o2/token', {
     method: 'post',
@@ -207,8 +512,10 @@ function signingKey_(secret, dateStamp, region) {
   return hmac_(kService, 'aws4_request');
 }
 
-function spApiGet_(endpoint, region, cred, fullPath, tokenOverride) {
-  const props     = PropertiesService.getScriptProperties().getProperties();
+// Returns a signed fetch-options object (url + headers) without calling UrlFetchApp.
+// Use directly with UrlFetchApp.fetchAll() to parallelise multiple SP-API requests.
+function spApiBuildFetch_(endpoint, region, cred, fullPath, tokenOverride) {
+  const props     = scriptProps_();
   const accessKey = props['AWS_ACCESS_KEY_ID'];
   const secretKey = props['AWS_SECRET_ACCESS_KEY'];
   const token     = tokenOverride || getLwaToken_(cred);
@@ -243,17 +550,23 @@ function spApiGet_(endpoint, region, cred, fullPath, tokenOverride) {
   const sig      = hmacHex_(signingKey_(secretKey, dateStamp, region), sts);
   const auth     = `AWS4-HMAC-SHA256 Credential=${accessKey}/${scope}, SignedHeaders=${signedHdrs}, Signature=${sig}`;
 
-  const res = UrlFetchApp.fetch(endpoint + fullPath, {
+  return {
+    url:                endpoint + fullPath,
     method:             'get',
     headers:            { 'x-amz-access-token': token, 'x-amz-date': amzDate, 'Authorization': auth },
     muteHttpExceptions: true,
-  });
+  };
+}
+
+function spApiGet_(endpoint, region, cred, fullPath, tokenOverride) {
+  const req = spApiBuildFetch_(endpoint, region, cred, fullPath, tokenOverride);
+  const res = UrlFetchApp.fetch(req.url, req);
   return { status: res.getResponseCode(), body: res.getContentText() };
 }
 
 // ── SP-API POST (for Tokens API) ──────────────────────────────────────────────
 function spApiPost_(endpoint, region, cred, path, body) {
-  const props     = PropertiesService.getScriptProperties().getProperties();
+  const props     = scriptProps_();
   const accessKey = props['AWS_ACCESS_KEY_ID'];
   const secretKey = props['AWS_SECRET_ACCESS_KEY'];
   const token     = getLwaToken_(cred);
@@ -302,16 +615,24 @@ function getRdt_(endpoint, region, cred, orderId) {
 }
 
 // ── Buyer purchase + refund stats (last 2 years, up to 500 orders) ───────────
-// Returns { totalPurchases, totalRefunds } where totalRefunds = Canceled orders.
+// Returns { totalPurchases, totalRefunds }
+// totalRefunds = orders with a Finances API RefundEventList entry (post-shipment
+// refunds are NOT reflected in OrderStatus — 'Canceled' is pre-fulfillment only).
+// Cached 5 min per buyer email — shared across agents on the same ticket.
 function fetchBuyerPurchaseStats_(endpoint, region, cred, salesChannel, buyerEmail) {
   const mpId = marketplaceId_(salesChannel);
   if (!mpId || !buyerEmail) return null;
 
+  const cache    = CacheService.getScriptCache();
+  const cacheKey = 'bstat_' + Utilities.base64Encode(buyerEmail).replace(/[+/=]/g, '').slice(0, 50);
+  const hit      = cache.get(cacheKey);
+  if (hit) { try { return JSON.parse(hit); } catch(_) {} }
+
   const createdAfter = new Date(Date.now() - 2 * 365.25 * 24 * 3600 * 1000).toISOString().slice(0, 19) + 'Z';
   let totalPurchases = 0;
-  let totalRefunds   = 0;
   let nextToken      = null;
   let page           = 0;
+  const orderIds     = [];
 
   do {
     const path = nextToken
@@ -323,24 +644,97 @@ function fetchBuyerPurchaseStats_(endpoint, region, cred, salesChannel, buyerEma
       const d      = JSON.parse(r.body);
       const orders = d.payload?.Orders || [];
       totalPurchases += orders.length;
-      totalRefunds   += orders.filter(o => o.OrderStatus === 'Canceled').length;
+      orders.forEach(o => { if (o.AmazonOrderId) orderIds.push(o.AmazonOrderId); });
       nextToken       = d.payload?.NextToken || null;
     } catch { break; }
     page++;
   } while (nextToken && page < 5);
 
-  return { totalPurchases, totalRefunds };
+  const totalRefunds = fetchBuyerRefundCount_(endpoint, region, cred, orderIds);
+  const result = { totalPurchases, totalRefunds };
+  try { cache.put(cacheKey, JSON.stringify(result), 300); } catch(_) {}
+  return result;
+}
+
+// ── Count refunded orders via Finances API ────────────────────────────────────
+// Uses GET /finances/v0/orders/{id}/financialEvents, batched 30 at a time via
+// UrlFetchApp.fetchAll() (respects Finances API burst limit of 30).
+// Per-order results cached 1 hr — refund status for Shipped orders is immutable.
+// Returns 0 gracefully if Finances API role is not enabled (403).
+function fetchBuyerRefundCount_(endpoint, region, cred, orderIds) {
+  if (!orderIds || !orderIds.length) return 0;
+  const cache = CacheService.getScriptCache();
+  const BATCH = 30;
+  let count = 0;
+  const uncached = [];
+
+  for (const id of orderIds) {
+    const hit = cache.get('fin_' + id);
+    if (hit !== null) { if (hit === '1') count++; }
+    else uncached.push(id);
+  }
+
+  for (let i = 0; i < uncached.length; i += BATCH) {
+    const batch = uncached.slice(i, i + BATCH);
+    const requests = batch.map(id =>
+      spApiBuildFetch_(endpoint, region, cred, `/finances/v0/orders/${id}/financialEvents`));
+    let results;
+    try { results = UrlFetchApp.fetchAll(requests); }
+    catch(_) { break; }
+
+    let financeUnavailable = false;
+    for (let j = 0; j < results.length; j++) {
+      const id   = batch[j];
+      const code = results[j].getResponseCode();
+      if (code === 403) { financeUnavailable = true; break; }
+      if (code === 200) {
+        try {
+          const ev = JSON.parse(results[j].getContentText()).payload?.FinancialEvents;
+          const refunded = (ev?.RefundEventList?.length > 0) ||
+                           (ev?.GuaranteeClaimEventList?.length > 0) ||
+                           (ev?.ChargebackEventList?.length > 0);
+          cache.put('fin_' + id, refunded ? '1' : '0', 3600);
+          if (refunded) count++;
+        } catch(_) {}
+      }
+    }
+    if (financeUnavailable) break;
+    if (i + BATCH < uncached.length) Utilities.sleep(2000);
+  }
+
+  return count;
 }
 
 // ── Fetch order + items + address + buyer ─────────────────────────────────────
+// Results are cached 90 s per order ID so concurrent agents on the same ticket
+// share a single SP-API round-trip instead of each making 5-6 calls.
 function fetchOrderData_(orderId) {
+  const cache    = CacheService.getScriptCache();
+  const cacheKey = 'ord2_' + orderId;
+  const hit      = cache.get(cacheKey);
+  if (hit) { try { return JSON.parse(hit); } catch(_) {} }
+
+  const result = fetchOrderDataFresh_(orderId);
+  try { cache.put(cacheKey, JSON.stringify(result), 90); } catch(_) {}
+  return result;
+}
+
+// Tries each SP-API region one at a time (EU -> FE/JP -> NA -> IN) until one
+// has the order. Previously tried parallelizing this via UrlFetchApp.fetchAll()
+// on the theory that non-EU orders were paying for wasted sequential attempts
+// — reverted after real-world testing showed it made things SLOWER overall,
+// not faster: it unconditionally built all 4 signed requests (and their LWA/
+// props lookups) up front every time, whereas the sequential version almost
+// always succeeds on the very first (EU) attempt for this account's order mix,
+// so parallelizing traded a rare slow path for a much more common slower one.
+// Keep this sequential; scriptProps_() memoization below is the safe win.
+function findOrderRegion_(orderId) {
   const regionErrors = [];
   for (const { endpoint, region, cred } of REGIONS) {
     let r;
     try { r = spApiGet_(endpoint, region, cred, `/orders/v0/orders/${orderId}`); }
     catch (e) { regionErrors.push(`${cred}:LWA(${e.message})`); continue; }
 
-    // 403 + "expired" → cached LWA token went stale; clear cache and retry once
     if (r.status === 403 && r.body.includes('expired')) {
       CacheService.getScriptCache().remove('lwa_' + cred);
       try { r = spApiGet_(endpoint, region, cred, `/orders/v0/orders/${orderId}`); }
@@ -353,38 +747,48 @@ function fetchOrderData_(orderId) {
       continue;
     }
 
-    const order  = JSON.parse(r.body).payload || {};
+    const order = JSON.parse(r.body).payload || {};
     if (!order.AmazonOrderId) {
       const preview = r.body.substring(0, 120).replace(/\s+/g, ' ');
       regionErrors.push(`${cred}:200-noId(${preview})`);
       continue;
     }
 
-    const rdtResult = getRdt_(endpoint, region, cred, orderId);
-    const rdtToken  = rdtResult.token || undefined;
-    const itemsR    = spApiGet_(endpoint, region, cred, `/orders/v0/orders/${orderId}/items`,     rdtToken);
-    const addrR     = spApiGet_(endpoint, region, cred, `/orders/v0/orders/${orderId}/address`);
-    const buyerR    = spApiGet_(endpoint, region, cred, `/orders/v0/orders/${orderId}/buyerInfo`, rdtToken);
-
-    const buyer = buyerR.status === 200 ? JSON.parse(buyerR.body).payload || {} : {};
-    const stats = fetchBuyerPurchaseStats_(endpoint, region, cred, order.SalesChannel, buyer.BuyerEmail || null);
-
-    return {
-      order,
-      items:          itemsR.status === 200 ? JSON.parse(itemsR.body).payload?.OrderItems || [] : [],
-      itemsStatus:    itemsR.status,
-      itemsError:     itemsR.body,
-      rdtStatus:      rdtResult.status,
-      rdtError:       rdtResult.error,
-      address:        addrR.status === 200 ? JSON.parse(addrR.body).payload?.ShippingAddress || {} : {},
-      buyer,
-      orderCount:     stats ? stats.totalPurchases : null,
-      totalPurchases: stats ? stats.totalPurchases : null,
-      totalRefunds:   stats ? stats.totalRefunds   : null,
-      region,
-    };
+    return { endpoint, region, cred, order };
   }
   throw new Error('Order not found — ' + regionErrors.join(' | '));
+}
+
+function fetchOrderDataFresh_(orderId) {
+  const { endpoint, region, cred, order } = findOrderRegion_(orderId);
+
+  const rdtResult = getRdt_(endpoint, region, cred, orderId);
+  const rdtToken  = rdtResult.token || undefined;
+
+  // Fire items + address + buyerInfo in parallel — saves ~600 ms vs sequential
+  const [itemsR, addrR, buyerR] = UrlFetchApp.fetchAll([
+    spApiBuildFetch_(endpoint, region, cred, `/orders/v0/orders/${orderId}/items`,     rdtToken),
+    spApiBuildFetch_(endpoint, region, cred, `/orders/v0/orders/${orderId}/address`),
+    spApiBuildFetch_(endpoint, region, cred, `/orders/v0/orders/${orderId}/buyerInfo`, rdtToken),
+  ]).map(res => ({ status: res.getResponseCode(), body: res.getContentText() }));
+
+  const buyer = buyerR.status === 200 ? JSON.parse(buyerR.body).payload || {} : {};
+  const stats = fetchBuyerPurchaseStats_(endpoint, region, cred, order.SalesChannel, buyer.BuyerEmail || null);
+
+  return {
+    order,
+    items:          itemsR.status === 200 ? JSON.parse(itemsR.body).payload?.OrderItems || [] : [],
+    itemsStatus:    itemsR.status,
+    itemsError:     itemsR.body,
+    rdtStatus:      rdtResult.status,
+    rdtError:       rdtResult.error,
+    address:        addrR.status === 200 ? JSON.parse(addrR.body).payload?.ShippingAddress || {} : {},
+    buyer,
+    orderCount:     stats ? stats.totalPurchases : null,
+    totalPurchases: stats ? stats.totalPurchases : null,
+    totalRefunds:   stats ? stats.totalRefunds   : null,
+    region,
+  };
 }
 
 
@@ -401,38 +805,68 @@ function colToLetter_(col) {
   return letter;
 }
 
-function checkMarketplaces_(asin) {
-  const cache    = CacheService.getScriptCache();
-  const cacheKey = 'mkt3_' + asin;
-  const hit      = cache.get(cacheKey);
-  if (hit) return JSON.parse(hit);
+// ── Sheet row caching helpers ─────────────────────────────────────────────────
+// GAS ScriptCache has a 100 KB per-entry limit. We only write if the serialised
+// JSON fits in 95 KB; otherwise we fall through to a live read every time.
+const SHEET1_CACHE_KEY = 'prod_sheet1_v1';
+const SHEET2_CACHE_KEY = 'prod_sheet2_v1';
+const SHEET_ROW_TTL    = 3600;
+const MKT_INDEX_CACHE_KEY = 'mkt_idx_v1';
+const MKT_INDEX_TTL    = 14400;
 
-  const ss      = SpreadsheetApp.openById(MARKET_SS_ID);
-  const selling = [];
+function loadSheetRows_(ssId, sheetName, cacheKey) {
+  const cache = CacheService.getScriptCache();
+  const hit   = cache.get(cacheKey);
+  if (hit) return JSON.parse(hit);
+  const sheet = SpreadsheetApp.openById(ssId).getSheetByName(sheetName);
+  if (!sheet) return [];
+  const rows = sheet.getDataRange().getValues();
+  const json = JSON.stringify(rows);
+  if (json.length < 95000) cache.put(cacheKey, json, SHEET_ROW_TTL);
+  return rows;
+}
+
+// Builds a full ASIN → [{name, gid, cell}] index across all market sheets and
+// caches it for 4 hours. Returns null if the index is too large to cache (rare).
+function getMktIndex_() {
+  const cache = CacheService.getScriptCache();
+  const hit   = cache.get(MKT_INDEX_CACHE_KEY);
+  if (hit) return JSON.parse(hit);
+  const ss    = SpreadsheetApp.openById(MARKET_SS_ID);
+  const index = {};
   for (const sheetName of MARKET_SHEETS) {
     const sheet = ss.getSheetByName(sheetName);
     if (!sheet) continue;
-    const data = sheet.getDataRange().getValues();
-    for (let r = 0; r < data.length; r++) {
-      const cells  = data[r].map(c => String(c));
-      const colIdx = cells.findIndex(c => c === asin);
-      if (colIdx >= 0) {
-        if (!cells.some(c => c.includes('단종'))) {
-          selling.push({ name: sheetName, gid: sheet.getSheetId(), cell: colToLetter_(colIdx) + (r + 1) });
+    const gid  = sheet.getSheetId();
+    const rows = sheet.getDataRange().getValues();
+    for (let r = 0; r < rows.length; r++) {
+      const cells = rows[r].map(c => String(c));
+      for (let col = 0; col < cells.length; col++) {
+        const cell = cells[col];
+        if (/^B[A-Z0-9]{9}$/.test(cell)) {
+          if (!cells.some(c => c.includes('단종'))) {
+            if (!index[cell]) index[cell] = [];
+            index[cell].push({ name: sheetName, gid, cell: colToLetter_(col) + (r + 1) });
+          }
+          break;
         }
-        break;
       }
     }
   }
+  const json = JSON.stringify(index);
+  if (json.length < 95000) cache.put(MKT_INDEX_CACHE_KEY, json, MKT_INDEX_TTL);
+  return index;
+}
 
-  cache.put(cacheKey, JSON.stringify(selling), 3600);
-  return selling;
+function checkMarketplaces_(asin) {
+  const idx = getMktIndex_();
+  return idx[asin] || [];
 }
 
 // ── Google Sheet ASIN lookup ──────────────────────────────────────────────────
 function lookupAsin_(asin) {
-  const sheet   = SpreadsheetApp.openById(SHEET_ID).getSheetByName(SHEET_NAME);
-  const data    = sheet.getDataRange().getValues();
+  const data    = loadSheetRows_(SHEET_ID, SHEET_NAME, SHEET1_CACHE_KEY);
+  if (!data.length) return null;
   const headers = data[0];
   const asinIdx = headers.indexOf('ASIN');
   if (asinIdx < 0) throw new Error('ASIN column not found in sheet');
@@ -450,9 +884,8 @@ function lookupAsin_(asin) {
 
 // ── Market spreadsheet — Data sheet ASIN lookup (source 2) ───────────────────
 function lookupAsin2_(asin) {
-  const sheet = SpreadsheetApp.openById(MARKET_SS_ID).getSheetByName('Data');
-  if (!sheet) return null;
-  const data    = sheet.getDataRange().getValues();
+  const data = loadSheetRows_(MARKET_SS_ID, 'Data', SHEET2_CACHE_KEY);
+  if (!data.length) return null;
   const headers = data[0];
   const asinIdx = headers.indexOf('ASIN');
   if (asinIdx < 0) return null;
@@ -560,12 +993,22 @@ function inferReason_(text, category) {
 }
 
 function loadDefectDataDR_(category) {
-  const sh = SpreadsheetApp.openById(DEFECT_SS_ID).getSheetByName(DEFECT_SHEET_NAME);
-  if (!sh) { Logger.log('loadDefectData: sheet not found'); return { rawList: [], list: [], enrichedList: [] }; }
-  const lastRow = sh.getLastRow();
-  if (lastRow < 2) return { rawList: [], list: [], enrichedList: [] };
+  const cache     = CacheService.getScriptCache();
+  const rowsKey   = 'dr_defect_list_v1';
+  let rows;
+  const rowsHit   = cache.get(rowsKey);
+  if (rowsHit) {
+    rows = JSON.parse(rowsHit);
+  } else {
+    const sh = SpreadsheetApp.openById(DEFECT_SS_ID).getSheetByName(DEFECT_SHEET_NAME);
+    if (!sh) { Logger.log('loadDefectData: sheet not found'); return { rawList: [], list: [], enrichedList: [] }; }
+    const lastRow = sh.getLastRow();
+    if (lastRow < 2) return { rawList: [], list: [], enrichedList: [] };
+    rows = sh.getRange(2, 1, lastRow - 1, 3).getValues();
+    const json = JSON.stringify(rows);
+    if (json.length < 95000) cache.put(rowsKey, json, 21600);
+  }
 
-  const rows = sh.getRange(2, 1, lastRow - 1, 3).getValues();
   let filtered = rows.filter(r => (!category || String(r[0]).trim() === category) && r[1]);
   if (!filtered.length && category) {
     Logger.log(`loadDefectData: no rows for category="${category}", using all`);
@@ -735,6 +1178,24 @@ function updateFeedbackSheet() {
     [39,
       '【Before】 인도(Amazon.in) SP-API LWA 토큰 만료 시 예외 미처리 → 주문 조회 전체 실패\n【After GAS 2026-06-15】 지역별 LWA 예외 개별 catch, 403+만료 시 캐시 자동 삭제 후 1회 재시도\n📋 테스트 티켓: #1000150413',
       'v2.8.4'],
+    [40,
+      '【Before】 SPA 티켓 이동 시 history.pushState 직후 clearAllZdFields_() 호출 → DOM이 아직 이전 티켓을 렌더링 중일 경우 해당 티켓 ZD 필드값이 지워짐 → 다른 Zendesk 탭으로 이동 후 복귀 시 Purchase Date 변경, Order ID/ASIN/SKU 공란 발생\n【After v2.19.1】 clearAllZdFields_()를 resetPanel()에서 Auto-Fill 확인 직전으로 이동 → DOM 타이밍과 무관하게 정확한 티켓 필드만 초기화\n✅ 테스트 티켓: #1000150854',
+      'v2.19.1'],
+    [41,
+      '【Before】 제품 정보 시트 AGL10123 모델명 불일치 → "Glas.tR EZ Fit Pro"로 오매칭\n【After v2.19.1】 시트 AGL10123 모델명 → "Glas.tR Optik Pro"으로 수정\n✅ 테스트 티켓: #1000150922 (ASIN B0FFVDVB4S)',
+      'v2.19.1'],
+    [42,
+      '【Before】 제품 정보 시트 ACS07624 모델명 불일치 → "Ultra Hybrid OneTap Metal Ring MagFit"으로 오매칭\n【After v2.19.1】 시트 ACS07624 모델명 → "Ultra Hybrid MagFit"으로 수정\n✅ 테스트 티켓: #1000150934 (ASIN B0CV71SSMQ)',
+      'v2.19.1'],
+    [43,
+      '【Before】 제품 정보 시트 AMP08885 대분류가 "거치대/스탠드" 형태로 등록 → SDA로 매핑됨\n【After v2.19.1】 시트 AMP08885 대분류 → "차량용 거치대/스탠드"으로 수정 → NewBiz 정확 선택\n✅ 테스트 티켓: #1000151691 (ASIN B0DJPZ8RHG)',
+      'v2.19.1'],
+    [44,
+      '【Before】 html2canvas(1.4MB) @require가 잔류(Liquid Glass 제거 후 dead code) / 매 Auto-Fill마다 ZD field-opts API 3회 + ticket JSON 2회 중복 호출 / SC 세션 만료 시 무음 실패 / SC 구매이력 업데이트 시 전체 패널 re-render / GAS 시트 읽기 매 요청마다 cold read\n【After v2.20.0】 html2canvas @require 제거, fetchTicketJson_(60s TTL) + fetchZdFieldOptsCached(sessionStorage 30min TTL) 캐싱 도입, SC 세션 만료 배너 표시, SC stats 인플레이스 DOM 패치(#sp-stat-badge/#sp-stat-link-wrap), loadSheetRows_(ScriptCache 1h) + getMktIndex_(4h) + loadDefectDataDR_ allRows(6h) 캐싱\n✅ 2026-06-30 적용',
+      'v2.20.0'],
+    [45,
+      '【Before】 환불 수 = OrderStatus === "Canceled" 주문 수 → 배송 완료 후 환불된 주문은 OrderStatus가 Shipped 유지, 반영 안 됨 → 환불 0건 표시\n【After GAS v2.6.2 / TM v2.20.1】 Finances API GET /finances/v0/orders/{id}/financialEvents 병렬 호출(UrlFetchApp.fetchAll, 30건 배치) → RefundEventList 비어있지 않으면 환불로 집계. 오더당 결과 1hr 캐시, 403 시 graceful 폴백. SC fallback totalRefunds: 0 하드코딩 → null로 수정(기존 SP-API 값 유지)\n✅ 2026-07-06 적용',
+      'v2.20.1'],
   ];
 
   UPDATES.forEach(([row, feedback, build]) => {
@@ -755,6 +1216,10 @@ function updateFeedbackSheet() {
     // row 37: Fail already set by team — do not overwrite
     [38, 'Pass'],   // v2.8.3 Spigen SKU pattern rejects "PE2304IN 45w"
     [39, 'Pass'],   // GAS 2026-06-15 India LWA per-region catch + retry applied
+    [40, 'Pass'],   // v2.19.1 clearAllZdFields_() moved to Auto-Fill callback
+    [41, 'Pass'],   // v2.19.1 AGL10123 → "Glas.tR Optik Pro"
+    [42, 'Pass'],   // v2.19.1 ACS07624 → "Ultra Hybrid MagFit"
+    [43, 'Pass'],   // v2.19.1 AMP08885 대분류 → "차량용 거치대/스탠드"
   ];
   GCX_TEST.forEach(([row, val]) => sheet.getRange(row, H_COL).setValue(val));
 
@@ -778,6 +1243,9 @@ function fixProductSheetData() {
     'AGL10819': ['모델명',  'Glas.tR EZ Fit Anti-Glare'],
     'AGL07930': ['모델명',  'Glas.tR EZ Fit Anti Reflection'],
     'AMP09837': ['대분류',  '차량용 거치대/스탠드'],
+    'AGL10123': ['모델명',  'Glas.tR Optik Pro'],
+    'ACS07624': ['모델명',  'Ultra Hybrid MagFit'],
+    'AMP08885': ['대분류',  '차량용 거치대/스탠드'],
   };
 
   const colMap = { '모델명': MODEL_COL, '대분류': DAEBUN_COL };

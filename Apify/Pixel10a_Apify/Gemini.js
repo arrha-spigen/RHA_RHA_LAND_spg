@@ -4,7 +4,7 @@
 const SHEET_NAME = 'Defect';
 const CACHE_TTL_SECONDS = 60 * 60 * 6; // 6 hours
 
-const GEMINI_MODELS = ['gemini-3.1-flash-lite', 'gemini-2.5-flash-lite'];
+const GEMINI_MODELS = ['gemini-3.1-flash-lite', 'gemini-2.5-flash-lite', 'gemini-3.5-flash'];
 
 
 /**********************************************************

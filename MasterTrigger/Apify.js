@@ -23,6 +23,10 @@ const APIFY_TASKS = {
     taskId: 'cskwDlRo3TY9TLsiQ',
     sheetPrefix: '유지훈P'
   },
+  GlxZ8: {
+    taskId: '0imX0G3cKe75WJwXX',
+    sheetPrefix: 'GlxZ8'
+  },
   // Pixel10a: {
   //   taskId: 'I8884GTT3Tgthg9o4',
   //   sheetPrefix: 'Pixel10a'
@@ -166,32 +170,49 @@ function pollApifyRuns() {
     const items = JSON.parse(res.getContentText());         
     if (!items || !items.length) return;                                                          
   
-    // Filter out Axesso penalty rows (returned when a filter combination yields 0 reviews).      
-    // These have statusMessage "NO_REVIEWS_PENALTY_1/2/3" and contain no review data.
-    const filtered = items.filter(r =>                                                            
-      !String(r.statusMessage || '').startsWith('NO_REVIEWS_PENALTY')
-    );                                                                                            
-                                                                                                  
+    // Filter out Axesso penalty rows (returned when a filter combination yields 0 reviews,
+    // or the ASIN/page wasn't found). These have statusMessage like
+    // "NO_REVIEWS_PENALTY_1/2/3" or "NOT_FOUND_PENALTY_1/2/3" and contain no review data —
+    // only a handful of metadata keys survive clean=true, so they must never be allowed to
+    // seed the header row.
+    const filtered = items.filter(r =>
+      !/_PENALTY_\d+$/.test(String(r.statusMessage || ''))
+    );
+
     if (!filtered.length) {
       Logger.log(`  [${sheetPrefix}] All ${items.length} rows were penalty rows — sheet skipped`);
-      return;                                                                                     
+      return;
     }
-                                                                                                  
-    if (filtered.length < items.length) {                   
-      Logger.log(`  [${sheetPrefix}] Dropped ${items.length - filtered.length} penalty row(s), keeping ${filtered.length}`);                                                                   
+
+    if (filtered.length < items.length) {
+      Logger.log(`  [${sheetPrefix}] Dropped ${items.length - filtered.length} penalty row(s), keeping ${filtered.length}`);
     }
-                                                                                                  
-    const ss = SpreadsheetApp.getActiveSpreadsheet();                                             
+
+    const ss = SpreadsheetApp.getActiveSpreadsheet();
     const baseName = `${sheetPrefix}_${formatYYMMDD_(startedAt)}`;
-    const sheetName = getUniqueSheetName_(ss, baseName);                                          
-    const sh = ss.insertSheet(sheetName);                                                         
-  
-    const headers = Object.keys(filtered[0]);                                                     
+    const sheetName = getUniqueSheetName_(ss, baseName);
+    const sh = ss.insertSheet(sheetName);
+
+    // Union of keys across all kept rows — clean=true strips empty fields per-item, so a
+    // single row (even a real one) can't be trusted to carry every column.
+    const headerSet = new Set();
+    filtered.forEach(r => Object.keys(r).forEach(k => headerSet.add(k)));
+    const headers = Array.from(headerSet);
     sh.getRange(1, 1, 1, headers.length).setValues([headers]);
 
-    const values = filtered.map(r => headers.map(h => r[h] ?? ''));                               
+    // Some Axesso fields (filters, reviewSummary, imageUrlList, variationList,
+    // videoUrlList) are nested objects/arrays, not scalars — Range.setValues()
+    // can't write those directly, so they're JSON-stringified for the cell.
+    const values = filtered.map(r => headers.map(h => _toCellValue_(r[h])));
     sh.getRange(2, 1, values.length, headers.length).setValues(values);
-  }  
+  }
+
+  function _toCellValue_(v) {
+    if (v === null || v === undefined) return '';
+    if (v instanceof Date) return v;
+    if (typeof v === 'object') return JSON.stringify(v);
+    return v;
+  }
 
 /*************************************************
  * UNIQUE SHEET NAME
@@ -300,3 +321,46 @@ function clearRunDoneProperties() {
     createResultSheet_(sheetPrefix, defaultDatasetId, new Date(startedAt));
     Logger.log(`Done — check for sheet: ${sheetPrefix}_${formatYYMMDD_(new Date(startedAt))}`);
   }
+
+/*************************************************
+ * REPAIR — regenerate a materialized sheet from its
+ * task's most recent run (e.g. after a header/data bug
+ * left it broken). Deletes the stale sheet first so
+ * getUniqueSheetName_ doesn't append a numeric suffix.
+ *************************************************/
+
+function repairLatestRun(taskKey) {
+  const task = APIFY_TASKS[taskKey];
+  if (!task) {
+    Logger.log(`Unknown task key: ${taskKey}. Valid keys: ${Object.keys(APIFY_TASKS).join(', ')}`);
+    return;
+  }
+
+  const token = getApifyToken_();
+  const url = `${APIFY_BASE}/actor-tasks/${task.taskId}/runs/last?token=${token}`;
+  const res = UrlFetchApp.fetch(url, { muteHttpExceptions: true });
+  const json = JSON.parse(res.getContentText());
+
+  if (!json.data) {
+    Logger.log(`No recent run found for ${taskKey}`);
+    return;
+  }
+
+  const { id: runId, status, defaultDatasetId, startedAt } = json.data;
+  Logger.log(`Run ID: ${runId} | Status: ${status} | Dataset: ${defaultDatasetId}`);
+
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const staleName = `${task.sheetPrefix}_${formatYYMMDD_(new Date(startedAt))}`;
+  const stale = ss.getSheetByName(staleName);
+  if (stale) {
+    ss.deleteSheet(stale);
+    Logger.log(`Deleted stale sheet: ${staleName}`);
+  }
+
+  createResultSheet_(task.sheetPrefix, defaultDatasetId, new Date(startedAt));
+  Logger.log(`Recreated sheet: ${staleName}`);
+}
+
+// Editor's Run button calls functions with no arguments, so repairLatestRun
+// (which takes a taskKey) can't be invoked directly from there — use this instead.
+function repairGlxZ8Sheet() { repairLatestRun('GlxZ8'); }

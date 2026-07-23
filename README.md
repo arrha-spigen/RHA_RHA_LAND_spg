@@ -15,16 +15,19 @@ spigen-gcx-automation/
 │
 ├── MasterTrigger/              # GAS — daily review distribution job (all products)
 ├── Apify/
-│   ├── APIFY_Axesso/           # GAS — Apify/Axesso review scrape + sheet distribution (legacy master)
-│   ├── Glx26_Monday → see Glx26_Monday/ at root
+│   ├── APIFY_Axesso/           # GAS — legacy master Apify/Axesso review scrape + sheet distribution
+│   ├── Glx26_Apify/            # GAS — Galaxy S26 Apify trigger + Monday.com board sync
+│   ├── GlxZ8_Apify/            # GAS — Galaxy Z Fold8/Flip8/Fold8 Ultra Apify trigger + Monday sync
+│   ├── Auto_Acc_Apify/         # GAS — Auto Accessories per-product Apify trigger
 │   ├── Pixel10a_Apify/         # GAS — Pixel 10a per-product Apify trigger
 │   ├── Power_Acc_Apify/        # GAS — Power Accessories per-product Apify trigger
 │   ├── SDA_Apify/              # GAS — Screen & Display Accessories per-product Apify trigger
 │   ├── iPh17e_Apify/           # GAS — iPhone 17e per-product Apify trigger
+│   ├── iPh17e_Monday/          # GAS — iPhone 17e Monday.com board sync (S26-pattern port)
 │   ├── 유지훈P_Apify/           # GAS — 유지훈P per-product Apify trigger
-│   └── apify-amazon-dp-scraper/ # Apify Actor — Amazon /dp/ scraper (cloud-run version)
-│
-├── Glx26_Monday/               # GAS — Galaxy S26 Apify trigger + Monday.com board sync
+│   ├── apify-amazon-dp-scraper/    # Apify Actor — Amazon /dp/ scraper (cloud-run version)
+│   ├── apify-axesso-wrapper/       # Apify Actor wrapper around Axesso API
+│   └── apify-axesso-wrapper-private/ # Private variant of the Axesso wrapper Actor
 │
 ├── MCF_Tracking/               # GAS — MCF order tracking, SP-API fee/tracking lookup, daily Chat alert
 ├── CX_Dashboard/               # GAS — SP-API data dashboard (orders, sales, inventory, feedback)
@@ -33,9 +36,15 @@ spigen-gcx-automation/
 ├── TCTChatLog_GCX/             # GAS — Lazada/Shopee Esc T2 alerts + daily close report to Google Chat
 ├── TicketDailyReport/          # GAS — Zendesk daily ticket report with charts sent to Google Chat
 ├── TriggerAlert/               # GAS — Monday.com board → Google Sheets sync
+├── KPI_Report/                 # GAS — populates KPI result cells on the team's KPI spreadsheet
+├── Monday_CX_Board/            # GAS — generic Monday.com board ↔ Google Sheet sync (modeless UI dialog)
 │
-├── Tampermonkey_GCX/           # Tampermonkey userscripts — MCF autofill (EU + JP), invoice download
-├── tampermonkey_scripts/       # Tampermonkey full export (includes .options.json / .storage.json)
+├── ABM_TicketMerge/            # GAS — merges duplicate Amazon Buyer Message tickets into one thread + inbound cleanup
+├── PurchaseDate_Sync/          # GAS — syncs Zendesk's custom Purchase Date field to a Monday.com board
+├── GCXReply_GAS/               # GAS — GCX Reply's SP-API/Sheet-lookup backend + versioned script archive
+│
+├── tampermonkey_scripts/       # Tampermonkey userscripts — GCX Reply, MCF Autofill (EU + JP), Invoice Automation
+├── gcx-reply-extension/        # WIP native Chrome extension (MV3) port of GCX Reply — not yet feature-complete
 │
 └── reference/                  # Internal reference docs
 ```
@@ -58,9 +67,12 @@ spigen-gcx-automation/
 |---------|---------|-------------|--------|
 | [MasterTrigger](MasterTrigger/) | All | Daily job that reads the `"finalize"` filter view from each product's source sheet and distributes new reviews into destination spreadsheets. Handles dedup, `=dr()` formula injection, and `tem` sheet refresh. | [README](MasterTrigger/README.md) |
 | [Apify/APIFY_Axesso](Apify/APIFY_Axesso/) | All | Legacy master script (same logic as MasterTrigger). Also contains `Code.gs` for Apify run lifecycle and `Product.gs` for aggregate rating/review fetch. | [README](Apify/APIFY_Axesso/README.md) |
-| [Glx26_Monday](Glx26_Monday/) | Galaxy S26 | Per-product Apify trigger + Monday.com board sync for Galaxy S26 review sheet. | [README](Glx26_Monday/README.md) |
+| [Apify/Glx26_Apify](Apify/Glx26_Apify/) | Galaxy S26 | Per-product Apify trigger + Monday.com board sync for Galaxy S26 review sheet. (Renamed from the old root-level `Glx26_Monday/`.) | [README](Apify/Glx26_Apify/README.md) |
+| [Apify/GlxZ8_Apify](Apify/GlxZ8_Apify/) | Galaxy Z8 | Per-product Apify trigger + Monday.com board sync (board 18421346787, 📌Galaxy Z8 Case+CP) for the Galaxy Z Fold 8 / Flip 8 / Fold 8 Ultra review sheet. Copy of the Glx26 project with Z8 sheet/board/group config. | — |
+| [Apify/Auto_Acc_Apify](Apify/Auto_Acc_Apify/) | Auto Accessories | Per-product Apify trigger for the Auto Accessories review sheet. | — |
 | [Apify/Pixel10a_Apify](Apify/Pixel10a_Apify/) | Pixel 10a | Per-product Apify trigger for Pixel 10a review sheet. | [README](Apify/Pixel10a_Apify/README.md) |
 | [Apify/iPh17e_Apify](Apify/iPh17e_Apify/) | iPhone 17e | Per-product Apify trigger for iPhone 17e review sheet. | [README](Apify/iPh17e_Apify/README.md) |
+| [Apify/iPh17e_Monday](Apify/iPh17e_Monday/) | iPhone 17e | Monday.com board sync for iPhone 17e (same pattern as Glx26_Apify's board sync). | — |
 | [Apify/SDA_Apify](Apify/SDA_Apify/) | SDA | Per-product Apify trigger for Screen & Display Accessories review sheet. | [README](Apify/SDA_Apify/README.md) |
 | [Apify/Power_Acc_Apify](Apify/Power_Acc_Apify/) | Power Acc. | Per-product Apify trigger for Power Accessories review sheet. | [README](Apify/Power_Acc_Apify/README.md) |
 | [Apify/유지훈P_Apify](Apify/유지훈P_Apify/) | 유지훈P | Per-product Apify trigger for 유지훈P review sheet. | [README](Apify/유지훈P_Apify/README.md) |
@@ -76,12 +88,23 @@ spigen-gcx-automation/
 | [TCTChatLog_GCX](TCTChatLog_GCX/) | Lazada/Shopee escalation alerts — sends Google Chat cards when a row status changes to `Esc T2`, plus a daily close-report card. | [README](TCTChatLog_GCX/README.md) |
 | [TicketDailyReport](TicketDailyReport/) | Fetches Zendesk ticket views, updates graph sheets, and sends daily chart images to Google Chat via the `hcti.io` image API. | [README](TicketDailyReport/README.md) |
 | [TriggerAlert](TriggerAlert/) | Syncs a Monday.com board into a Google Sheet via the Monday API, with a live-log sidebar UI. | [README](TriggerAlert/README.md) |
+| [KPI_Report](KPI_Report/) | Populates KPI result cells on the team's KPI tracking spreadsheet. | — |
+| [Monday_CX_Board](Monday_CX_Board/) | Generic Monday.com board ↔ Google Sheet sync, with a modeless dialog UI (live log, Monday branding). | — |
+
+### Google Apps Script — Zendesk / CS ticketing operations
+
+| Project | Description | README |
+|---------|-------------|--------|
+| [ABM_TicketMerge](ABM_TicketMerge/) | Merges duplicate Zendesk tickets created from consecutive Amazon Buyer Messages by the same buyer into one thread (Zendesk creates one ticket per ABM email; this mirrors Seller Central's own case threading). Also cleans up the raw marketing-template HTML Zendesk creates from each inbound ABM email into a readable message. | [README](ABM_TicketMerge/README.md) |
+| [PurchaseDate_Sync](PurchaseDate_Sync/) | Syncs a Zendesk ticket's custom Purchase Date field to the matching item's date column on Monday.com board `18421346787` (native Zendesk↔Monday integration can't map custom fields). | [README](PurchaseDate_Sync/README.md) |
+| [GCXReply_GAS](GCXReply_GAS/) | Backend for the GCX Reply Tampermonkey script below — SP-API order lookups (SigV4-signed) and Google Sheet product lookups via a GAS web app. Also holds a versioned reference-copy archive (`v*.gs`) of every past GCX Reply script version. | — |
 
 ### Tampermonkey userscripts
 
 | Project | Description | README |
 |---------|-------------|--------|
-| [Tampermonkey_GCX](Tampermonkey_GCX/) | MCF order autofill (EU + JP), Amazon.de invoice download automation. Install `.user.js` files via Tampermonkey Dashboard → Import. | [README](Tampermonkey_GCX/README.md) |
+| [tampermonkey_scripts](tampermonkey_scripts/) | **GCX Reply** (`v3.5.2`) — Zendesk order/product lookup panel, Auto-Fill, MCF handoff, ABM auto-relay + NRN. **Amazon MCF Autofill** (`v1.4.3`) — EU Seller Central MCF order-page autofill. **Amazon JP MCF Autofill** (`v1.5.2`) — JP variant. **Amazon Invoice Automation** (`v1.5`) — Amazon.de invoice download. Install `.user.js` files via Tampermonkey Dashboard → Import. | [README](tampermonkey_scripts/README.md) |
+| [gcx-reply-extension](gcx-reply-extension/) | Native Chrome extension (MV3) port of GCX Reply — in-progress migration off Tampermonkey; not yet feature-complete (MCF-page autofill code is currently dead — not wired into `content_scripts.matches`). Dev/testing only, load unpacked. | [README](gcx-reply-extension/README.md) |
 
 ---
 
@@ -116,7 +139,7 @@ Set in **Extensions → Apps Script → Project Settings → Script Properties**
 | `APIFY_TOKEN` | All per-product Apify triggers, APIFY_Axesso |
 | `LWA_CLIENT_ID` / `LWA_CLIENT_SECRET` / `LWA_REFRESH_TOKEN` | MCF_Tracking, CX_Dashboard |
 | `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` | MCF_Tracking, CX_Dashboard |
-| `MONDAY_API_KEY` | TriggerAlert, Glx26_Monday |
+| `MONDAY_API_KEY` | TriggerAlert, Apify/Glx26_Apify, Monday_CX_Board |
 
 ---
 
