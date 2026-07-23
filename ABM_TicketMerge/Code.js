@@ -287,6 +287,7 @@ const ZD_ORDER_ID    = 360021934132;
 const ZD_CUST_NAME   = 360021999951;
 const ZD_COUNTRY     = 4513936822297;
 const ZD_FULFILLMENT = 900002781823;
+const ZD_ASIN        = 360021934312;
 
 // Mirrors GCX Reply's COUNTRY_MAP exactly — must match, since these are the
 // literal Zendesk tagger field option values (confirmed live against
@@ -321,13 +322,23 @@ function abmFulfillmentTag_(fulfillmentChannel, sellerSku) {
   return null;
 }
 
-// Fills Order ID / Customer Full Name / Country / Amazon Fulfillment Methods
-// from the order GCX Reply's own Auto-Fill would resolve — but ONLY fields
-// that are CURRENTLY EMPTY, so this never overwrites a value an agent (or an
-// earlier run) already set. Safe/idempotent to call on every cleanup run;
-// no-ops instantly (no HTTP calls) once all 4 fields are already populated.
-function autoFillAbmTicketFields_(ticket, orderId) {
-  if (!orderId) return;
+// Fills Order ID / Customer Full Name / Country / Amazon Fulfillment Methods /
+// ASIN from the order GCX Reply's own Auto-Fill would resolve — but ONLY
+// fields that are CURRENTLY EMPTY, so this never overwrites a value an agent
+// (or an earlier run) already set. Safe/idempotent to call on every cleanup
+// run; no-ops instantly (no HTTP calls) once all 5 fields are already
+// populated.
+//
+// Order ID / Country / Fulfillment genuinely need a resolved order (SP-API
+// lookup via GCX Reply's own endpoint) — but Customer Full Name and ASIN
+// don't: ASIN is embedded directly in the raw ABM email regardless of
+// whether the message is about an actual order, and Customer Full Name
+// falls back to the ticket requester's from-name. The original version
+// gated on `if (!orderId) return`, which — for an order-less ABM ticket
+// (e.g. a pre-purchase compatibility question with no Order ID anywhere in
+// the message, confirmed live on ticket #1000154672) — skipped ALL fields,
+// including the two that never needed an order in the first place.
+function autoFillAbmTicketFields_(ticket, orderId, asin) {
   const cf = ticket.custom_fields || [];
   const valueOf_ = id => { const f = cf.find(x => x.id === id); return f ? f.value : null; };
   const needs = {
@@ -335,26 +346,35 @@ function autoFillAbmTicketFields_(ticket, orderId) {
     custName:    !valueOf_(ZD_CUST_NAME),
     country:     !valueOf_(ZD_COUNTRY),
     fulfillment: !valueOf_(ZD_FULFILLMENT),
+    asin:        !valueOf_(ZD_ASIN),
   };
-  if (!needs.orderId && !needs.custName && !needs.country && !needs.fulfillment) return;
-
-  const data = fetchGcxOrderData_(orderId);
-  if (!data) return; // order lookup failed/unavailable — leave fields as-is, nothing to fill with
+  if (!needs.orderId && !needs.custName && !needs.country && !needs.fulfillment && !needs.asin) return;
 
   const custom_fields = [];
-  if (needs.orderId) custom_fields.push({ id: ZD_ORDER_ID, value: orderId });
+
+  if (needs.asin && asin) custom_fields.push({ id: ZD_ASIN, value: asin });
+
+  // Only worth the HTTP round-trip if orderId exists AND at least one
+  // order-dependent field still needs filling.
+  let data = null;
+  if (orderId && (needs.orderId || needs.custName || needs.country || needs.fulfillment)) {
+    data = fetchGcxOrderData_(orderId);
+  }
+
+  if (needs.orderId && orderId) custom_fields.push({ id: ZD_ORDER_ID, value: orderId });
   if (needs.custName) {
     // Falls back to the requester's name (what Zendesk parsed from the ABM
-    // email's From-name) when SP-API has no BuyerName — same fallback
-    // ladder GCX Reply's own panel uses.
-    const name = (data.buyer && data.buyer.BuyerName) || (ticket.via && ticket.via.source && ticket.via.source.from && ticket.via.source.from.name) || null;
+    // email's From-name) when SP-API has no BuyerName, or when there was no
+    // order to look up at all — same fallback ladder GCX Reply's own panel
+    // uses.
+    const name = (data && data.buyer && data.buyer.BuyerName) || (ticket.via && ticket.via.source && ticket.via.source.from && ticket.via.source.from.name) || null;
     if (name) custom_fields.push({ id: ZD_CUST_NAME, value: name });
   }
-  if (needs.country) {
+  if (needs.country && data) {
     const countryVal = ABM_COUNTRY_MAP[data.address && data.address.CountryCode];
     if (countryVal) custom_fields.push({ id: ZD_COUNTRY, value: countryVal });
   }
-  if (needs.fulfillment) {
+  if (needs.fulfillment && data) {
     const sellerSku = data.items && data.items[0] ? data.items[0].SellerSKU : '';
     const fv = abmFulfillmentTag_(data.order && data.order.FulfillmentChannel, sellerSku);
     if (fv) custom_fields.push({ id: ZD_FULFILLMENT, value: fv });
@@ -401,11 +421,15 @@ function cleanupExistingAbmTicket_(ticketId) {
 
     // ticket.description is Zendesk's own copy of the ticket's originating
     // comment's plain text — for an ABM ticket that's the raw "You have
-    // received a message" email, which always embeds the Order ID (confirmed
-    // live on #1000154560: description contains "402-1366488-5457149"
-    // verbatim). Same regex handleNewAbmTicket_/relayAbmReply_ use elsewhere.
+    // received a message" email, which always embeds the ASIN and, when the
+    // message concerns an actual order, the Order ID too (confirmed live on
+    // #1000154560: description contains "402-1366488-5457149" verbatim; a
+    // pre-purchase question like #1000154672 has an ASIN but no Order ID at
+    // all). Same Order ID regex handleNewAbmTicket_/relayAbmReply_ use
+    // elsewhere; ASIN regex matches GCX Reply's own `/\b(B[A-Z0-9]{9})\b/`.
     const orderIdMatch = (ticket.description || '').match(/\b(\d{3}-\d{7}-\d{7})\b/);
-    autoFillAbmTicketFields_(ticket, orderIdMatch ? orderIdMatch[1] : null);
+    const asinMatch = (ticket.description || '').match(/\b(B[A-Z0-9]{9})\b/);
+    autoFillAbmTicketFields_(ticket, orderIdMatch ? orderIdMatch[1] : null, asinMatch ? asinMatch[1] : null);
 
     const data = zdFetch_(`/api/v2/tickets/${ticketId}/comments.json?sort_order=asc`);
     const comments = data.comments || [];
