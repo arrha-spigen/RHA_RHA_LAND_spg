@@ -311,3 +311,42 @@ function clearRunDoneProperties() {
     createResultSheet_(sheetPrefix, defaultDatasetId, new Date(startedAt));
     Logger.log(`Done — check for sheet: ${sheetPrefix}_${formatYYMMDD_(new Date(startedAt))}`);
   }
+
+/*************************************************
+ * REPAIR — regenerate a materialized sheet from its
+ * task's most recent run (e.g. after a header/data bug
+ * left it broken). Deletes the stale sheet first so
+ * getUniqueSheetName_ doesn't append a numeric suffix.
+ *************************************************/
+
+function repairLatestRun(taskKey) {
+  const task = APIFY_TASKS[taskKey];
+  if (!task) {
+    Logger.log(`Unknown task key: ${taskKey}. Valid keys: ${Object.keys(APIFY_TASKS).join(', ')}`);
+    return;
+  }
+
+  const token = getApifyToken_();
+  const url = `${APIFY_BASE}/actor-tasks/${task.taskId}/runs/last?token=${token}`;
+  const res = UrlFetchApp.fetch(url, { muteHttpExceptions: true });
+  const json = JSON.parse(res.getContentText());
+
+  if (!json.data) {
+    Logger.log(`No recent run found for ${taskKey}`);
+    return;
+  }
+
+  const { id: runId, status, defaultDatasetId, startedAt } = json.data;
+  Logger.log(`Run ID: ${runId} | Status: ${status} | Dataset: ${defaultDatasetId}`);
+
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const staleName = `${task.sheetPrefix}_${formatYYMMDD_(new Date(startedAt))}`;
+  const stale = ss.getSheetByName(staleName);
+  if (stale) {
+    ss.deleteSheet(stale);
+    Logger.log(`Deleted stale sheet: ${staleName}`);
+  }
+
+  createResultSheet_(task.sheetPrefix, defaultDatasetId, new Date(startedAt));
+  Logger.log(`Recreated sheet: ${staleName}`);
+}
