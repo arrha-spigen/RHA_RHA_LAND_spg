@@ -170,27 +170,34 @@ function pollApifyRuns() {
     const items = JSON.parse(res.getContentText());         
     if (!items || !items.length) return;                                                          
   
-    // Filter out Axesso penalty rows (returned when a filter combination yields 0 reviews).      
-    // These have statusMessage "NO_REVIEWS_PENALTY_1/2/3" and contain no review data.
-    const filtered = items.filter(r =>                                                            
-      !String(r.statusMessage || '').startsWith('NO_REVIEWS_PENALTY')
-    );                                                                                            
-                                                                                                  
+    // Filter out Axesso penalty rows (returned when a filter combination yields 0 reviews,
+    // or the ASIN/page wasn't found). These have statusMessage like
+    // "NO_REVIEWS_PENALTY_1/2/3" or "NOT_FOUND_PENALTY_1/2/3" and contain no review data —
+    // only a handful of metadata keys survive clean=true, so they must never be allowed to
+    // seed the header row.
+    const filtered = items.filter(r =>
+      !/_PENALTY_\d+$/.test(String(r.statusMessage || ''))
+    );
+
     if (!filtered.length) {
       Logger.log(`  [${sheetPrefix}] All ${items.length} rows were penalty rows — sheet skipped`);
-      return;                                                                                     
+      return;
     }
-                                                                                                  
-    if (filtered.length < items.length) {                   
-      Logger.log(`  [${sheetPrefix}] Dropped ${items.length - filtered.length} penalty row(s), keeping ${filtered.length}`);                                                                   
+
+    if (filtered.length < items.length) {
+      Logger.log(`  [${sheetPrefix}] Dropped ${items.length - filtered.length} penalty row(s), keeping ${filtered.length}`);
     }
-                                                                                                  
-    const ss = SpreadsheetApp.getActiveSpreadsheet();                                             
+
+    const ss = SpreadsheetApp.getActiveSpreadsheet();
     const baseName = `${sheetPrefix}_${formatYYMMDD_(startedAt)}`;
-    const sheetName = getUniqueSheetName_(ss, baseName);                                          
-    const sh = ss.insertSheet(sheetName);                                                         
-  
-    const headers = Object.keys(filtered[0]);                                                     
+    const sheetName = getUniqueSheetName_(ss, baseName);
+    const sh = ss.insertSheet(sheetName);
+
+    // Union of keys across all kept rows — clean=true strips empty fields per-item, so a
+    // single row (even a real one) can't be trusted to carry every column.
+    const headerSet = new Set();
+    filtered.forEach(r => Object.keys(r).forEach(k => headerSet.add(k)));
+    const headers = Array.from(headerSet);
     sh.getRange(1, 1, 1, headers.length).setValues([headers]);
 
     const values = filtered.map(r => headers.map(h => r[h] ?? ''));                               
