@@ -190,21 +190,49 @@ function pollApifyRuns() {
 
     const ss = SpreadsheetApp.getActiveSpreadsheet();
     const baseName = `${sheetPrefix}_${formatYYMMDD_(startedAt)}`;
-    const sheetName = getUniqueSheetName_(ss, baseName);
-    const sh = ss.insertSheet(sheetName);
 
     // Union of keys across all kept rows — clean=true strips empty fields per-item, so a
     // single row (even a real one) can't be trusted to carry every column.
     const headerSet = new Set();
     filtered.forEach(r => Object.keys(r).forEach(k => headerSet.add(k)));
     const headers = Array.from(headerSet);
-    sh.getRange(1, 1, 1, headers.length).setValues([headers]);
 
     // Some Axesso fields (filters, reviewSummary, imageUrlList, variationList,
     // videoUrlList) are nested objects/arrays, not scalars — Range.setValues()
     // can't write those directly, so they're JSON-stringified for the cell.
     const values = filtered.map(r => headers.map(h => _toCellValue_(r[h])));
-    sh.getRange(2, 1, values.length, headers.length).setValues(values);
+
+    _writeSheetWithRetry_(ss, baseName, headers, values);
+  }
+
+  // "Service Spreadsheets timed out" from insertSheet()/setValues() is a known
+  // transient Google-side error on large/heavily-formulaed spreadsheets — retry
+  // with backoff rather than losing the whole scrape. On retry, first delete any
+  // empty stray sheet a previous failed attempt left behind (so retries don't
+  // pile up "_1", "_2" duplicates), then create fresh.
+  function _writeSheetWithRetry_(ss, baseName, headers, values, maxAttempts) {
+    maxAttempts = maxAttempts || 4;
+    let lastErr;
+    for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+      try {
+        const stray = ss.getSheets().find(s =>
+          s.getName() === baseName || s.getName().indexOf(baseName + '_') === 0
+        );
+        if (stray && stray.getLastRow() < 1) ss.deleteSheet(stray);
+
+        const sheetName = getUniqueSheetName_(ss, baseName);
+        const sh = ss.insertSheet(sheetName);
+        sh.getRange(1, 1, 1, headers.length).setValues([headers]);
+        sh.getRange(2, 1, values.length, headers.length).setValues(values);
+        Logger.log(`  [${sheetName}] Wrote ${values.length} row(s) (attempt ${attempt}/${maxAttempts})`);
+        return;
+      } catch (e) {
+        lastErr = e;
+        Logger.log(`  [${baseName}] Write attempt ${attempt}/${maxAttempts} failed: ${e.message}`);
+        if (attempt < maxAttempts) Utilities.sleep(5000 * attempt);
+      }
+    }
+    throw lastErr;
   }
 
   function _toCellValue_(v) {
