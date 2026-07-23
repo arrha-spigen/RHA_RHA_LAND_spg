@@ -297,6 +297,42 @@ function clearRunDoneProperties() {
   Logger.log(`Total deleted RUN_DONE properties: ${deleted}`);
 }
 
+/*************************************************
+ * DIAGNOSE + CLEAR STUCK POLLING STATE
+ * If pollApifyRuns never reaches allFinished (e.g. one task's
+ * run never resolves to DONE/FAILED), its trigger keeps firing
+ * every minute indefinitely and RUN_DONE properties pile up
+ * (never cleaned — that's what trips the ">50 properties" UI cap).
+ * This logs the current state, then clears it so a fresh
+ * runAllScrapers()/repair can proceed without contention.
+ *************************************************/
+function diagnoseAndClearStuckApifyState() {
+  const props = PropertiesService.getScriptProperties();
+  const allProps = props.getProperties();
+  const keys = Object.keys(allProps);
+
+  Logger.log(`Total script properties: ${keys.length}`);
+
+  const raw = props.getProperty(RUN_STATE_KEY);
+  Logger.log(`${RUN_STATE_KEY} = ${raw || '(not set)'}`);
+
+  const runDoneCount = keys.filter(k => k.includes('RUN_DONE')).length;
+  Logger.log(`APIFY_RUN_DONE_* properties: ${runDoneCount}`);
+
+  const triggers = ScriptApp.getProjectTriggers()
+    .filter(t => t.getHandlerFunction() === 'pollApifyRuns');
+  Logger.log(`Active pollApifyRuns triggers: ${triggers.length}`);
+
+  if (raw) {
+    props.deleteProperty(RUN_STATE_KEY);
+    Logger.log(`Deleted ${RUN_STATE_KEY}`);
+  }
+  removePollingTrigger_();
+  clearRunDoneProperties();
+
+  Logger.log('Done — state cleared. Safe to retry repairGlxZ8Sheet() or runAllScrapers() now.');
+}
+
   function fetchLatestGlx26Run() {
     const token = getApifyToken_();
     const { taskId, sheetPrefix } = APIFY_TASKS.Glx26;
