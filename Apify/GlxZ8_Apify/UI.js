@@ -76,7 +76,9 @@ function getPlanPage(targetYmdDot, startRow, pageSize) {
   const apiKey = _requireMondayApiKey_();
   const { columns, groups, firstGroupId } = fetchBoardColumnsAndFirstGroup(apiKey, BOARD_ID);
   const groupsMap = new Map(groups.map(g => [g.title, g.id]));
-  const writableCols = columns.filter(c => !['mirror', 'subtasks', 'integration', 'board_relation'].includes(c.type));
+  // 'formula' columns are client-side auto-calculated on monday.com and reject
+  // any API write — see main.js's syncSheetToMonday_core() for the same fix.
+  const writableCols = columns.filter(c => !['mirror', 'subtasks', 'integration', 'board_relation', 'formula'].includes(c.type));
   const titleToId = buildTitleToIdMap(writableCols, COLUMN_OVERRIDES_BY_TITLE);
   const statusMaps = buildStatusMaps(columns);
   const autoTranslateColId = titleToId.get(AUTO_TRANSLATE_BOARD_TITLE) || null;
