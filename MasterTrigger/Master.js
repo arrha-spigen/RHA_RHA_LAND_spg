@@ -359,13 +359,22 @@ function _processFilterSheet_(srcSS, cfg) {
     return String(v||"").trim();
   }
 
-  let filtered = srcData.slice(1).filter(row => {
-    if (dateColIdx    >= 0 && dateAfter && (fmtISO(row[dateColIdx]) <= dateAfter || !fmtISO(row[dateColIdx]))) return false;
-    if (countryColIdx >= 0 && !countries.has(cell(row, countryColIdx))) return false;
-    if (hiddenColIdx  >= 0 && hiddenValues.has(cell(row, hiddenColIdx))) return false;
-    if (seriesColIdx  >= 0 && seriesFilter && !cell(row, seriesColIdx).includes(seriesFilter.contains)) return false;
-    return true;
-  });
+  let filtered = srcData.slice(1);
+  const _total = filtered.length;
+  filtered = filtered.filter(row => !(dateColIdx >= 0 && dateAfter && (fmtISO(row[dateColIdx]) <= dateAfter || !fmtISO(row[dateColIdx]))));
+  const _afterDate = filtered.length;
+  filtered = filtered.filter(row => !(countryColIdx >= 0 && !countries.has(cell(row, countryColIdx))));
+  const _afterCountry = filtered.length;
+  filtered = filtered.filter(row => !(hiddenColIdx >= 0 && hiddenValues.has(cell(row, hiddenColIdx))));
+  const _afterHidden = filtered.length;
+  filtered = filtered.filter(row => !(seriesColIdx >= 0 && seriesFilter && !cell(row, seriesColIdx).includes(seriesFilter.contains)));
+  const _afterSeries = filtered.length;
+  Logger.log(
+    `  [${filterSheet}] Filter funnel: total=${_total} → afterDate(>${dateAfter||'none'})=${_afterDate}` +
+    ` → afterCountry(${[...countries].join(',')})=${_afterCountry}` +
+    ` → afterHidden(${hiddenValues.size} excluded value(s))=${_afterHidden}` +
+    ` → afterSeries(${seriesFilter ? seriesFilter.colLetter+' contains "'+seriesFilter.contains+'"' : 'n/a'})=${_afterSeries}`
+  );
 
   const destSS = SpreadsheetApp.openById(destId);
   const dest15 = destSS.getSheetByName("1-5점");
@@ -757,17 +766,25 @@ function _letterToIdx(letter) {
   return n - 1;
 }
 
-// Exact case-insensitive column lookup
-function _colIdx(hdrs, name) {
-  const lower = name.toLowerCase();
-  return hdrs.findIndex(h => String(h).trim().toLowerCase() === lower);
+// Strip everything but letters/digits before comparing headers, so "Review ID",
+// "reviewId" (raw Axesso field name — no space, camelCase) and "review_id" all
+// match the same column instead of silently missing each other (-1), which was
+// making pasteReviewId/Update 날짜 writes skip GlxZ8 rows entirely.
+function _normHeader_(s) {
+  return String(s || '').toLowerCase().replace(/[^a-z0-9가-힣]/g, '');
 }
 
-// Partial case-insensitive column lookup — for headers whose computed value
+// Exact (post-normalization) column lookup
+function _colIdx(hdrs, name) {
+  const target = _normHeader_(name);
+  return hdrs.findIndex(h => _normHeader_(h) === target);
+}
+
+// Partial (post-normalization) column lookup — for headers whose computed value
 // embeds the target name (e.g. "인입사유(AI)  Acc. 95.0%")
 function _colIdxContains(hdrs, substring) {
-  const lower = substring.toLowerCase();
-  return hdrs.findIndex(h => String(h).trim().toLowerCase().includes(lower));
+  const target = _normHeader_(substring);
+  return hdrs.findIndex(h => _normHeader_(h).includes(target));
 }
 
 function _koreanDate(val) {

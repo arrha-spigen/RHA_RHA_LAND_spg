@@ -238,6 +238,17 @@ function pollApifyRuns() {
   function _toCellValue_(v) {
     if (v === null || v === undefined) return '';
     if (v instanceof Date) return v;
+    // imageUrlList / variationList / videoUrlList etc. are arrays of plain
+    // strings (URLs) — write them as a comma-joined string, not JSON ("[]"
+    // syntax), so a single-URL array cell just shows the bare URL.
+    if (Array.isArray(v)) {
+      return v
+        .map(item => item === null || item === undefined ? ''
+          : typeof item === 'object' ? JSON.stringify(item)
+          : String(item))
+        .filter(s => s !== '')
+        .join(', ');
+    }
     if (typeof v === 'object') return JSON.stringify(v);
     return v;
   }
