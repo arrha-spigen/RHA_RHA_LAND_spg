@@ -399,6 +399,8 @@ function _processFilterSheet_(srcSS, cfg) {
     }
   }
   Logger.log(`  [${filterSheet}] destRidIdx=${destRidIdx}, srcRidColIdx=${srcRidColIdx}, existingIds.size=${existingIds.size}`);
+  Logger.log(`  [${filterSheet}] existingIds sample: ${JSON.stringify([...existingIds].slice(0, 5))}`);
+  Logger.log(`  [${filterSheet}] filtered srcRid sample (pre-dedup): ${JSON.stringify(filtered.slice(0, 5).map(r => cell(r, srcRidColIdx)))}`);
   if (srcRidColIdx >= 0) {
     const before = filtered.length;
     filtered = filtered.filter(r => !existingIds.has(cell(r, srcRidColIdx)));
@@ -431,6 +433,7 @@ function _processFilterSheet_(srcSS, cfg) {
     for (let i = colAVals.length - 1; i >= 0; i--) {
       if (String(colAVals[i][0]).trim() !== "") { destLast = i + 1; break; }
     }
+    Logger.log(`  [1-5점] getLastRow()=${dest15.getLastRow()}, computed destLast=${destLast} (col A non-blank) → will write rows ${destLast+1}-${destLast+filtered.length}`);
 
     if (destLast + filtered.length > dest15.getMaxRows()) {
       dest15.insertRowsAfter(dest15.getMaxRows(), filtered.length + 100);
@@ -460,7 +463,9 @@ function _processFilterSheet_(srcSS, cfg) {
     if (cfg.pasteReviewId && srcRidColIdx >= 0 && destRidIdx >= 0) {
       const ridValues = filtered.map(r => [String(r[srcRidColIdx] || "").trim()]);
       dest15.getRange(destLast + 1, destRidIdx + 1, rows.length, 1).setValues(ridValues);
-      Logger.log(`  [1-5점] Wrote ${ridValues.length} Review ID(s) from source`);
+      SpreadsheetApp.flush();
+      const verifyRid = dest15.getRange(destLast + 1, destRidIdx + 1, Math.min(3, rows.length), 1).getValues();
+      Logger.log(`  [1-5점] Wrote ${ridValues.length} Review ID(s) from source to col ${_colLetter(destRidIdx+1)} rows ${destLast+1}-${destLast+rows.length}. Read-back sample: ${JSON.stringify(verifyRid)}`);
     } else if (!cfg.pasteReviewId) {
       Logger.log(`  [1-5점] Skipped Review ID paste — pasteReviewId: false`);
     }
@@ -477,9 +482,14 @@ function _processFilterSheet_(srcSS, cfg) {
       : _colIdx(d15Hdr, "Exported Date");
     if (updIdx >= 0) {
       dest15.getRange(destLast + 1, updIdx + 1, rows.length, 1).setValues(rows.map(() => [todayKst]));
+      SpreadsheetApp.flush();
+      const verifyUpd = dest15.getRange(destLast + 1, updIdx + 1, Math.min(3, rows.length), 1).getValues();
+      Logger.log(`  [1-5점] Wrote Update 날짜="${todayKst}" to col ${_colLetter(updIdx+1)} rows ${destLast+1}-${destLast+rows.length}. Read-back sample: ${JSON.stringify(verifyUpd)}`);
+    } else {
+      Logger.log(`  [1-5점] WARNING: no "Update 날짜"/"Exported Date" column found in header — date not written`);
     }
 
-    Logger.log(`  [1-5점] Copied ${rows.length} row(s) — 키워드 + Update 날짜`);
+    Logger.log(`  [1-5점] Copied ${rows.length} row(s) — 키워드 + Update 날짜. Sheet now has ${dest15.getLastRow()} row(s) total.`);
     copied = rows.length;
   } else {
     Logger.log(`  [${filterSheet}] Nothing new to copy`);
