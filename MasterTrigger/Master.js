@@ -107,7 +107,13 @@ const SHEET_CONFIGS = [
     filterSheet:   "GlxZ8_filter",
     destId:        "19OhswglYMx_dxSFFDtWI1WYPWq2jONJn6RK84KITwy4",
     countries:     new Set(["US","FR","ES","JP","UK","IN","DE","IT"]),
-    numCols:       13,
+    // Dest 1-5점 layout: A-K (0-10) = raw scrape through Review ID, L = 키워드
+    // (written separately via kwIdx), M/N = 인입사유(AI)/인입사유 (dropdown-
+    // validated, Gemini-classified — must stay untouched by 1-5점), O = Update
+    // 날짜 (written separately via updIdx). numCols=13 was bulk-copying raw
+    // GlxZ8_filter data into M, which isn't one of the dropdown's allowed
+    // values and threw "data validation rules" on every row.
+    numCols:       11,
     has15:         true,
     seriesFilter:  null,
     temCol:        "GlxZ8",
