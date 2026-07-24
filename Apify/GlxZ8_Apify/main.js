@@ -24,8 +24,11 @@ function syncSheetToMonday_core() {
 
   const groupsMap = new Map(groups.map(g => [g.title, g.id]));
 
+  // 'formula' columns are client-side auto-calculated on monday.com — the API
+  // rejects any write to them with ColumnValueException ("client side auto
+  // calculated column"), which was failing every single row in the batch.
   const writableCols = columns.filter(c =>
-    !['mirror','subtasks','integration','board_relation'].includes(c.type)
+    !['mirror','subtasks','integration','board_relation','formula'].includes(c.type)
   );
 
   const titleToId = buildTitleToIdMap(writableCols, COLUMN_OVERRIDES_BY_TITLE);
