@@ -299,6 +299,54 @@ const ABM_COUNTRY_MAP = {
   SG: 'sg', AU: 'au', CA: 'ca', MX: 'mx', KR: 'kr',
 };
 
+// Amazon buyer-proxy address domain → the same Country field value strings
+// as ABM_COUNTRY_MAP above (e.g. "...+<uuid>@marketplace.amazon.co.uk" →
+// 'uk'). Lets Country get filled straight from the inbound ABM message
+// itself, with NO dependency on a resolved order — unlike the SP-API
+// address lookup below, this also covers order-less ABM tickets (a
+// pre-purchase question with no Order ID anywhere in the message, e.g.
+// #1000154804), which previously left Country blank forever since there
+// was no order to resolve it from.
+//
+// de/uk/be/es/fr/in/it/jp confirmed live by cross-referencing 100 real ABM
+// tickets' via.source.from.address domain against their ALREADY-correct
+// (order-resolved) Country field value. The rest (nl/se/ie/pl/tr/sg/au/us/
+// ca/mx/kr) are standard/well-known Amazon marketplace domains but did not
+// appear in that sample — unverified against a real ticket, so double-check
+// if one of these ever looks wrong live.
+const ABM_MARKETPLACE_DOMAIN_COUNTRY_ = {
+  'amazon.de': 'de',            // confirmed
+  'amazon.co.uk': 'uk',         // confirmed
+  'amazon.fr': 'fr',            // confirmed
+  'amazon.it': 'it',            // confirmed
+  'amazon.es': 'es',            // confirmed
+  'amazon.co.jp': 'jp',         // confirmed
+  'amazon.in': 'in',            // confirmed
+  'amazon.com.be': 'be',        // confirmed
+  'amazon.nl': 'nl',            // unverified
+  'amazon.se': 'se',            // unverified
+  'amazon.ie': 'ie',            // unverified
+  'amazon.pl': 'pl',            // unverified
+  'amazon.com.tr': 'tr',        // unverified
+  'amazon.sg': 'sg',            // unverified
+  'amazon.com.au': 'au',        // unverified
+  'amazon.com': 'us',           // unverified
+  'amazon.ca': 'ca',            // unverified
+  'amazon.com.mx': 'mx',        // unverified
+  'amazon.co.kr': 'kr',         // unverified
+};
+
+// Same address caseIdFromTicket_ reads (the Amazon buyer-proxy from-address,
+// e.g. "s0574jllj4n84kf+<uuid>@marketplace.amazon.co.jp") — pulls out the
+// "amazon.<tld>" domain instead of the case-id UUID.
+function countryFromTicketMarketplace_(ticket) {
+  const addr = (ticket && ticket.via && ticket.via.source && ticket.via.source.from
+    && ticket.via.source.from.address) || '';
+  const m = addr.match(/@[\w-]*\.?(amazon\.[\w.-]+)$/i);
+  const domain = m ? m[1].toLowerCase() : null;
+  return domain ? (ABM_MARKETPLACE_DOMAIN_COUNTRY_[domain] || null) : null;
+}
+
 // Calls GCX Reply's OWN order-lookup endpoint (GCXReply_GAS's `?orderId=`,
 // same SP-API-backed data GCX Reply's Auto-Fill button uses) rather than
 // re-implementing SP-API SigV4 signing in this project too.
@@ -354,10 +402,16 @@ function autoFillAbmTicketFields_(ticket, orderId, asin) {
 
   if (needs.asin && asin) custom_fields.push({ id: ZD_ASIN, value: asin });
 
+  // Resolved before the order fetch below so a country the marketplace
+  // domain already answers doesn't force an otherwise-unneeded SP-API
+  // round-trip (the common case now that most tickets carry a recognized
+  // domain — see countryFromTicketMarketplace_).
+  const domainCountry = needs.country ? countryFromTicketMarketplace_(ticket) : null;
+
   // Only worth the HTTP round-trip if orderId exists AND at least one
   // order-dependent field still needs filling.
   let data = null;
-  if (orderId && (needs.orderId || needs.custName || needs.country || needs.fulfillment)) {
+  if (orderId && (needs.orderId || needs.custName || (needs.country && !domainCountry) || needs.fulfillment)) {
     data = fetchGcxOrderData_(orderId);
   }
 
@@ -370,8 +424,15 @@ function autoFillAbmTicketFields_(ticket, orderId, asin) {
     const name = (data && data.buyer && data.buyer.BuyerName) || (ticket.via && ticket.via.source && ticket.via.source.from && ticket.via.source.from.name) || null;
     if (name) custom_fields.push({ id: ZD_CUST_NAME, value: name });
   }
-  if (needs.country && data) {
-    const countryVal = ABM_COUNTRY_MAP[data.address && data.address.CountryCode];
+  if (needs.country) {
+    // Marketplace domain first — works even with no order at all (fixes
+    // #1000154804-style order-less ABM tickets, which previously left
+    // Country blank forever since only the SP-API path below could fill
+    // it). Falls back to the resolved order's shipping address only if the
+    // domain wasn't recognized (see ABM_MARKETPLACE_DOMAIN_COUNTRY_'s
+    // unverified entries).
+    const countryVal = domainCountry
+      || (data && ABM_COUNTRY_MAP[data.address && data.address.CountryCode]);
     if (countryVal) custom_fields.push({ id: ZD_COUNTRY, value: countryVal });
   }
   if (needs.fulfillment && data) {
