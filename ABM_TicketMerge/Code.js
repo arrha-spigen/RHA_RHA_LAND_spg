@@ -410,7 +410,14 @@ function autoFillAbmTicketFields_(ticket, orderId, asin) {
 // the same "not yet cleaned" state before either had written its tag,
 // racing into a duplicate clean copy of the same source comment (exactly
 // what happened live on #1000153636 before this fix).
-function cleanupExistingAbmTicket_(ticketId) {
+// onlyCommentId (optional): when set, only that source comment is eligible
+// for cleaning — everything else on the ticket is left alone, even if it's
+// still un-cleaned. Used by the live merge path (handleNewAbmTicket_) so one
+// new message doesn't drag along a backfill of any OTHER old un-cleaned
+// comment already sitting on the ticket, which reads as the whole thread
+// re-arriving. Omit it (the manual/backfill call sites do) to scan and clean
+// every un-cleaned comment on the ticket, same as before.
+function cleanupExistingAbmTicket_(ticketId, onlyCommentId) {
   const lock = LockService.getScriptLock();
   if (!lock.tryLock(20000)) return { status: 'locked', ticketId };
   try {
@@ -449,6 +456,7 @@ function cleanupExistingAbmTicket_(ticketId) {
 
     const cleaned = [];
     comments.forEach(c => {
+      if (onlyCommentId != null && String(c.id) !== String(onlyCommentId)) return;
       if (!c.public || c.author_id !== requester.id) return;
       if (done.has(String(c.id))) return;
       const cleanText = cleanAbmMessageText_(c.html_body || '');
@@ -549,10 +557,16 @@ function mergeNewTicketIntoPrimary_(newTicket, primaryTicket) {
   const wasReopened = primaryTicket.status === 'solved';
   if (wasReopened) primaryPayload.status = 'open';
 
-  zdFetch_(`/api/v2/tickets/${primaryTicket.id}.json`, {
+  const mergeResponse = zdFetch_(`/api/v2/tickets/${primaryTicket.id}.json`, {
     method: 'put',
     payload: JSON.stringify({ ticket: primaryPayload })
   });
+  // Zendesk's ticket-update response includes an audit trail of what changed;
+  // pulling the Comment event's id here is how cleanupExistingAbmTicket_ below
+  // is told to clean ONLY this new comment instead of rescanning the whole
+  // ticket (see its call site in handleNewAbmTicket_ for why that matters).
+  const commentEvent = ((mergeResponse.audit || {}).events || []).find(ev => ev.type === 'Comment');
+  const newCommentId = commentEvent ? commentEvent.id : null;
 
   // 2. Close the duplicate with an internal note pointing to the primary.
   zdFetch_(`/api/v2/tickets/${newTicket.id}.json`, {
@@ -570,7 +584,7 @@ function mergeNewTicketIntoPrimary_(newTicket, primaryTicket) {
 
   const srcAttachCount = (firstComment && firstComment.attachments || []).length;
   Logger.log(`Merged ticket #${newTicket.id} into #${primaryTicket.id}${wasReopened ? ' (reopened)' : ''} — attachments ${uploadTokens.length}/${srcAttachCount} transferred`);
-  return { wasReopened, attachmentsTransferred: uploadTokens.length, attachmentsTotal: srcAttachCount };
+  return { wasReopened, attachmentsTransferred: uploadTokens.length, attachmentsTotal: srcAttachCount, newCommentId };
 }
 
 function handleNewAbmTicket_(ticketId) {
@@ -616,8 +630,15 @@ function handleNewAbmTicket_(ticketId) {
   // The comment mergeNewTicketIntoPrimary_ just posted onto the primary
   // carries the SAME raw Amazon template html_body as the source ticket's
   // own first comment — clean it up on the primary right away, same
-  // function used for the standalone (left_as_primary) case above.
-  const cleanup = cleanupExistingAbmTicket_(freshPrimary.id);
+  // function used for the standalone (left_as_primary) case above. Restricted
+  // to JUST that new comment (merge.newCommentId) — without this, a full-
+  // ticket scan here would also backfill any OTHER never-cleaned comment
+  // already on the primary (e.g. one older than this feature's deploy date),
+  // making one new message look like the whole thread arrived again (see
+  // ticket #1000153825). Old backlog comments still get cleaned, just via
+  // the explicit `cleanupTicket` webhook action / testCleanupOnTicket, not
+  // automatically on every new-message trigger.
+  const cleanup = cleanupExistingAbmTicket_(freshPrimary.id, merge.newCommentId);
   return {
     status: merge.wasReopened ? 'merged_reopened' : 'merged',
     ticketId,
