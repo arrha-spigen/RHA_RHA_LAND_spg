@@ -347,6 +347,25 @@ function countryFromTicketMarketplace_(ticket) {
   return domain ? (ABM_MARKETPLACE_DOMAIN_COUNTRY_[domain] || null) : null;
 }
 
+// Rejects a candidate "name" that's actually just the buyer proxy address's
+// local part (e.g. "pzvz36hxbwx0l9z" from
+// "pzvz36hxbwx0l9z+18bbf0e8-...@marketplace.amazon.fr"), title-cased or not.
+// Found live on ticket #1000154946: SP-API's own BuyerName field returned
+// this exact proxy string (Title-cased) for a privacy-masked EU order — with
+// no validation, that got written straight into Customer Full Name instead of
+// the real name ("Julien") that was sitting right there in
+// ticket.via.source.from.name the whole time. An agent had to manually
+// correct it. Guards BOTH candidate sources (SP-API BuyerName and the
+// Zendesk from-name) since either could theoretically be proxy-shaped.
+function looksLikeAbmProxyName_(name, ticket) {
+  if (!name) return false;
+  const addr = (ticket && ticket.via && ticket.via.source && ticket.via.source.from
+    && ticket.via.source.from.address) || '';
+  const localPart = addr.split('@')[0].split('+')[0];
+  if (!localPart) return false;
+  return name.replace(/[^a-z0-9]/gi, '').toLowerCase() === localPart.replace(/[^a-z0-9]/gi, '').toLowerCase();
+}
+
 // Calls GCX Reply's OWN order-lookup endpoint (GCXReply_GAS's `?orderId=`,
 // same SP-API-backed data GCX Reply's Auto-Fill button uses) rather than
 // re-implementing SP-API SigV4 signing in this project too.
@@ -420,8 +439,15 @@ function autoFillAbmTicketFields_(ticket, orderId, asin) {
     // Falls back to the requester's name (what Zendesk parsed from the ABM
     // email's From-name) when SP-API has no BuyerName, or when there was no
     // order to look up at all — same fallback ladder GCX Reply's own panel
-    // uses.
-    const name = (data && data.buyer && data.buyer.BuyerName) || (ticket.via && ticket.via.source && ticket.via.source.from && ticket.via.source.from.name) || null;
+    // uses. Either candidate can come back proxy-shaped (confirmed live for
+    // SP-API's BuyerName on a privacy-masked EU order — see
+    // looksLikeAbmProxyName_), so skip any candidate that's really just the
+    // buyer proxy address instead of a name.
+    const candidates = [
+      (data && data.buyer && data.buyer.BuyerName) || null,
+      (ticket.via && ticket.via.source && ticket.via.source.from && ticket.via.source.from.name) || null,
+    ];
+    const name = candidates.find(n => n && !looksLikeAbmProxyName_(n, ticket)) || null;
     if (name) custom_fields.push({ id: ZD_CUST_NAME, value: name });
   }
   if (needs.country) {
@@ -615,7 +641,14 @@ function mergeNewTicketIntoPrimary_(newTicket, primaryTicket) {
   const primaryComment = { html_body: htmlBody, public: true, author_id: requester.id };
   if (uploadTokens.length) primaryComment.uploads = uploadTokens;
   const primaryPayload = { comment: primaryComment };
-  const wasReopened = primaryTicket.status === 'solved';
+  // Reopen out of ANY waiting state, not just 'solved'. Found live on ticket
+  // #1000155020: the primary was 'hold' (agent's ESC/Pending status, waiting
+  // on the customer) when a new buyer message merged in — this only checked
+  // for 'solved', so 'hold'/'pending' tickets silently stayed put with no
+  // queue signal at all; the agent only found out a reply had arrived by
+  // separately checking Seller Central. 'new'/'open' are already active in
+  // the agent's queue, so nothing to do for those.
+  const wasReopened = primaryTicket.status === 'solved' || primaryTicket.status === 'pending' || primaryTicket.status === 'hold';
   if (wasReopened) primaryPayload.status = 'open';
 
   const mergeResponse = zdFetch_(`/api/v2/tickets/${primaryTicket.id}.json`, {
