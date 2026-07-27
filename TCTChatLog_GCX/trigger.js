@@ -12,7 +12,7 @@ function createEscT2Triggers() {
   const tz = Session.getScriptTimeZone();
   const now = new Date();
   const today = new Date(now.getFullYear(), now.getMonth(), now.getDate()); 
-  const endDate = new Date('2026-4-26'); // adjust as needed
+  const endDate = new Date('2026-08-01'); // adjust as needed
 
   // 3) Create new triggers 
   for (let d = new Date(today); d <= endDate; d.setDate(d.getDate() + 1)) {

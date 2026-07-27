@@ -17,9 +17,9 @@ function onEdit(e) {
     return;
   }
 
-  const status = (sheet.getRange(row, 1).getValue() || '').toString().trim();      // A
-  const rawOrderId = (sheet.getRange(row, 2).getValue() || '').toString().trim();  // B
-  const platform = (sheet.getRange(row, 4).getValue() || '').toString().trim();    // D
+  const status = (sheet.getRange(row, 1).getValue() || '').toString().trim();      // A: Status
+  const rawOrderId = (sheet.getRange(row, 3).getValue() || '').toString().trim();  // C: Order ID
+  const platform = (sheet.getRange(row, 5).getValue() || '').toString().trim();    // E: Platform (D is now "Date" — column was inserted, shifting Platform from D to E)
   const cleanOrderId = rawOrderId.replace(/^\//, '') || `row${row}`;
   const uniqueKey = `${sheetName}_${cleanOrderId}_${platform}_${status}`;
 
@@ -44,15 +44,23 @@ function onEdit(e) {
   }
 
   // Send the message with buttons based on the platform
+  let sent = false;
   if (sheetName === 'Lazada log' && platform.includes('Lazada')) {
     sendChatMessageWithButtons(escT2Rows, WEBHOOK_LAZADA, '@Lim', sheetName);
+    sent = true;
   } else if (sheetName === 'Shopee log' && platform.includes('Shopee')) {
     sendChatMessageWithButtons(escT2Rows, WEBHOOK_SHOPEE, '@Lim', sheetName);
+    sent = true;
+  } else {
+    Logger.log(`Message not sent: sheetName "${sheetName}" / platform "${platform}" did not match expected combination.`);
   }
 
-  // Store the sent ID to avoid duplicates
-  sentIds.push(uniqueKey);
-  props.setProperty("SENT_IDS", JSON.stringify(sentIds));
+  // Only record as sent if a message actually went out, so a mismatch here doesn't
+  // permanently suppress a real Esc T2 alert for this row.
+  if (sent) {
+    sentIds.push(uniqueKey);
+    props.setProperty("SENT_IDS", JSON.stringify(sentIds));
+  }
 }
 
 // ──────────────── Get All Rows with "Esc T2" Status ──────────────── //
@@ -133,4 +141,16 @@ function sendChatMessageWithButtons(rows, webhook, mention, sheetName) {
 // ──────────────── Reset All Esc T2 Alerts ──────────────── //
 function resetSentAlerts() {
   PropertiesService.getScriptProperties().deleteProperty("SENT_IDS");
+}
+
+// ──────────────── TEST: Send Current Esc T2 Rows to Test Webhook ──────────────── //
+function testSendEscT2ToTestWebhook() {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  ['Lazada log', 'Shopee log'].forEach(name => {
+    const sheet = ss.getSheetByName(name);
+    if (!sheet) { Logger.log(`Sheet not found: ${name}`); return; }
+    const escT2Rows = getEscT2Rows(sheet);
+    Logger.log(`${name} current Esc T2 rows: ${JSON.stringify(escT2Rows)}`);
+    sendChatMessageWithButtons(escT2Rows, WEBHOOK_TEST, '@Lim', name);
+  });
 }

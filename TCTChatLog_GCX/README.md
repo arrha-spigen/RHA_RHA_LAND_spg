@@ -24,9 +24,17 @@ Google Apps Script project for the Spigen GCX TCT (Third-party Channel Team) cha
 2. If **col A** changes to `Esc T2` and hasn't been sent before (deduped by `SENT_IDS` in Script Properties):
    - Collects all other `Esc T2` rows on the same sheet
    - Posts a Google Chat card with buttons linking to each row
-3. Routes to the correct webhook based on sheet name + platform value in col D:
+3. Routes to the correct webhook based on sheet name + platform value in **col E**:
    - `Lazada log` + `Lazada` → `WEBHOOK_LAZADA`
    - `Shopee log` + `Shopee` → `WEBHOOK_SHOPEE`
+4. A row is only recorded in `SENT_IDS` if a message actually went out (sheet name/platform
+   matched); a mismatch no longer silently swallows the row.
+
+Current header layout (row 4): `A Status | B Ticket ID | C Order ID | D Date | E Platform | ...`.
+Column D used to be Platform until a `Date` column was inserted before it — if alerts stop firing
+again, re-check this layout first with `sheet.getRange(4, 1, 1, 16).getValues()`.
+`WEBHOOK_TEST` (unused by the live flow) exists for manually verifying payload delivery — see
+`testSendEscT2ToTestWebhook()`.
 
 ---
 
