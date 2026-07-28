@@ -29,7 +29,7 @@ Returns the tracking number for an EU MCF order. Tries EU endpoint first, falls 
 ### `=AMZTK_JP(orderId)`
 Same as `AMZTK` but tries FE (Japan/AU/SG) first.
 
-### `=MCFFee(orderId)` / `=MCFFee(sentDate, orderId)`
+### `=MCFFee(orderId)` / `=MCFFee(orderId, sentDate)` / `=MCFFee(sentDate, orderId)`
 Returns the actual settled MCF fulfillment fee via the Finances API. Always uses the actual charged amount (not an estimate). Returns blank until the order settles (usually a few days after shipment) — retries automatically on the next sheet recalculation.
 
 **For bulk use, prefer `backfillMCFFees()` over this formula** — ARRAYFORMULA is not supported and many simultaneous formula calls will queue indefinitely.
@@ -37,11 +37,13 @@ Returns the actual settled MCF fulfillment fee via the Finances API. Always uses
 | Usage | Example | Notes |
 |-------|---------|-------|
 | 1-arg | `=MCFFee(Q2)` | Searches last 180 days |
-| 2-arg | `=MCFFee(P2, Q2)` | `P2` = sent date (yyyy-mm-dd), `Q2` = orderId — faster, less bandwidth |
+| 2-arg | `=MCFFee(Q2, P2)` or `=MCFFee(P2, Q2)` | `Q2` = orderId, `P2` = sent date (yyyy-mm-dd) — either argument order works, detected by shape (a `Date`/`yyyy-mm-dd` value is always treated as sentDate). Providing sentDate is faster, less bandwidth. |
 
 ```
-=IF(Q2<>"", MCFFee(P2, Q2), "")
+=IF(Q2<>"", MCFFee(Q2, P2), "")
 ```
+
+> Different row blocks in this sheet have historically used both argument orders — `MCFFee()`/`MCFFee_JP()` detect which argument is the date vs. the orderId by value shape rather than trusting position, so both work correctly regardless of which convention a given row's formula was copied from.
 
 **Lookup strategy:** two strategies, all SP-API calls use 1 attempt (no retry sleep → no 30s timeout):
 
@@ -56,6 +58,15 @@ Returns the actual settled MCF fulfillment fee via the Finances API. Always uses
 - On 429 QuotaExceeded: returns blank and retries after 90 seconds automatically.
 - Tries EU endpoint first, falls back to FE.
 - Required SP-API roles: **Amazon Fulfillment** + **Finance and Accounting**.
+
+> **GCX order fee-type quirk:** GCX-prefixed orders' Finances API fee lines aren't tagged with a
+> `FeeType` containing `FBA`/`FULFILLMENT` (unlike real Amazon marketplace orders), so the standard
+> fee-type filter silently dropped their real fee data to `0`. `_sumMcfFeeFromShipments()` and
+> `_buildFeeMapForWindow()` sum **all** fee-line types for any `SellerOrderId` starting with `GCX`
+> — this was fixed once already (commits `5fe6def`/`eed853c`, 2026-04-24/27) but got lost in a
+> later revert; restored 2026-07-28. Also fixed: only the *first* matching `ShipmentEvent` was
+> ever checked — split-shipment orders whose fee posted in a later event were misread as `0`;
+> now sums across every matching event.
 
 ### `=MCFFee_JP(orderId)` / `=MCFFee_JP(sentDate, orderId)`
 Same as `MCFFee` but tries FE (Japan/AU/SG) first.

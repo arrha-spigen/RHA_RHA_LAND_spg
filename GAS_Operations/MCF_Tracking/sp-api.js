@@ -535,6 +535,14 @@ function getMcfStockByAsin(asin, marketplaceId) {
 
 /***** ========= MCF FEE LOOKUP ========= *****/
 
+// Distinguishes a sentDate argument from an orderId argument by shape, not position —
+// Sheets passes date-formatted cells as Date objects; a manually-typed yyyy-mm-dd string
+// also matches. Order IDs (e.g. "GCX-UK-260721-2725") never match either.
+function _looksLikeDate(v) {
+  if (v instanceof Date) return true;
+  return /^\d{4}-\d{2}-\d{2}/.test(String(v || '').trim());
+}
+
 /**
  * Returns the MCF fulfillment fee for an existing order.
  *
@@ -548,15 +556,40 @@ function getMcfStockByAsin(asin, marketplaceId) {
  * Tries EU endpoint first, then FE (Japan/AU/SG) as fallback.
  * Required roles: Amazon Fulfillment (both methods) + Finance and Accounting (FinancesAPI only).
  *
+ * Accepts two calling conventions (auto-detected from the first argument):
+ *   Simple:  =MCFFee(Q14)  or  =MCFFee(Q14, P14)        — orderId first, FinancesAPI default
+ *   Verbose: =MCFFee("FinancesAPI", Q14, P14)            — method first
+ *
  * @customfunction
- * @param {"FinancesAPI"|"getFulfillmentPreview"} method "FinancesAPI" = actual settled fee (GBP/EUR, available days after shipment). "getFulfillmentPreview" = instant estimate (may differ from actual).
- * @param {string} orderId The sellerFulfillmentOrderId of the MCF order (e.g. value in col Q).
- * @param {string} [sentDate] Optional yyyy-mm-dd sent date from col P. Skips the fulfillment order lookup when provided.
+ * @param {string} orderIdOrMethod The sellerFulfillmentOrderId (simple form), or "FinancesAPI"/"getFulfillmentPreview" (verbose form).
+ * @param {string} [sentDateOrOrderId] Sent date yyyy-mm-dd (simple form), or the orderId (verbose form).
+ * @param {string} [legacySentDate] Sent date yyyy-mm-dd — verbose form only.
  * @return {number} Fee amount in the order's marketplace currency (GBP for UK, EUR for EU).
  */
-function MCFFee(method, orderId, sentDate) {
+function MCFFee(orderIdOrMethod, sentDateOrOrderId, legacySentDate) {
+  // Supports every calling convention that has existed live in col Y across the sheet's
+  // history — this project's README/commits have documented both =MCFFee(Q14, P14) and
+  // =MCFFee(P14, Q14) at different points, so different row blocks may use either order:
+  //   Simple:  =MCFFee(Q14)  or  =MCFFee(Q14, P14)  or  =MCFFee(P14, Q14)  — FinancesAPI default
+  //   Verbose: =MCFFee("FinancesAPI", Q14, P14)                            — method first
+  var METHODS = ['FinancesAPI', 'getFulfillmentPreview'];
+  var method, orderId, sentDate;
+  if (METHODS.indexOf(String(orderIdOrMethod || '').trim()) >= 0) {
+    method   = String(orderIdOrMethod).trim();
+    orderId  = sentDateOrOrderId;
+    sentDate = legacySentDate;
+  } else {
+    method = 'FinancesAPI';
+    // Detect orderId vs sentDate by shape, not position — don't trust argument order.
+    if (_looksLikeDate(orderIdOrMethod) && !_looksLikeDate(sentDateOrOrderId)) {
+      sentDate = orderIdOrMethod;
+      orderId  = sentDateOrOrderId;
+    } else {
+      orderId  = orderIdOrMethod;
+      sentDate = sentDateOrOrderId;
+    }
+  }
   if (!orderId) return '';
-  method = String(method || 'getFulfillmentPreview').trim();
   var dateKey = sentDate ? '_' + String(sentDate).trim() : '';
 
   var cache = CacheService.getScriptCache();
@@ -595,17 +628,34 @@ function MCFFee(method, orderId, sentDate) {
 
 /**
  * Returns the MCF fulfillment fee for a Japan / AU / SG order.
- * Same as MCFFee but tries the FE (Far East) endpoint first.
+ * Same as MCFFee but tries the FE (Far East) endpoint first. Same dual calling convention.
  *
  * @customfunction
- * @param {"FinancesAPI"|"getFulfillmentPreview"} method "FinancesAPI" = actual settled fee (available days after shipment). "getFulfillmentPreview" = instant estimate (may differ from actual).
- * @param {string} orderId The sellerFulfillmentOrderId of the MCF order.
- * @param {string} [sentDate] Optional yyyy-mm-dd sent date from col P. Skips the fulfillment order lookup when provided.
+ * @param {string} orderIdOrMethod The sellerFulfillmentOrderId (simple form), or "FinancesAPI"/"getFulfillmentPreview" (verbose form).
+ * @param {string} [sentDateOrOrderId] Sent date yyyy-mm-dd (simple form), or the orderId (verbose form).
+ * @param {string} [legacySentDate] Sent date yyyy-mm-dd — verbose form only.
  * @return {number} Fee amount in the order's marketplace currency.
  */
-function MCFFee_JP(method, orderId, sentDate) {
+function MCFFee_JP(orderIdOrMethod, sentDateOrOrderId, legacySentDate) {
+  // Same calling conventions as MCFFee() (including shape-based orderId/sentDate detection
+  // for the simple form) — see comment there.
+  var METHODS = ['FinancesAPI', 'getFulfillmentPreview'];
+  var method, orderId, sentDate;
+  if (METHODS.indexOf(String(orderIdOrMethod || '').trim()) >= 0) {
+    method   = String(orderIdOrMethod).trim();
+    orderId  = sentDateOrOrderId;
+    sentDate = legacySentDate;
+  } else {
+    method = 'FinancesAPI';
+    if (_looksLikeDate(orderIdOrMethod) && !_looksLikeDate(sentDateOrOrderId)) {
+      sentDate = orderIdOrMethod;
+      orderId  = sentDateOrOrderId;
+    } else {
+      orderId  = orderIdOrMethod;
+      sentDate = sentDateOrOrderId;
+    }
+  }
   if (!orderId) return '';
-  method = String(method || 'getFulfillmentPreview').trim();
   var dateKey = sentDate ? '_' + String(sentDate).trim() : '';
 
   var cache = CacheService.getScriptCache();
@@ -726,13 +776,16 @@ function _buildFeeMapForWindow(ep, postedAfter, postedBefore) {
       var sid = String(ev.SellerOrderId || '').trim();
       if (!sid) continue;
 
+      // GCX-prefixed orders: sum ALL fee types — their fee lines aren't tagged FBA/FULFILLMENT
+      // (see _sumMcfFeeFromShipments). Non-GCX orders keep the standard filter.
+      var isGcx = sid.toUpperCase().indexOf('GCX') === 0;
       var total = 0;
       (ev.ShipmentFeeList || []).forEach(function(f) {
-        if (_isMcfFeeType(f.FeeType)) total += parseFloat((f.FeeAmount || {}).CurrencyAmount || 0);
+        if (isGcx || _isMcfFeeType(f.FeeType)) total += parseFloat((f.FeeAmount || {}).CurrencyAmount || 0);
       });
       (ev.ShipmentItemList || []).forEach(function(item) {
         (item.ItemFeeList || []).forEach(function(f) {
-          if (_isMcfFeeType(f.FeeType)) total += parseFloat((f.FeeAmount || {}).CurrencyAmount || 0);
+          if (isGcx || _isMcfFeeType(f.FeeType)) total += parseFloat((f.FeeAmount || {}).CurrencyAmount || 0);
         });
       });
 
@@ -768,26 +821,41 @@ function _collectShipmentEvents(ep, postedAfter, postedBefore, maxPages) {
 }
 
 /**
- * Finds the first ShipmentEvent matching targetOrderId and sums its MCF fee lines.
- * Returns Math.abs(total) on match, '' if not found.
+ * Sums MCF fee lines across ALL ShipmentEvents matching targetOrderId (an order can settle
+ * across more than one event — e.g. split shipments — so stopping at the first match can
+ * silently miss the event that actually carries the fee).
+ *
+ * GCX-prefixed orders (all orders in this sheet) sum every fee line regardless of FeeType —
+ * their MCF fee lines are posted under type names that don't contain "FBA"/"FULFILLMENT",
+ * so the standard _isMcfFeeType filter silently drops real fee data to 0 for them. Non-GCX
+ * orders keep the standard filter.
+ *
+ * Returns '' (not '0') when a match was found but no event ever summed to a nonzero total —
+ * treated as not-yet-settled rather than risking a misleading $0 in the sheet's profit/loss
+ * columns; run MCFFeeDebug(orderId, sentDate) to inspect the raw events if it stays '' for
+ * a long-settled order.
  */
 function _sumMcfFeeFromShipments(shipments, targetOrderId) {
   var target = String(targetOrderId).trim();
+  var isGcx  = target.toUpperCase().indexOf('GCX') === 0;
+  var best   = 0;
+
   for (var i = 0; i < shipments.length; i++) {
     var ev = shipments[i];
     if (String(ev.SellerOrderId || '').trim() !== target) continue;
     var total = 0;
     (ev.ShipmentFeeList || []).forEach(function(f) {
-      if (_isMcfFeeType(f.FeeType)) total += parseFloat((f.FeeAmount || {}).CurrencyAmount || 0);
+      if (isGcx || _isMcfFeeType(f.FeeType)) total += parseFloat((f.FeeAmount || {}).CurrencyAmount || 0);
     });
     (ev.ShipmentItemList || []).forEach(function(item) {
       (item.ItemFeeList || []).forEach(function(f) {
-        if (_isMcfFeeType(f.FeeType)) total += parseFloat((f.FeeAmount || {}).CurrencyAmount || 0);
+        if (isGcx || _isMcfFeeType(f.FeeType)) total += parseFloat((f.FeeAmount || {}).CurrencyAmount || 0);
       });
     });
-    return Math.abs(total);
+    if (total !== 0) best = Math.abs(total);
   }
-  return '';
+
+  return best !== 0 ? best : '';
 }
 
 /**
