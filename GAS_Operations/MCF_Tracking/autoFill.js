@@ -605,6 +605,134 @@ function backfillMCFFees() {
 }
 
 /**
+ * Scoped variant of backfillMCFFees() — only processes rows sent within the last `days` days
+ * (default 90), and clamps the Finances API scan window to that same range instead of using
+ * the earliest pending row's date.
+ *
+ * backfillMCFFees() always scans from the earliest pending row's sentDate to now — with the
+ * current backlog that means ~9 EU + 9 FE 60-day windows covering March 2025 → now, which is
+ * expensive enough that back-to-back runs don't give SP-API's Finances API quota enough real
+ * time to recover between attempts (confirmed live: a run that succeeded got followed by one
+ * that immediately hit persistent 429 again ~10 minutes later). This variant costs ~2 windows
+ * instead of ~9, is far more likely to succeed even while quota is still recovering, and
+ * prioritizes the most recent (most operationally relevant) orders. Older pending rows outside
+ * the window are left for a later backfillMCFFees() run once quota is more comfortably available.
+ *
+ * Run manually from the Apps Script editor.
+ */
+function backfillMCFFeesRecent(days) {
+  days = days || 90;
+
+  var ss    = SpreadsheetApp.getActiveSpreadsheet();
+  var sheet = ss.getSheetByName(BF_SHEET_NAME);
+  if (!sheet) throw new Error('Sheet not found: ' + BF_SHEET_NAME);
+
+  var lastRow = sheet.getLastRow();
+  if (lastRow < BF_START_ROW) return;
+
+  var now      = new Date(Date.now() - 5 * 60 * 1000);
+  var cutoff   = new Date(now.getTime() - days * 24 * 3600 * 1000);
+
+  var numRows   = lastRow - BF_START_ROW + 1;
+  var orderIds  = sheet.getRange(BF_START_ROW, BF_COL_ORDER,  numRows, 1).getValues();
+  var sentDates = sheet.getRange(BF_START_ROW, BF_COL_SENT,   numRows, 1).getValues();
+  var regions   = sheet.getRange(BF_START_ROW, BF_COL_REGION, numRows, 1).getValues();
+  var existing  = sheet.getRange(BF_START_ROW, BF_COL_FEE,    numRows, 1).getValues();
+
+  var pending = [];
+  var hasJP   = false;
+
+  for (var i = 0; i < numRows; i++) {
+    var orderId = String(orderIds[i][0] || '').trim();
+    if (!orderId) continue;
+
+    var curStr = String(existing[i][0] === null || existing[i][0] === undefined ? '' : existing[i][0]).trim();
+    if (curStr !== '' && curStr !== 'RETRY' && !_isErrorValue(curStr)) continue;
+
+    var sentDateStr = String(sentDates[i][0] || '').trim();
+    if (!sentDateStr) continue; // no sentDate — can't confirm it's within the recent window, skip here
+    var d = new Date(sentDateStr);
+    if (d < cutoff) continue; // older than the window — leave for a full backfillMCFFees() run
+
+    var isJP = String(regions[i][0] || '').trim().toUpperCase() === 'JP';
+    if (isJP) hasJP = true;
+
+    pending.push({ i: i, orderId: orderId, sentDate: sentDateStr, isJP: isJP });
+  }
+
+  if (!pending.length) {
+    Logger.log('backfillMCFFeesRecent: nothing pending within the last %s days.', days);
+    return;
+  }
+
+  Logger.log('backfillMCFFeesRecent: %s rows pending, window %s → now (last %s days)',
+    pending.length, cutoff.toISOString().slice(0, 10), days);
+
+  function fetchFeeMap(ep) {
+    var feeMap      = {};
+    var windowStart = new Date(cutoff);
+
+    while (windowStart < now) {
+      var windowEnd = new Date(windowStart);
+      windowEnd.setDate(windowEnd.getDate() + 60);
+      if (windowEnd > now) windowEnd = now;
+      if (windowStart >= windowEnd) break;
+
+      try {
+        var chunk = _buildFeeMapForWindow(ep, windowStart, windowEnd);
+        var keys  = Object.keys(chunk);
+        keys.forEach(function(k) { feeMap[k] = chunk[k]; });
+        Logger.log('  [%s] %s – %s: %s orders found', ep,
+          windowStart.toISOString().slice(0, 10), windowEnd.toISOString().slice(0, 10), keys.length);
+      } catch (e) {
+        if (_isRateLimit429(e)) {
+          Logger.log('  [%s] 429 — sleeping 15 s, retrying window', ep);
+          Utilities.sleep(15000);
+          try {
+            var chunk2 = _buildFeeMapForWindow(ep, windowStart, windowEnd);
+            Object.keys(chunk2).forEach(function(k) { feeMap[k] = chunk2[k]; });
+          } catch (e2) {
+            Logger.log('  [%s] retry also failed: %s', ep, e2.message);
+          }
+        } else {
+          Logger.log('  [%s] window error (%s): %s', ep, windowStart.toISOString().slice(0, 10), e.message);
+        }
+      }
+
+      windowStart = new Date(windowEnd);
+      windowStart.setDate(windowStart.getDate() + 1);
+      Utilities.sleep(500);
+    }
+
+    return feeMap;
+  }
+
+  var euMap = fetchFeeMap('EU');
+  var feMap = hasJP ? fetchFeeMap('FE') : {};
+
+  var written = 0, notSettled = 0;
+
+  pending.forEach(function(r) {
+    var primaryMap   = r.isJP ? feMap : euMap;
+    var secondaryMap = r.isJP ? euMap : feMap;
+    var fee = primaryMap[r.orderId]   !== undefined ? primaryMap[r.orderId]
+            : secondaryMap[r.orderId] !== undefined ? secondaryMap[r.orderId]
+            : null;
+
+    if (fee !== null) {
+      sheet.getRange(BF_START_ROW + r.i, BF_COL_FEE).setValue(fee);
+      Logger.log('Row %s (%s): fee = %s', BF_START_ROW + r.i, r.orderId, fee);
+      written++;
+    } else {
+      notSettled++;
+    }
+  });
+
+  Logger.log('backfillMCFFeesRecent done — written: %s, not settled: %s (older rows outside the %s-day window untouched)',
+    written, notSettled, days);
+}
+
+/**
  * STEP 1 — run this first to undo the bad freeze.
  * Scans for HYPERLINK formulas whose "tracking number" looks like a price
  * (pure decimal number < 1000, e.g. "22.99") and restores the original
