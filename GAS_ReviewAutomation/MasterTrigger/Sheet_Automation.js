@@ -40,7 +40,9 @@ function dedupeSheetByReviewId_(sheet) {
     { col: "Glx26",     srcId: "1fpv9TEDPGR8D6QRRc0ll-WzF7sOkfxe9UNBCmdBSE9g",
   srcSheet: "1-5점" },                                                          
     { col: "iPh17e",    srcId: "16xRJHH7Ynii4erNOn_905ST4CZs6OLpOYTof4uqsGsQ",
-  srcSheet: "1-5점" },                                                          
+  srcSheet: "1-5점" },
+    { col: "GlxZ8",     srcId: "19OhswglYMx_dxSFFDtWI1WYPWq2jONJn6RK84KITwy4",
+  srcSheet: "1-5점" },
   ];                                                        
                                                                                 
   function updateTemSheet() {                               

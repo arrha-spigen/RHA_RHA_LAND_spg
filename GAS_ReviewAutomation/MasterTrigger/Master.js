@@ -70,39 +70,44 @@ const TEM_SHEET_NAME  = "tem";
 // └─────────────────┴──────────────────────────────────────────────────────────────────┘
 //
 const SHEET_CONFIGS = [
-  {
-    filterSheet:   "Glx26_filter",
-    destId:        "1fpv9TEDPGR8D6QRRc0ll-WzF7sOkfxe9UNBCmdBSE9g",
-    countries:     new Set(["US","FR","ES","JP","UK","IN","DE","IT"]),
-    numCols:       13,
-    has15:         true,
-    seriesFilter:  { colLetter: "Q", contains: "S26" },
-    temCol:        "Glx26",
-    drFormula:     true,
-    pasteReviewId: true,   // Review ID is a plain value in this sheet — paste from source
-  },
-  {
-    filterSheet:   "iPh17e_filter",
-    destId:        "16xRJHH7Ynii4erNOn_905ST4CZs6OLpOYTof4uqsGsQ",
-    countries:     new Set(["US","FR","ES","JP","UK","IN","DE","IT"]),
-    numCols:       10,
-    has15:         true,
-    seriesFilter:  { colLetter: "N", contains: "17e" },
-    temCol:        "iPh17e",
-    drFormula:     true,
-    pasteReviewId: false, // Review ID is formula-generated — do not overwrite
-  },
-  {
-    filterSheet:   "Pixel10a_filter",
-    destId:        "1BpeGq5gIr4tNsPZmnHr19NNY6pQ6sb2_H-v3V9-It4E",
-    countries:     new Set(["US","FR","ES","JP","UK","IN","DE","IT"]),
-    numCols:       10,
-    has15:         true,
-    seriesFilter:  { colLetter: "N", contains: "10a" },
-    temCol:        "Pixel 10a",
-    drFormula:     true,
-    pasteReviewId: false, // Review ID is formula-generated — do not overwrite
-  },
+  // Retired 2026-07-28 — Apify scraping already disabled for these in Apify.js's
+  // APIFY_TASKS (Pixel10a/Glx26/iPh17e commented out there); this SHEET_CONFIGS
+  // entries were left active and kept dailyJob() processing their stale _filter
+  // sheets (reading finalize view, copying to 1-5점) even with no fresh scrape
+  // data coming in. Commented out here to match — fully retired, both legs.
+  // {
+  //   filterSheet:   "Glx26_filter",
+  //   destId:        "1fpv9TEDPGR8D6QRRc0ll-WzF7sOkfxe9UNBCmdBSE9g",
+  //   countries:     new Set(["US","FR","ES","JP","UK","IN","DE","IT"]),
+  //   numCols:       13,
+  //   has15:         true,
+  //   seriesFilter:  { colLetter: "Q", contains: "S26" },
+  //   temCol:        "Glx26",
+  //   drFormula:     true,
+  //   pasteReviewId: true,   // Review ID is a plain value in this sheet — paste from source
+  // },
+  // {
+  //   filterSheet:   "iPh17e_filter",
+  //   destId:        "16xRJHH7Ynii4erNOn_905ST4CZs6OLpOYTof4uqsGsQ",
+  //   countries:     new Set(["US","FR","ES","JP","UK","IN","DE","IT"]),
+  //   numCols:       10,
+  //   has15:         true,
+  //   seriesFilter:  { colLetter: "N", contains: "17e" },
+  //   temCol:        "iPh17e",
+  //   drFormula:     true,
+  //   pasteReviewId: false, // Review ID is formula-generated — do not overwrite
+  // },
+  // {
+  //   filterSheet:   "Pixel10a_filter",
+  //   destId:        "1BpeGq5gIr4tNsPZmnHr19NNY6pQ6sb2_H-v3V9-It4E",
+  //   countries:     new Set(["US","FR","ES","JP","UK","IN","DE","IT"]),
+  //   numCols:       10,
+  //   has15:         true,
+  //   seriesFilter:  { colLetter: "N", contains: "10a" },
+  //   temCol:        "Pixel 10a",
+  //   drFormula:     true,
+  //   pasteReviewId: false, // Review ID is formula-generated — do not overwrite
+  // },
   {
     filterSheet:   "GlxZ8_filter",
     destId:        "19OhswglYMx_dxSFFDtWI1WYPWq2jONJn6RK84KITwy4",

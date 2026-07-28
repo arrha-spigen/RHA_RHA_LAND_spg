@@ -124,12 +124,21 @@ function pollApifyRuns() {
 
     if (status === 'SUCCEEDED') {
       if (!isRunAlreadyMaterialized_(run.runId)) {
-        createResultSheet_(
-          run.sheetPrefix,
-          json.data.defaultDatasetId,
-          startedAt
-        );
-        markRunAsMaterialized_(run.runId);
+        try {
+          createResultSheet_(
+            run.sheetPrefix,
+            json.data.defaultDatasetId,
+            startedAt
+          );
+          markRunAsMaterialized_(run.runId);
+        } catch (e) {
+          // Don't let one product's write failure (e.g. a large dataset repeatedly
+          // hitting "Service timed out: Spreadsheets") crash the whole poll cycle —
+          // that used to abort before state/other tasks' DONE status got saved,
+          // and before dailyJob() ever ran. Mark this run DONE anyway so the cycle
+          // completes; leave it un-materialized so repairLatestRun() can retry it.
+          Logger.log(`  [${run.sheetPrefix}] createResultSheet_ failed, giving up for this run: ${e.message}`);
+        }
       }
       run.status = 'DONE';
     }
@@ -206,24 +215,32 @@ function pollApifyRuns() {
   }
 
   // "Service Spreadsheets timed out" from insertSheet()/setValues() is a known
-  // transient Google-side error on large/heavily-formulaed spreadsheets — retry
-  // with backoff rather than losing the whole scrape. On retry, first delete any
-  // empty stray sheet a previous failed attempt left behind (so retries don't
-  // pile up "_1", "_2" duplicates), then create fresh.
+  // transient Google-side error on large/heavily-formulaed spreadsheets, and gets
+  // far more likely the bigger a single setValues() call is (seen firsthand: a
+  // 9,060-row single-shot write timed out on all 4 attempts, on a huge, heavily
+  // ARRAYFORMULA'd spreadsheet). Write in chunks instead of one giant call, and
+  // retry with backoff on top of that. On retry, delete ANY stray sheet a
+  // previous failed attempt left behind (partial or empty — every attempt does a
+  // full rewrite, so a leftover partial sheet from attempt N-1 is always safe to
+  // drop) so retries don't pile up "_1", "_2" duplicates, then create fresh.
   function _writeSheetWithRetry_(ss, baseName, headers, values, maxAttempts) {
     maxAttempts = maxAttempts || 4;
+    const CHUNK_SIZE = 1000;
     let lastErr;
     for (let attempt = 1; attempt <= maxAttempts; attempt++) {
       try {
         const stray = ss.getSheets().find(s =>
           s.getName() === baseName || s.getName().indexOf(baseName + '_') === 0
         );
-        if (stray && stray.getLastRow() < 1) ss.deleteSheet(stray);
+        if (stray) ss.deleteSheet(stray);
 
         const sheetName = getUniqueSheetName_(ss, baseName);
         const sh = ss.insertSheet(sheetName);
         sh.getRange(1, 1, 1, headers.length).setValues([headers]);
-        sh.getRange(2, 1, values.length, headers.length).setValues(values);
+        for (let start = 0; start < values.length; start += CHUNK_SIZE) {
+          const chunk = values.slice(start, start + CHUNK_SIZE);
+          sh.getRange(start + 2, 1, chunk.length, headers.length).setValues(chunk);
+        }
         Logger.log(`  [${sheetName}] Wrote ${values.length} row(s) (attempt ${attempt}/${maxAttempts})`);
         return;
       } catch (e) {
@@ -439,3 +456,4 @@ function repairLatestRun(taskKey) {
 // Editor's Run button calls functions with no arguments, so repairLatestRun
 // (which takes a taskKey) can't be invoked directly from there — use this instead.
 function repairGlxZ8Sheet() { repairLatestRun('GlxZ8'); }
+function repair유지훈PSheet() { repairLatestRun('유지훈P'); }
