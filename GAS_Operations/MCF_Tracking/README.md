@@ -15,7 +15,7 @@ Google Apps Script project for Spigen GCX — Multi-Channel Fulfillment (MCF) or
 | `autoFill.js` | `onEdit` trigger, `backfillTrackingNumbers()`, and `backfillMCFFees()` — batch server-side fee/tracking writes to col Y/Z |
 | `main.js` | `MCFReporter` — daily Google Chat card alert listing rows missing a tracking number |
 | `MCFGen.js` | (Archived / commented out) MCF order creation and stock-check helpers via SP-API |
-| `triggerGen.js` | `triggerGen()` — sets weekday 9 AM KST time-based triggers for `MCFReporter`; `triggerTester()` schedules a test run 1 minute out |
+| `triggerGen.js` | `triggerTester()` — schedules a one-off `MCFReporter` test run 1 minute out; `installHourlyRetry429Trigger()` — sets an hourly trigger for `retryR429Errors()` |
 | `tamperMonkey.js` | TamperMonkey-related helpers |
 | `appsscript.json` | GAS manifest (timezone, OAuth scopes) |
 
@@ -151,14 +151,13 @@ Fires on any edit in the `MCF 발송 로그` sheet (rows 4+):
 
 ## Daily Report (`main.js`)
 
-`MCFReporter` runs on a time-based trigger (weekdays 9 AM KST, set by `triggerGen`).  
+`MCFReporter` runs on a time-based trigger (weekdays 9 AM KST).  
 It scans the `MCF 발송 로그` sheet for rows where col R is filled but col S is empty (order sent, tracking not yet entered) and posts a Google Chat card to the GCX T2 ESC. Ticket space with direct row-jump links.
 
 ### Setting triggers
 
 ```javascript
 // In GAS editor, run once:
-triggerGen()       // sets weekday 9AM triggers up to the hardcoded end date
 triggerTester()    // schedules MCFReporter 1 minute from now for testing
 installHourlyRetry429Trigger()  // sets an hourly trigger for retryR429Errors() (col R 429 backfill)
 ```
