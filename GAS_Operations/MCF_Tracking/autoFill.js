@@ -262,6 +262,141 @@ function retryZeroTransportationFees() {
 }
 
 /**
+ * READ-ONLY audit: computes the true Finances API fee for every row in col Y that's currently
+ * blank or a literal 0, WITHOUT writing anything back to col Y. Writes a side-by-side comparison
+ * (row, orderId, sentDate, current Y value, computed true fee) to a separate "Y_Fee_Audit" sheet
+ * tab instead, so this can be reviewed before touching the original data at all.
+ *
+ * Uses the same batched 60-day-window Finances API approach as backfillMCFFees() (a handful of
+ * calls covering the whole date range, not one call per row) to minimize additional load while
+ * SP-API's quota may still be recovering from earlier heavy use today. Handles 429 with the same
+ * sleep-and-retry-once-per-window pattern; a window that still fails is logged and skipped rather
+ * than blocking the rest of the audit.
+ *
+ * Run manually from the Apps Script editor.
+ */
+function auditYColumnFees() {
+  var ss    = SpreadsheetApp.getActiveSpreadsheet();
+  var sheet = ss.getSheetByName(BF_SHEET_NAME);
+  if (!sheet) throw new Error('Sheet not found: ' + BF_SHEET_NAME);
+
+  var lastRow = sheet.getLastRow();
+  if (lastRow < BF_START_ROW) return;
+
+  var numRows   = lastRow - BF_START_ROW + 1;
+  var orderIds  = sheet.getRange(BF_START_ROW, BF_COL_ORDER,  numRows, 1).getValues();
+  var sentDates = sheet.getRange(BF_START_ROW, BF_COL_SENT,   numRows, 1).getValues();
+  var regions   = sheet.getRange(BF_START_ROW, BF_COL_REGION, numRows, 1).getValues();
+  var currentY  = sheet.getRange(BF_START_ROW, BF_COL_FEE,    numRows, 1).getValues();
+
+  var targets = [];
+  var hasJP   = false;
+  var minDate = null;
+
+  for (var i = 0; i < numRows; i++) {
+    var orderId = String(orderIds[i][0] || '').trim();
+    if (!orderId) continue;
+
+    var yVal = currentY[i][0];
+    var isZeroOrBlank = (yVal === 0 || yVal === '0' || yVal === '' || yVal === null || yVal === undefined);
+    if (!isZeroOrBlank) continue;
+
+    var sentDate = String(sentDates[i][0] || '').trim();
+    var isJP     = String(regions[i][0]   || '').trim().toUpperCase() === 'JP';
+    if (isJP) hasJP = true;
+
+    if (sentDate) {
+      var d = new Date(sentDate);
+      if (!minDate || d < minDate) minDate = d;
+    }
+
+    targets.push({ row: BF_START_ROW + i, orderId: orderId, sentDate: sentDate, isJP: isJP, currentY: yVal });
+  }
+
+  if (!targets.length) {
+    Logger.log('auditYColumnFees: no zero/blank rows found — nothing to audit.');
+    return;
+  }
+
+  var now = new Date(Date.now() - 5 * 60 * 1000);
+  if (!minDate) minDate = new Date(now.getTime() - 180 * 24 * 3600 * 1000);
+
+  Logger.log('auditYColumnFees: %s target rows, window %s → now', targets.length, minDate.toISOString().slice(0, 10));
+
+  function fetchFeeMap(ep) {
+    var feeMap      = {};
+    var windowStart = new Date(minDate);
+
+    while (windowStart < now) {
+      var windowEnd = new Date(windowStart);
+      windowEnd.setDate(windowEnd.getDate() + 60);
+      if (windowEnd > now) windowEnd = now;
+      if (windowStart >= windowEnd) break;
+
+      try {
+        var chunk = _buildFeeMapForWindow(ep, windowStart, windowEnd);
+        Object.keys(chunk).forEach(function(k) { feeMap[k] = chunk[k]; });
+        Logger.log('  [%s] %s – %s: %s orders found', ep,
+          windowStart.toISOString().slice(0, 10), windowEnd.toISOString().slice(0, 10), Object.keys(chunk).length);
+      } catch (e) {
+        if (_isRateLimit429(e)) {
+          Logger.log('  [%s] 429 — sleeping 15 s, retrying window', ep);
+          Utilities.sleep(15000);
+          try {
+            var chunk2 = _buildFeeMapForWindow(ep, windowStart, windowEnd);
+            Object.keys(chunk2).forEach(function(k) { feeMap[k] = chunk2[k]; });
+          } catch (e2) {
+            Logger.log('  [%s] retry also failed — skipping window: %s', ep, e2.message);
+          }
+        } else {
+          Logger.log('  [%s] window error (%s): %s', ep, windowStart.toISOString().slice(0, 10), e.message);
+        }
+      }
+
+      windowStart = new Date(windowEnd);
+      windowStart.setDate(windowStart.getDate() + 1);
+      Utilities.sleep(500);
+    }
+
+    return feeMap;
+  }
+
+  var euMap = fetchFeeMap('EU');
+  var feMap = hasJP ? fetchFeeMap('FE') : {};
+
+  var results = [['Row', 'OrderID', 'SentDate', 'Current Y value', 'Computed true fee', 'Source', 'Note']];
+  var matched = 0, stillUnresolved = 0;
+
+  targets.forEach(function(t) {
+    var primaryMap   = t.isJP ? feMap : euMap;
+    var secondaryMap = t.isJP ? euMap : feMap;
+    var primaryEp    = t.isJP ? 'FE' : 'EU';
+    var secondaryEp  = t.isJP ? 'EU' : 'FE';
+
+    var fee, src;
+    if (primaryMap[t.orderId] !== undefined)        { fee = primaryMap[t.orderId];   src = primaryEp; }
+    else if (secondaryMap[t.orderId] !== undefined) { fee = secondaryMap[t.orderId]; src = secondaryEp; }
+    else                                             { fee = ''; src = ''; }
+
+    if (fee !== '') matched++; else stillUnresolved++;
+
+    results.push([
+      t.row, t.orderId, t.sentDate, t.currentY,
+      fee, src,
+      fee !== '' ? '' : 'not found in window — may be outside range, unsettled, or needs displayableOrderId fallback'
+    ]);
+  });
+
+  var auditSheet = ss.getSheetByName('Y_Fee_Audit');
+  if (!auditSheet) auditSheet = ss.insertSheet('Y_Fee_Audit');
+  auditSheet.clearContents();
+  auditSheet.getRange(1, 1, results.length, results[0].length).setValues(results);
+
+  Logger.log('auditYColumnFees done — %s matched, %s still unresolved. See "Y_Fee_Audit" sheet. Col Y was NOT modified.',
+    matched, stillUnresolved);
+}
+
+/**
  * Writes MCF fulfillment fees as static values into BF_COL_FEE (col Y).
  *
  * Batch approach: fetches all financial events in 60-day windows (EU + FE endpoints)
