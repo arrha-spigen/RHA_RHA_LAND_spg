@@ -21,22 +21,3 @@ function triggerTester() {
   Logger.log("Trigger set for: " + oneMinuteLater);
 }
 
-
-// ------------ Hourly 429 Retry Trigger (col R backfill) ----------------------------------------//
-// Run once from the Apps Script editor to activate. Safe to re-run — removes any existing
-// trigger for retryR429Errors first, so it never duplicates.
-function installHourlyRetry429Trigger() {
-  var triggers = ScriptApp.getProjectTriggers();
-  triggers.forEach(function(trigger) {
-    if (trigger.getHandlerFunction() === 'retryR429Errors') {
-      ScriptApp.deleteTrigger(trigger);
-    }
-  });
-
-  ScriptApp.newTrigger('retryR429Errors')
-    .timeBased()
-    .everyHours(1)
-    .create();
-
-  Logger.log('Hourly trigger installed for retryR429Errors().');
-}

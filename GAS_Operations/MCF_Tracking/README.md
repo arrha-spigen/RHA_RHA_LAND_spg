@@ -15,7 +15,7 @@ Google Apps Script project for Spigen GCX — Multi-Channel Fulfillment (MCF) or
 | `autoFill.js` | `onEdit` trigger, `backfillTrackingNumbers()`, and `backfillMCFFees()` — batch server-side fee/tracking writes to col Y/Z |
 | `main.js` | `MCFReporter` — daily Google Chat card alert listing rows missing a tracking number |
 | `MCFGen.js` | (Archived / commented out) MCF order creation and stock-check helpers via SP-API |
-| `triggerGen.js` | `triggerTester()` — schedules a one-off `MCFReporter` test run 1 minute out; `installHourlyRetry429Trigger()` — sets an hourly trigger for `retryR429Errors()` |
+| `triggerGen.js` | `triggerTester()` — schedules a one-off `MCFReporter` test run 1 minute out |
 | `tamperMonkey.js` | TamperMonkey-related helpers |
 | `appsscript.json` | GAS manifest (timezone, OAuth scopes) |
 
@@ -126,8 +126,12 @@ Bounded so it can never call SP-API forever in one run:
   quota is clearly still exhausted, so it stops and lets the next hourly trigger pick up where
   it left off, instead of hammering SP-API in a tight loop
 
+An hourly time-based trigger for `retryR429Errors()` is already installed on the live script
+(set up via the Apps Script Triggers UI / a one-off installer that has since been removed from
+the codebase). Manage or remove it from **Apps Script editor → Triggers** (clock icon).
+
 ```javascript
-// Run once manually in GAS editor, or install the hourly trigger below:
+// Can also be run manually in GAS editor:
 retryR429Errors()
 ```
 
@@ -159,7 +163,6 @@ It scans the `MCF 발송 로그` sheet for rows where col R is filled but col S 
 ```javascript
 // In GAS editor, run once:
 triggerTester()    // schedules MCFReporter 1 minute from now for testing
-installHourlyRetry429Trigger()  // sets an hourly trigger for retryR429Errors() (col R 429 backfill)
 ```
 
 ---

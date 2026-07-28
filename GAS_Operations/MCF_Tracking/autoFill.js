@@ -93,7 +93,8 @@ var RETRY_R_MAX_CONSEC_429   = 5;    // abort the run early if quota is clearly 
  *      quota is clearly still exhausted, so this run stops instead of hammering it; the next
  *      hourly trigger picks up where this one left off
  *
- * Run manually, or set up to run hourly via installHourlyRetry429Trigger() in triggerGen.js.
+ * Run manually, or via the hourly trigger already installed on the live script
+ * (Apps Script editor → Triggers).
  */
 function retryR429Errors() {
   var ss    = SpreadsheetApp.getActiveSpreadsheet();
