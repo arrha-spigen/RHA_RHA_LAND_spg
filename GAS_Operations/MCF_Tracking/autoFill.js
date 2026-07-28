@@ -262,6 +262,53 @@ function retryZeroTransportationFees() {
 }
 
 /**
+ * ONE-TIME recovery variant of retryZeroTransportationFees() — clears ALL zero-fee cells in
+ * col Y (uncapped) in a single batched write, then runs backfillMCFFees() once.
+ *
+ * Use this instead of the hourly-safe retryZeroTransportationFees() (40 rows/run) when there's
+ * a large one-off backlog: backfillMCFFees()'s cost is dominated by the date-range window
+ * fetches (a handful of calls covering the whole range), not by how many rows get matched
+ * against the result — clearing only a small slice per run means paying that same window-fetch
+ * cost repeatedly while only a few rows benefit each time. Clearing everything at once lets a
+ * single backfillMCFFees() run resolve the whole backlog in one pass (assuming SP-API quota
+ * allows it to complete).
+ *
+ * Run manually from the Apps Script editor once SP-API's EU quota has recovered — check with
+ * auditYColumnFees() first if unsure, since that's read-only and won't consume quota needed for
+ * this to succeed.
+ */
+function recoverAllZeroTransportationFees() {
+  var ss    = SpreadsheetApp.getActiveSpreadsheet();
+  var sheet = ss.getSheetByName(BF_SHEET_NAME);
+  if (!sheet) throw new Error('Sheet not found: ' + BF_SHEET_NAME);
+
+  var lastRow = sheet.getLastRow();
+  if (lastRow < BF_START_ROW) return;
+
+  var numRows  = lastRow - BF_START_ROW + 1;
+  var feeRange = sheet.getRange(BF_START_ROW, BF_COL_FEE, numRows, 1);
+  var feeVals  = feeRange.getValues();
+
+  var cleared = 0;
+  for (var i = 0; i < numRows; i++) {
+    var v = feeVals[i][0];
+    if (v === 0 || v === '0') {
+      feeVals[i][0] = '';
+      cleared++;
+    }
+  }
+
+  if (!cleared) {
+    Logger.log('recoverAllZeroTransportationFees: no zero-fee cells found — nothing to do.');
+    return;
+  }
+
+  feeRange.setValues(feeVals); // single batched write, not one setValue() call per row
+  Logger.log('recoverAllZeroTransportationFees: cleared ' + cleared + ' zero-fee cell(s) in one batch, running backfillMCFFees()...');
+  backfillMCFFees();
+}
+
+/**
  * READ-ONLY audit: computes the true Finances API fee for every row in col Y that's currently
  * blank or a literal 0, WITHOUT writing anything back to col Y. Writes a side-by-side comparison
  * (row, orderId, sentDate, current Y value, computed true fee) to a separate "Y_Fee_Audit" sheet
