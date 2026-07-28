@@ -156,6 +156,23 @@ the codebase). Manage or remove it from **Apps Script editor → Triggers** (clo
 retryR429Errors()
 ```
 
+### `retryZeroTransportationFees()`
+Cleans up the col Y "literal 0" backlog left over from the GCX fee-type filtering bug (see the
+`MCFFee()` note above). `backfillMCFFees()` skips any row whose col Y already has a non-empty
+value — including `"0"` — so those rows never get reprocessed on their own even after the fix.
+
+Clears up to 40 zero-fee cells per run (`RETRY_ZERO_FEE_MAX_ROWS_PER_RUN`) back to blank, then
+runs `backfillMCFFees()` so they get recomputed correctly. Reuses all of `backfillMCFFees()`'s
+own safeguards (429 sleep-and-retry per window) — no separate retry logic needed. Bounded to 40
+rows/run so one execution can't try to reprocess the whole historical backlog (which could span
+many months of Finances API windows) at once; run hourly and it works through the backlog
+gradually.
+
+```javascript
+// Run manually, or set up an hourly trigger via Apps Script editor → Triggers:
+retryZeroTransportationFees()
+```
+
 ---
 
 ## `onEdit` Automation (`autoFill.js`)

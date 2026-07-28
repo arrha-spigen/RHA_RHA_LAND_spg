@@ -209,6 +209,58 @@ function _is429ErrorValue(v) {
   return s.indexOf('SP-API error 429') >= 0 || s.indexOf('QuotaExceeded') >= 0;
 }
 
+/***** ========= RETRY $0 TRANSPORTATION FEES IN COL Y ========= *****/
+var RETRY_ZERO_FEE_MAX_ROWS_PER_RUN = 40; // hard cap so one run only clears/reprocesses a bounded batch
+
+/**
+ * Finds cells in col Y (Transportation Fee) showing a literal 0 — the symptom of the GCX
+ * fee-type filtering bug (see _sumMcfFeeFromShipments) that was fixed in sp-api.js, but had
+ * already written wrong 0s into the sheet before the fix landed. backfillMCFFees() skips any
+ * row whose col Y already has a non-empty value — including "0" — so those rows never get
+ * reprocessed on their own even after the fix.
+ *
+ * Clears up to RETRY_ZERO_FEE_MAX_ROWS_PER_RUN of those 0-cells back to blank (making them
+ * "pending" under backfillMCFFees()'s own skip logic), then runs backfillMCFFees() so they
+ * get recomputed with the fixed fee-type logic. All of backfillMCFFees()'s own safeguards
+ * (429 sleep-and-retry per window, moving on rather than hanging) apply as-is — no separate
+ * retry/backoff logic needed here.
+ *
+ * Bounded so a single run can't try to clear and reprocess the whole historical backlog at
+ * once, which would risk a long-running execution across many months of Finances API windows.
+ * Run hourly and it works through the backlog gradually.
+ *
+ * Run manually, or set up an hourly time-based trigger for this function via
+ * Apps Script editor → Triggers.
+ */
+function retryZeroTransportationFees() {
+  var ss    = SpreadsheetApp.getActiveSpreadsheet();
+  var sheet = ss.getSheetByName(BF_SHEET_NAME);
+  if (!sheet) throw new Error('Sheet not found: ' + BF_SHEET_NAME);
+
+  var lastRow = sheet.getLastRow();
+  if (lastRow < BF_START_ROW) return;
+
+  var numRows = lastRow - BF_START_ROW + 1;
+  var feeVals = sheet.getRange(BF_START_ROW, BF_COL_FEE, numRows, 1).getValues();
+
+  var cleared = 0;
+  for (var i = 0; i < numRows && cleared < RETRY_ZERO_FEE_MAX_ROWS_PER_RUN; i++) {
+    var v = feeVals[i][0];
+    if (v === 0 || v === '0') {
+      sheet.getRange(BF_START_ROW + i, BF_COL_FEE).setValue('');
+      cleared++;
+    }
+  }
+
+  if (!cleared) {
+    Logger.log('retryZeroTransportationFees: no zero-fee cells found — nothing to do.');
+    return;
+  }
+
+  Logger.log('retryZeroTransportationFees: cleared ' + cleared + ' zero-fee cell(s), running backfillMCFFees()...');
+  backfillMCFFees();
+}
+
 /**
  * Writes MCF fulfillment fees as static values into BF_COL_FEE (col Y).
  *
