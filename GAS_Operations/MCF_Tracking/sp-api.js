@@ -776,6 +776,15 @@ function _fetchMcfFeeFinancesApi(orderId, ep, sentDate) {
   var fee = _sumMcfFeeFromShipments(shipments, orderId);
   if (fee !== '') return fee;
 
+  // GCX alias: the Q column auto-generates its ID one step before the order is submitted
+  // to Amazon's FBA Outbound API, so Amazon records SellerOrderId = N while the sheet
+  // stores N-1. Try N (see _gcxNumAlias).
+  var gcxAlias = _gcxNumAlias(String(orderId), 1);
+  if (gcxAlias) {
+    fee = _sumMcfFeeFromShipments(shipments, gcxAlias);
+    if (fee !== '') return fee;
+  }
+
   // Fallback: some MCF orders settle in the Finances API under displayableOrderId
   // (e.g. when fulfilling a linked Amazon marketplace order).
   // Only run when sentDate was provided — foCache is only populated in that path.
@@ -798,6 +807,28 @@ function _isMcfFeeType(feeType) {
   if (!feeType) return false;
   var t = String(feeType).toUpperCase();
   return t.indexOf('FBA') >= 0 || t.indexOf('FULFILLMENT') >= 0;
+}
+
+/**
+ * Returns a GCX order ID with its trailing number shifted by delta.
+ * Works on IDs matching GCX-XX-YYMMDD-N. Returns null for non-matching or out-of-range IDs.
+ *
+ * Why: the Q column auto-generates its ID one step before the order is actually submitted to
+ * Amazon's FBA Outbound API. Amazon records the submitted ID (N) as SellerOrderId in the
+ * Finances API, while the sheet stores N-1 — so a direct match against the Q-column value
+ * fails for essentially every GCX order. _fetchMcfFeeFinancesApi tries N (delta=+1) after the
+ * direct match fails; _buildFeeMapForWindow indexes each entry under N-1 too (delta=-1) so
+ * backfillMCFFees()'s lookup (keyed by the Q-column value) succeeds directly.
+ */
+function _gcxNumAlias(id, delta) {
+  var m = /^(GCX-[A-Z]+-\d{6}-)(\d+)$/.exec(String(id));
+  if (!m) return null;
+  var newNum = parseInt(m[2], 10) + delta;
+  if (newNum < 0) return null;
+  var ns  = String(newNum);
+  var pad = m[2].length;
+  while (ns.length < pad) ns = '0' + ns;
+  return m[1] + ns;
 }
 
 /**
@@ -840,7 +871,16 @@ function _buildFeeMapForWindow(ep, postedAfter, postedBefore) {
         });
       });
 
-      if (total !== 0) feeMap[sid] = Math.abs(total);
+      if (total !== 0) {
+        var abs = Math.abs(total);
+        feeMap[sid] = abs;
+        // Index under the Q-column ID (N-1) too, so backfillMCFFees()'s lookup — keyed by
+        // the Q-column value — succeeds directly without a separate alias-retry step.
+        if (isGcx) {
+          var alias = _gcxNumAlias(sid, -1);
+          if (alias && !feeMap[alias]) feeMap[alias] = abs;
+        }
+      }
     }
 
     page++;
