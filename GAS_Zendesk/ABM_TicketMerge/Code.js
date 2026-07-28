@@ -597,6 +597,92 @@ function caseIdFromTicket_(ticket) {
   return m ? m[1] : null;
 }
 
+// Amazon's ABM buyer-proxy address is unique PER CASE (the "+<uuid>" segment
+// is the Seller Central case id — see caseIdFromTicket_ above), but the LOCAL
+// PART BEFORE THE "+" is stable per real buyer on a given marketplace.
+// Confirmed against 2 real examples: buyer "gg26m13dc1xdyvr" on amazon.fr,
+// and buyer "bm11jdhs75yyts4" on amazon.com.be, whose base local part recurs
+// identically across different case tickets (#1000132589 and #1000155203).
+//
+// Because Zendesk creates a brand-new end-user from the exact From-address
+// the FIRST time it sees it, every new case currently spawns a SEPARATE
+// end-user whose Primary Email is the full "+uuid" address — so clicking the
+// customer's name in Zendesk (which lists tickets by end-user, not by real
+// buyer) only ever shows that ONE case, never the buyer's full history across
+// orders. Confirmed live: #1000132589's Primary Email is the correct bare
+// address; #1000155203 (same real buyer) is a completely different end-user
+// whose Primary Email still carries the "+uuid" segment.
+//
+// Fix: strip the "+uuid" down to the stable base address, then either
+//   (a) merge this ticket's just-auto-created end-user into an EXISTING
+//       end-user that already has that base address as an identity — so this
+//       ticket's history moves onto the one canonical profile, or
+//   (b) if no such end-user exists yet, add the base address as a NEW
+//       identity on this end-user and make it primary — first time this
+//       buyer is seen, this becomes their canonical profile for every future
+//       case.
+// The non-primary "+uuid" identity is left alone either way — confirmed with
+// the team lead that only the Primary Email matters; a secondary address is
+// fine to keep or drop.
+//
+// Mutates `ticket.requester_id` in place when a merge happens (Zendesk
+// reassigns the ticket to the merge target server-side) — callers must use
+// the ticket object AFTER calling this, not a requester fetched before it.
+// Best-effort/non-fatal: any failure here (e.g. a race between two
+// near-simultaneous new cases from the same buyer, since Zendesk enforces
+// unique identity values account-wide) is caught and logged, never blocks the
+// rest of handleNewAbmTicket_'s merge/cleanup/auto-fill for this ticket.
+function normalizeAbmRequesterIdentity_(ticket) {
+  try {
+    const fromAddr = (ticket.via && ticket.via.source && ticket.via.source.from
+      && ticket.via.source.from.address) || '';
+    const m = fromAddr.match(/^([^@+]+)\+[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}(@marketplace\.amazon\.[\w.-]+)$/i);
+    if (!m) return { status: 'no_case_suffix' }; // not an ABM proxy address with a case-id suffix — nothing to normalize
+
+    const baseEmail = (m[1] + m[2]).toLowerCase();
+    const requester = getUser_(ticket.requester_id);
+    if (!requester) return { status: 'no_requester' };
+    if ((requester.email || '').toLowerCase() === baseEmail) {
+      return { status: 'already_normalized' }; // a prior run (or Zendesk itself) already fixed this
+    }
+
+    const found = zdFetch_(`/api/v2/users/search.json?query=${encodeURIComponent('email:' + baseEmail)}`);
+    const canonical = (found.users || []).find(u => u.id !== requester.id);
+
+    if (canonical) {
+      zdFetch_(`/api/v2/users/${requester.id}/merge.json`, {
+        method: 'put',
+        payload: JSON.stringify({ user: { id: canonical.id } })
+      });
+      ticket.requester_id = canonical.id;
+      return { status: 'merged', fromUserId: requester.id, intoUserId: canonical.id, baseEmail };
+    }
+
+    const identityRes = zdFetch_(`/api/v2/users/${requester.id}/identities.json`, {
+      method: 'post',
+      payload: JSON.stringify({ identity: { type: 'email', value: baseEmail, verified: true } })
+    });
+    const identityId = identityRes.identity && identityRes.identity.id;
+    if (identityId) {
+      zdFetch_(`/api/v2/users/${requester.id}/identities/${identityId}/make_primary.json`, { method: 'put' });
+    }
+    return { status: 'primary_identity_added', userId: requester.id, identityId, baseEmail };
+  } catch (err) {
+    Logger.log(`normalizeAbmRequesterIdentity_: ${err}`);
+    return { status: 'error', error: String(err) };
+  }
+}
+
+// Manual runner/backfill — run from the Apps Script editor. Safe to re-run on
+// an already-normalized ticket (returns 'already_normalized', no side effect).
+function testNormalizeIdentityOnTicket(ticketId) {
+  const ticket = getTicket_(ticketId);
+  if (!ticket) { Logger.log('ticket not found'); return { status: 'not_found', ticketId }; }
+  const result = normalizeAbmRequesterIdentity_(ticket);
+  Logger.log(JSON.stringify(result, null, 2));
+  return result;
+}
+
 // Picks the prior ticket to thread the new message into — see the file header
 // for the full selection rationale. Returns the ticket object or null.
 function findPrimaryTicket_(requesterEmail, newTicket) {
@@ -694,9 +780,16 @@ function handleNewAbmTicket_(ticketId) {
     return { status: 'already_processed', ticketId };
   }
 
+  // Normalize this buyer's Zendesk end-user identity BEFORE any requester
+  // email is read below — see normalizeAbmRequesterIdentity_ for why (Primary
+  // Email otherwise carries the case-specific "+uuid" proxy address, which
+  // fragments the same real buyer across a separate end-user per case). May
+  // mutate ticket.requester_id in place (merge case).
+  const identityNormalization = normalizeAbmRequesterIdentity_(ticket);
+
   const requester = getUser_(ticket.requester_id);
   if (!requester || !requester.email) {
-    return { status: 'skipped_no_requester_email', ticketId };
+    return { status: 'skipped_no_requester_email', ticketId, identityNormalization };
   }
 
   const primary = findPrimaryTicket_(requester.email, ticket);
@@ -705,7 +798,7 @@ function handleNewAbmTicket_(ticketId) {
     // clean it up here too (see the "ABM inbound cleanup" section above),
     // same as a merged follow-up gets below.
     const cleanup = cleanupExistingAbmTicket_(ticketId);
-    return { status: 'left_as_primary', ticketId, cleanup };
+    return { status: 'left_as_primary', ticketId, identityNormalization, cleanup };
   }
 
   // Zendesk's SEARCH index lags behind live ticket state — a search result's
@@ -737,6 +830,7 @@ function handleNewAbmTicket_(ticketId) {
     status: merge.wasReopened ? 'merged_reopened' : 'merged',
     ticketId,
     primaryTicketId: freshPrimary.id,
+    identityNormalization,
     attachmentsTransferred: merge.attachmentsTransferred,
     attachmentsTotal: merge.attachmentsTotal,
     cleanup
@@ -761,6 +855,19 @@ function doPost(e) {
     // webhook path missed for any reason). Idempotent, safe to call repeatedly.
     if (body.action === 'cleanupTicket') {
       const result = cleanupExistingAbmTicket_(body.ticketId);
+      return ContentService.createTextOutput(JSON.stringify(result))
+        .setMimeType(ContentService.MimeType.JSON);
+    }
+
+    // Secret-guarded on-demand backfill trigger — normalizes a specific
+    // ticket's requester's Primary Email to the base (no "+uuid") address,
+    // merging into an existing canonical end-user if one already exists. For
+    // fixing tickets created before this feature existed.
+    if (body.action === 'normalizeIdentity') {
+      const ticket = getTicket_(body.ticketId);
+      const result = ticket
+        ? normalizeAbmRequesterIdentity_(ticket)
+        : { status: 'not_found', ticketId: body.ticketId };
       return ContentService.createTextOutput(JSON.stringify(result))
         .setMimeType(ContentService.MimeType.JSON);
     }

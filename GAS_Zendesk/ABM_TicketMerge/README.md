@@ -12,7 +12,7 @@ buyer, so agents see one thread per ABM conversation, matching Seller Central.
 
 **Script ID:** `1gJu9O-8MNYWVItLYsr48eym0afY1P9n8lUjSwM_p457DIisZLwOXIWAj`
 **Web app URL:** `https://script.google.com/macros/s/AKfycbz2hQMj97voADUPYv6YBHzjZaLsogj1osFhFNpny5iQXtKjBJpn8P2i1pW3Af-6M89ZcA/exec`
-**Current version:** 20 (posts a clean copy of the raw Amazon-block comment alongside the untouched original — redaction was tried in v14-v18 and reverted in v19, see below — and auto-fills Order ID / Customer Full Name / Country / Amazon Fulfillment Methods / ASIN on new ABM tickets)
+**Current version:** 24 / internal version 23 (posts a clean copy of the raw Amazon-block comment alongside the untouched original — redaction was tried in v14-v18 and reverted in v19, see below — auto-fills Order ID / Customer Full Name / Country / Amazon Fulfillment Methods / ASIN on new ABM tickets, and normalizes the buyer's Zendesk Primary Email to strip the case-specific `+uuid` suffix, see below)
 
 ## How it works
 
@@ -152,6 +152,49 @@ duplicates on re-run. Attachment re-hosting verified separately with a real
 JPEG posted as a synthetic raw-template comment on #1000153636 — the new
 clean comment carried the exact same file (byte-identical size), original
 untouched.
+
+## Buyer Primary Email normalization (v24)
+
+Amazon's ABM buyer-proxy address is unique **per case** (the `+<uuid>` segment
+is the Seller Central case id), but the local part before the `+` is stable
+per real buyer on a marketplace. Zendesk creates a brand-new end-user from the
+exact From-address the first time it sees it — so every new case spawned a
+**separate** end-user whose Primary Email still carried the `+uuid` segment,
+fragmenting the same real buyer across multiple Zendesk profiles. Since
+clicking a customer's name in Zendesk lists tickets by end-user (not by real
+buyer), agents only ever saw one case's ticket, never the buyer's full history
+across orders — confirmed live: ticket `#1000132589`'s Primary Email was
+already correct (bare address, no case suffix at all), while ticket
+`#1000155203` (same real buyer) was a completely different end-user whose
+Primary Email carried `+bb1d2d98-...`.
+
+`normalizeAbmRequesterIdentity_` runs at the top of `handleNewAbmTicket_` for
+every new ABM ticket, before the requester email is used for anything else:
+strips the `+uuid` down to the base address, then either
+- **merges** this ticket's just-auto-created end-user into an existing
+  end-user that already has that base address (all of this ticket's history
+  moves onto the one canonical profile), or
+- if no such end-user exists yet, **adds the base address as a new identity
+  and makes it primary** (first time this buyer is seen — becomes their
+  canonical profile for every future case).
+
+The non-primary `+uuid` identity is left alone either way. Best-effort/
+non-fatal — any failure (e.g. a rare race between two near-simultaneous new
+cases from the same buyer) is caught and logged, never blocks the rest of
+that ticket's merge/cleanup/auto-fill.
+
+**Manual backfill** (tickets created before this existed) — from the editor:
+`testNormalizeIdentityOnTicket(ticketId)`. Remotely via the same
+secret-guarded webhook:
+```bash
+curl -X POST "$WEB_APP_URL?secret=$WEBHOOK_SECRET" \
+  -H "Content-Type: application/json" \
+  -d '{"action":"normalizeIdentity","ticketId":1000155203}'
+```
+
+Verified live end-to-end on the exact two tickets above: `#1000155203`'s
+end-user merged into `#1000132589`'s (`bm11jdhs75yyts4@marketplace.amazon.com.be`,
+buyer "Selena") — both tickets now resolve to the same `requester_id`.
 
 ## Files
 
