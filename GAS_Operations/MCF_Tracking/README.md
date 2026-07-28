@@ -67,6 +67,13 @@ Returns the actual settled MCF fulfillment fee via the Finances API. Always uses
 > later revert; restored 2026-07-28. Also fixed: only the *first* matching `ShipmentEvent` was
 > ever checked — split-shipment orders whose fee posted in a later event were misread as `0`;
 > now sums across every matching event.
+>
+> **Important — CacheService, not just code, has to be cleared:** `MCFFee()`/`MCFFee_JP()` cache
+> their result in `CacheService` for up to 6h, independent of script deployments. A cell that
+> cached a wrong `0` under the pre-fix code keeps serving that stale value for the rest of its
+> TTL even after `clasp push` — the cache check happens before the (now-correct) computation
+> logic ever runs. Run `clearMcfFeeCache()` once after any MCFFee-related code fix so cells
+> actually recompute instead of replaying stale cached results.
 
 ### `=MCFFee_JP(orderId)` / `=MCFFee_JP(sentDate, orderId)`
 Same as `MCFFee` but tries FE (Japan/AU/SG) first.

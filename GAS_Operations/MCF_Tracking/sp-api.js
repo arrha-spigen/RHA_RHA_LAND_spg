@@ -467,6 +467,57 @@ function debugAMZTK() {
 }
 
 /**
+ * Clears MCFFee()/MCFFee_JP() CacheService entries for every order in the sheet.
+ *
+ * CacheService persists independently of script deployments — pushing a code fix via clasp
+ * does NOT invalidate it. A cell that cached a wrong result (e.g. a literal 0 from the
+ * pre-fix GCX fee-type filtering bug) keeps serving that stale wrong value for up to its 6h
+ * TTL even after the underlying bug is fixed, because MCFFee() checks the cache before ever
+ * reaching the (now-correct) computation logic. Run this once after fixing any MCFFee-related
+ * bug so cells actually recompute instead of replaying stale results.
+ *
+ * Rebuilds cache keys using the exact same method the live formula would (reads orderId/
+ * sentDate straight from the sheet, same Date-object stringification Apps Script uses when
+ * passing a date-formatted cell to a custom function), so this reliably targets the same keys
+ * =MCFFee(Q,P)-style formulas actually use.
+ */
+function clearMcfFeeCache() {
+  var cache = CacheService.getScriptCache();
+  var ss    = SpreadsheetApp.getActiveSpreadsheet();
+  var sheet = ss.getSheetByName(BF_SHEET_NAME);
+  if (!sheet) throw new Error('Sheet not found: ' + BF_SHEET_NAME);
+
+  var lastRow = sheet.getLastRow();
+  if (lastRow < BF_START_ROW) return;
+
+  var numRows   = lastRow - BF_START_ROW + 1;
+  var orderIds  = sheet.getRange(BF_START_ROW, BF_COL_ORDER, numRows, 1).getValues();
+  var sentDates = sheet.getRange(BF_START_ROW, BF_COL_SENT,  numRows, 1).getValues();
+
+  var METHODS = ['FinancesAPI', 'getFulfillmentPreview'];
+  var keys = [];
+
+  for (var i = 0; i < numRows; i++) {
+    var orderId = String(orderIds[i][0] || '').trim();
+    if (!orderId) continue;
+
+    var rawSentDate = sentDates[i][0]; // Date object or string, exactly as MCFFee() would receive it
+    var dateKey = rawSentDate ? '_' + String(rawSentDate).trim() : '';
+
+    METHODS.forEach(function(method) {
+      keys.push('MCFFEE_'    + method + '_' + orderId + dateKey);
+      keys.push('MCFFEE_'    + method + '_' + orderId);       // in case it was called without sentDate
+      keys.push('MCFFEE_JP_' + method + '_' + orderId + dateKey);
+      keys.push('MCFFEE_JP_' + method + '_' + orderId);
+    });
+  }
+
+  var BATCH = 100;
+  for (var s = 0; s < keys.length; s += BATCH) cache.removeAll(keys.slice(s, s + BATCH));
+  Logger.log('clearMcfFeeCache: cleared up to ' + keys.length + ' MCFFee cache entries.');
+}
+
+/**
  * Clears AMZTK cache for all orders in the sheet so cells re-fetch live.
  * Run from editor after fixing any underlying issue.
  */
