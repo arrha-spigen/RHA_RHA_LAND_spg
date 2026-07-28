@@ -116,9 +116,19 @@ Same pattern for tracking numbers → writes static values into col Z.
 
 ### `retryR429Errors()`
 Scans col R (row 1108+) for cells whose live `=AMZTK()`/`=AMZTK_JP()` formula is currently
-showing a 429 QuotaExceeded error, re-fetches those specific orders directly, primes AMZTK's
-own cache with the result, then rewrites the cell's formula (same text) to force it to pick up
-the fresh cache — formulas in col R are never replaced with static values.
+showing a 429 QuotaExceeded error, and re-fetches those specific orders directly.
+
+- **Tracking number found** → freezes the cell to a static `=HYPERLINK(...)` (same URL format
+  the live formula produces). This is deliberate: confirmed live that Sheets' custom-function
+  engine does not reliably re-run `AMZTK()`/`AMZTK_JP()` just because Apps Script rewrites the
+  identical formula text via the API — the cache was primed correctly but the cell kept showing
+  the stale 429 text. Freezing to a static value is the only way to guarantee the sheet actually
+  displays the result, and it also drops the row out of the 429 filter so future runs progress to
+  new rows instead of re-fetching the same already-resolved orders every hour.
+- **No tracking number yet** (order genuinely not ready, no error) → primes the cache `AMZTK`
+  reads from, then forces a real recalculation by writing a placeholder formula and then the
+  original formula back (two distinct writes — Sheets only re-triggers custom functions on an
+  actual content change), so the stale error clears to blank.
 
 Bounded so it can never call SP-API forever in one run:
 - stops after 40 rows per execution (`RETRY_R_MAX_ROWS_PER_RUN`)

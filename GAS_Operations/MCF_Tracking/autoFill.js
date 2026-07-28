@@ -82,10 +82,21 @@ var RETRY_R_MAX_CONSEC_429   = 5;    // abort the run early if quota is clearly 
 
 /**
  * Finds cells in col R (MCF 발송 로그, row RETRY_R_START_ROW+) whose live =AMZTK()/=AMZTK_JP()
- * formula is currently showing a 429 QuotaExceeded error, re-fetches those specific orders
- * directly, primes AMZTK's own CacheService entry with the result, then rewrites the cell's
- * existing formula (same text) to force it to recalculate against the fresh cache instead of
- * the stale error. No formulas are ever replaced with static values.
+ * formula is currently showing a 429 QuotaExceeded error, and re-fetches those specific orders
+ * directly.
+ *
+ * - Found a tracking number: freezes the cell to a static =HYPERLINK(...) (same URL format the
+ *   live formula produces). This is deliberate, not just a recalc trick — confirmed live that
+ *   Sheets' custom-function engine does NOT reliably re-run AMZTK()/AMZTK_JP() just because
+ *   Apps Script rewrites the identical formula text via the API (cache was primed correctly but
+ *   the cell kept showing the stale 429 text), so writing the final known-correct value directly
+ *   is the only way to guarantee the sheet actually displays it — and it also means the row won't
+ *   match the 429 filter on the next run, so later runs progress to new rows instead of
+ *   re-fetching the same already-resolved orders every hour.
+ * - No tracking number yet (order genuinely not ready, no error): primes the cache AMZTK reads
+ *   from, then forces a real recalculation by writing a placeholder formula and then the original
+ *   formula back — two distinct writes, since Sheets only re-triggers custom functions on an
+ *   actual content change — so the stale error clears to blank instead of sitting there forever.
  *
  * Bounded two ways so a single run can never call the API forever:
  *   1) stops after RETRY_R_MAX_ROWS_PER_RUN rows
@@ -113,7 +124,7 @@ function retryR429Errors() {
   _warmLwaTokens();
 
   var cache = CacheService.getScriptCache();
-  var processed = 0, fixed = 0, stillFailing = 0, consec429 = 0;
+  var processed = 0, fixed = 0, cleared = 0, stillFailing = 0, consec429 = 0;
 
   for (var i = 0; i < numRows; i++) {
     if (processed >= RETRY_R_MAX_ROWS_PER_RUN) {
@@ -168,16 +179,29 @@ function retryR429Errors() {
     }
     consec429 = 0;
 
-    // Prime AMZTK's own cache with the fresh result, then force the live formula to
-    // re-evaluate so it reads the cache instead of repeating the API call.
-    cache.put(cacheKey, tn, tn ? 21600 : 600);
-    sheet.getRange(row, RETRY_R_COL).setFormula(formula);
-    if (tn) fixed++;
-    Logger.log('Row ' + row + ': ' + (tn ? 'fixed → ' + tn : 'no tracking number yet — cache refreshed'));
+    if (tn) {
+      // Freeze to a static HYPERLINK — guaranteed to render, and drops out of the 429 filter
+      // on future runs so this row is never re-fetched again.
+      var domain = isJP ? 'jp' : 'de';
+      var url    = 'https://www.swiship.' + domain + '/track?id=' + tn;
+      sheet.getRange(row, RETRY_R_COL).setFormula('=HYPERLINK("' + url + '","' + tn + '")');
+      fixed++;
+      Logger.log('Row ' + row + ': fixed → ' + tn);
+    } else {
+      // Order not ready yet — prime the cache AMZTK reads from, then force a genuine
+      // recalculation (placeholder write, then the real formula) so the stale 429 text clears.
+      cache.put(cacheKey, '', 600);
+      var cell = sheet.getRange(row, RETRY_R_COL);
+      cell.setFormula('=NA()');
+      SpreadsheetApp.flush();
+      cell.setFormula(formula);
+      cleared++;
+      Logger.log('Row ' + row + ': no tracking number yet — cleared stale error');
+    }
   }
 
   SpreadsheetApp.flush();
-  Logger.log('retryR429Errors done — processed: ' + processed + ', fixed: ' + fixed + ', still 429: ' + stillFailing);
+  Logger.log('retryR429Errors done — processed: ' + processed + ', fixed: ' + fixed + ', cleared: ' + cleared + ', still 429: ' + stillFailing);
 }
 
 function _is429ErrorValue(v) {
