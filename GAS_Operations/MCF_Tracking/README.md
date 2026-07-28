@@ -114,6 +114,23 @@ backfillMCFFees()
 ### `backfillTrackingNumbers()`
 Same pattern for tracking numbers → writes static values into col Z.
 
+### `retryR429Errors()`
+Scans col R (row 1108+) for cells whose live `=AMZTK()`/`=AMZTK_JP()` formula is currently
+showing a 429 QuotaExceeded error, re-fetches those specific orders directly, primes AMZTK's
+own cache with the result, then rewrites the cell's formula (same text) to force it to pick up
+the fresh cache — formulas in col R are never replaced with static values.
+
+Bounded so it can never call SP-API forever in one run:
+- stops after 40 rows per execution (`RETRY_R_MAX_ROWS_PER_RUN`)
+- aborts the whole run after 5 consecutive rows still come back 429 (`RETRY_R_MAX_CONSEC_429`) —
+  quota is clearly still exhausted, so it stops and lets the next hourly trigger pick up where
+  it left off, instead of hammering SP-API in a tight loop
+
+```javascript
+// Run once manually in GAS editor, or install the hourly trigger below:
+retryR429Errors()
+```
+
 ---
 
 ## `onEdit` Automation (`autoFill.js`)
@@ -143,6 +160,7 @@ It scans the `MCF 발송 로그` sheet for rows where col R is filled but col S 
 // In GAS editor, run once:
 triggerGen()       // sets weekday 9AM triggers up to the hardcoded end date
 triggerTester()    // schedules MCFReporter 1 minute from now for testing
+installHourlyRetry429Trigger()  // sets an hourly trigger for retryR429Errors() (col R 429 backfill)
 ```
 
 ---

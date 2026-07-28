@@ -74,6 +74,116 @@ function backfillTrackingNumbers() {
   }
 }
 
+/***** ========= RETRY 429 ERRORS IN COL R ========= *****/
+var RETRY_R_START_ROW        = 1108; // only rows from here down — matches the reported error range
+var RETRY_R_COL              = 18;   // R — live =AMZTK()/=AMZTK_JP() tracking formula
+var RETRY_R_MAX_ROWS_PER_RUN = 40;   // hard cap so one execution can't hammer SP-API across hundreds of rows
+var RETRY_R_MAX_CONSEC_429   = 5;    // abort the run early if quota is clearly still exhausted
+
+/**
+ * Finds cells in col R (MCF 발송 로그, row RETRY_R_START_ROW+) whose live =AMZTK()/=AMZTK_JP()
+ * formula is currently showing a 429 QuotaExceeded error, re-fetches those specific orders
+ * directly, primes AMZTK's own CacheService entry with the result, then rewrites the cell's
+ * existing formula (same text) to force it to recalculate against the fresh cache instead of
+ * the stale error. No formulas are ever replaced with static values.
+ *
+ * Bounded two ways so a single run can never call the API forever:
+ *   1) stops after RETRY_R_MAX_ROWS_PER_RUN rows
+ *   2) aborts the whole run after RETRY_R_MAX_CONSEC_429 consecutive rows still come back 429 —
+ *      quota is clearly still exhausted, so this run stops instead of hammering it; the next
+ *      hourly trigger picks up where this one left off
+ *
+ * Run manually, or set up to run hourly via installHourlyRetry429Trigger() in triggerGen.js.
+ */
+function retryR429Errors() {
+  var ss    = SpreadsheetApp.getActiveSpreadsheet();
+  var sheet = ss.getSheetByName(BF_SHEET_NAME);
+  if (!sheet) throw new Error('Sheet not found: ' + BF_SHEET_NAME);
+
+  var lastRow = sheet.getLastRow();
+  if (lastRow < RETRY_R_START_ROW) return;
+
+  var numRows   = lastRow - RETRY_R_START_ROW + 1;
+  var rValues   = sheet.getRange(RETRY_R_START_ROW, RETRY_R_COL, numRows, 1).getDisplayValues();
+  var rFormulas = sheet.getRange(RETRY_R_START_ROW, RETRY_R_COL, numRows, 1).getFormulas();
+  var regions   = sheet.getRange(RETRY_R_START_ROW, BF_COL_REGION, numRows, 1).getValues();
+  var orderIds  = sheet.getRange(RETRY_R_START_ROW, BF_COL_ORDER,  numRows, 1).getValues();
+
+  _warmLwaTokens();
+
+  var cache = CacheService.getScriptCache();
+  var processed = 0, fixed = 0, stillFailing = 0, consec429 = 0;
+
+  for (var i = 0; i < numRows; i++) {
+    if (processed >= RETRY_R_MAX_ROWS_PER_RUN) {
+      Logger.log('retryR429Errors: hit per-run cap (' + RETRY_R_MAX_ROWS_PER_RUN + ' rows) — remaining rows retried next hour.');
+      break;
+    }
+
+    if (!_is429ErrorValue(rValues[i][0])) continue;
+
+    var formula = rFormulas[i][0];
+    if (!formula) continue; // not a live formula cell — nothing to retry
+
+    var orderId = String(orderIds[i][0] || '').trim();
+    if (!orderId) continue;
+
+    var row       = RETRY_R_START_ROW + i;
+    var isJP      = String(regions[i][0] || '').trim().toUpperCase() === 'JP';
+    var endpoints = isJP ? ['FE', 'EU'] : ['EU', 'FE'];
+    var cacheKey  = (isJP ? 'AMZTK_JP_' : 'AMZTK_') + orderId;
+
+    processed++;
+
+    var tn = '', got429 = false;
+    for (var attempt = 0; attempt < 3; attempt++) {
+      try {
+        var tracks = _tracksWithFallbacks(orderId, endpoints);
+        tn = (tracks && tracks.length && (tracks[0].trackingNumber || '').trim())
+          ? tracks[0].trackingNumber.trim() : '';
+        got429 = false;
+        break;
+      } catch (e) {
+        if (_isRateLimit429(e) && attempt < 2) {
+          got429 = true;
+          Logger.log('Row ' + row + ': 429 — waiting 45 s (attempt ' + (attempt + 1) + '/3)');
+          Utilities.sleep(45000);
+          continue;
+        }
+        got429 = _isRateLimit429(e);
+        break; // non-429, or 429 retries exhausted — stop retrying this row
+      }
+    }
+
+    if (got429) {
+      consec429++;
+      stillFailing++;
+      Logger.log('Row ' + row + ': still 429 after retries (' + consec429 + '/' + RETRY_R_MAX_CONSEC_429 + ' consecutive)');
+      if (consec429 >= RETRY_R_MAX_CONSEC_429) {
+        Logger.log('retryR429Errors: quota still exhausted after ' + consec429 + ' consecutive 429s — stopping this run.');
+        break;
+      }
+      continue;
+    }
+    consec429 = 0;
+
+    // Prime AMZTK's own cache with the fresh result, then force the live formula to
+    // re-evaluate so it reads the cache instead of repeating the API call.
+    cache.put(cacheKey, tn, tn ? 21600 : 600);
+    sheet.getRange(row, RETRY_R_COL).setFormula(formula);
+    if (tn) fixed++;
+    Logger.log('Row ' + row + ': ' + (tn ? 'fixed → ' + tn : 'no tracking number yet — cache refreshed'));
+  }
+
+  SpreadsheetApp.flush();
+  Logger.log('retryR429Errors done — processed: ' + processed + ', fixed: ' + fixed + ', still 429: ' + stillFailing);
+}
+
+function _is429ErrorValue(v) {
+  var s = String(v || '');
+  return s.indexOf('SP-API error 429') >= 0 || s.indexOf('QuotaExceeded') >= 0;
+}
+
 /**
  * Writes MCF fulfillment fees as static values into BF_COL_FEE (col Y).
  *
