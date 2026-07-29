@@ -56,6 +56,10 @@ spigen-gcx-automation/
 │   ├── tampermonkey_scripts/            # GCX Reply, MCF Autofill (EU + JP), Invoice Automation
 │   └── gcx-reply-extension/             # WIP native Chrome extension (MV3) port of GCX Reply
 │
+├── Zendesk_Themes/                      # Zendesk Guide Help Center theme exports (version control mirror)
+│   ├── sq2gcx_AmazonHelpcenter/         # Amazon EU claim-form Help Center theme
+│   └── spigen-eu_ShopifyHelpcenter/     # Shopify EU claim-form Help Center theme
+│
 └── reference/                           # Internal reference docs
 ```
 
@@ -117,6 +121,13 @@ spigen-gcx-automation/
 | Project | Description | README |
 |---------|-------------|--------|
 | [Browser_Extensions/tampermonkey_scripts](Browser_Extensions/tampermonkey_scripts/) | **GCX Reply** (`v3.5.2`) — Zendesk order/product lookup panel, Auto-Fill, MCF handoff, ABM auto-relay + NRN. **Amazon MCF Autofill** (`v1.4.3`) — EU Seller Central MCF order-page autofill. **Amazon JP MCF Autofill** (`v1.5.2`) — JP variant. **Amazon Invoice Automation** (`v1.5`) — Amazon.de invoice download. Install `.user.js` files via Tampermonkey Dashboard → Import. | [README](Browser_Extensions/tampermonkey_scripts/README.md) |
+
+### Zendesk Guide theme exports
+
+| Project | Description | README |
+|---------|-------------|--------|
+| [Zendesk_Themes/sq2gcx_AmazonHelpcenter](Zendesk_Themes/sq2gcx_AmazonHelpcenter/) | Help Center theme (20 templates + `script.js` + `style.css`) shown after a customer submits the Amazon EU claim form. Redirects to Amazon Store pages (DE/UK/FR/IT/ES/IN/JP). | [README](Zendesk_Themes/README.md) |
+| [Zendesk_Themes/spigen-eu_ShopifyHelpcenter](Zendesk_Themes/spigen-eu_ShopifyHelpcenter/) | Help Center theme shown after a customer submits the Spigen EU (Shopify-run) claim form. Redirects to Spigen's own Shopify storefronts (DE/UK/FR/IT/ES); Community templates are empty (feature not enabled on this brand). | [README](Zendesk_Themes/README.md) |
 | [Browser_Extensions/gcx-reply-extension](Browser_Extensions/gcx-reply-extension/) | Native Chrome extension (MV3) port of GCX Reply — in-progress migration off Tampermonkey; not yet feature-complete (MCF-page autofill code is currently dead — not wired into `content_scripts.matches`). Dev/testing only, load unpacked. | [README](Browser_Extensions/gcx-reply-extension/README.md) |
 
 ---

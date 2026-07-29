@@ -1,0 +1,268 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Fixed Layout Example</title>
+<style>
+body {
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: flex-start;
+  font-family: Arial, sans-serif;
+}
+.flags-container {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  margin-bottom: 20px;
+  border: 2px solid #ddd;
+  padding: 10px;
+  border-radius: 10px;
+  background-color: #fff;
+}
+.logo-container {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  margin-bottom: 20px;
+}
+.amazon-logo { width: 80px; margin-right: 10px; }
+.link-text { font-size: 16px; color: #333; font-weight: bold; }
+.flag-images {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-wrap: wrap;
+}
+.flag-image { margin: 5px; }
+.flag-image img { width: 40px; cursor: pointer; }
+
+.video-container {
+  width: 100%;
+  max-width: 800px;
+  margin-bottom: 20px;
+  position: relative;
+  padding-bottom: 56.25%;
+  height: 0;
+  background: #000;
+}
+.video-container iframe,
+.video-container #youtubePlayer {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 100%;
+  height: 100%;
+  border: 0;
+}
+
+.promo-article {
+  width: 100%;
+  max-width: 800px;
+  text-align: center;
+  margin-top: 20px;
+  padding: 20px;
+  border: 1px solid #ddd;
+  border-radius: 10px;
+  box-shadow: 0 0 10px rgba(0,0,0,0.1);
+  margin-bottom: 40px;
+  overflow: hidden;
+  box-sizing: border-box;
+}
+.promo-article a { color: #007BFF; text-decoration: none; }
+.promo-article a:hover { text-decoration: underline; }
+.image-container img {
+  width: 100%;
+  height: auto;
+  border-radius: 10px;
+  box-shadow: 0 0 10px rgba(0,0,0,0.1);
+  transition: transform 0.3s ease;
+}
+
+.instagram-feed {
+  width: 100%;
+  max-width: 540px;
+  margin: 0 auto;
+  text-align: center;
+}
+
+.puzzle-container {
+  display: grid;
+  grid-template-columns: repeat(4, 100px);
+  grid-gap: 5px;
+  position: relative;
+  margin: 40px auto;
+  width: 420px;
+  height: 420px;
+  background: #fff;
+  box-shadow: 0 4px 8px rgba(0,0,0,0.1);
+  border-radius: 10px;
+  transition: border 0.5s ease;
+}
+.puzzle-container.completed { border: 5px solid red; }
+.puzzle-container.completed::after {
+  content: "Puzzle Completed!";
+  position: absolute;
+  top: 50%; left: 50%;
+  transform: translate(-50%, -50%);
+  font-size: 24px; font-weight: bold; color: #fff;
+  background: rgba(0,0,0,0.8);
+  padding: 20px 40px; border-radius: 10px; text-align: center; z-index: 10;
+}
+.puzzle-container div {
+  width: 100px; height: 100px; border: 1px solid #ddd;
+  display: flex; align-items: center; justify-content: center;
+  background: #f0f0f0; cursor: grab;
+}
+.puzzle-piece {
+  width: 100%; height: 100%;
+  background-size: 400px 400px; background-position: center; background-repeat: no-repeat;
+}
+.original-image-container {
+  margin-top: 20px; text-align: center;
+}
+.original-image-container img {
+  max-width: 200px; border-radius: 10px;
+  box-shadow: 0 4px 6px rgba(0,0,0,0.2);
+}
+</style>
+<script async src="https://www.instagram.com/embed.js"></script>
+</head>
+<body>
+
+<!-- Flags / store links -->
+<div class="flags-container">
+  <div class="logo-container">
+    <div class="link-text">Shop Now</div>
+  </div>
+  <div class="flag-images">
+    <div class="flag-image">
+      <a href="https://spigen.de">
+        <img src="https://hatscripts.github.io/circle-flags/flags/de.svg" alt="DE" />
+      </a>
+    </div>
+    <div class="flag-image">
+      <a href="https://spigen.co.uk">
+        <img src="https://hatscripts.github.io/circle-flags/flags/gb.svg" alt="UK" />
+      </a>
+    </div>
+    <div class="flag-image">
+      <a href="https://spigen.fr">
+        <img src="https://hatscripts.github.io/circle-flags/flags/fr.svg" alt="FR" />
+      </a>
+    </div>
+    <div class="flag-image">
+      <a href="https://spigen.it">
+        <img src="https://hatscripts.github.io/circle-flags/flags/it.svg" alt="IT" />
+      </a>
+    </div>
+    <div class="flag-image">
+      <a href="https://spigen.es">
+        <img src="https://hatscripts.github.io/circle-flags/flags/es.svg" alt="ES" />
+      </a>
+    </div>
+  </div>
+</div>
+
+<!-- YouTube sequential player -->
+<div class="video-container">
+  <div id="youtubePlayer"></div>
+</div>
+
+<div class="promo-article">
+  <h2>Discover Our Latest Video Content</h2>
+  <p>Watch our latest video to see the new features and products we offer. Stay tuned for more updates!</p>
+  <a href="https://youtube.com/@spigenukofficial?si=5a5Ej1L4wkXC2b3A">Subscribe to our channel</a>
+</div>
+
+<!-- Spigen Store Promo Card -->
+<div class="promo-article spigen-promo-card">
+  <div class="image-container">
+    <a class="spigen-store-link" href="https://spigen.co.uk">
+      <img alt="Spigen Official Store" class="EditorialTileInteractiveImage__image__f9WWf" src="https://m.media-amazon.com/images/S/al-eu-726f4d26-7fdb/69837595-94f3-42b9-af54-10c2bd8333d9._CR0%2C0%2C3000%2C1500_SX3000_.jpg" data-feature="cf" data-testid="image">
+    </a>
+  </div>
+  <h2>Welcome to the Official Spigen Store</h2>
+  <p>Explore Spigen cases, screen protectors, and MagSafe compatible accessories.</p>
+  <a class="spigen-store-link" href="https://spigen.co.uk">Visit Store</a>
+</div>
+
+<div class="instagram-feed">
+  <blockquote class="instagram-media" data-instgrm-permalink="https://www.instagram.com/spigenuk/?hl=ko" data-instgrm-version="12" style="width:100%; max-width:540px; margin:0 auto;">
+  </blockquote>
+</div>
+
+<!-- Scripts -->
+<script>
+  // YouTube API initialization
+  (function () {
+    var tag = document.createElement('script');
+    tag.src = "https://www.youtube.com/iframe_api";
+    var firstScriptTag = document.getElementsByTagName('script')[0];
+    firstScriptTag.parentNode.insertBefore(tag, firstScriptTag);
+  })();
+
+  var player;
+  var videoIds = ['KwYuPA7_ZBk', 'VnDFLfBSrAk'];
+  var currentVideo = 0;
+
+  function onYouTubeIframeAPIReady() {
+    player = new YT.Player('youtubePlayer', {
+      width: '100%',
+      height: '100%',
+      videoId: videoIds[0],
+      playerVars: {
+        autoplay: 1,
+        mute: 1,
+        controls: 0,
+        rel: 0,
+        modestbranding: 1,
+        playsinline: 1
+      },
+      events: {
+        onStateChange: onPlayerStateChange
+      }
+    });
+  }
+
+  function onPlayerStateChange(event) {
+    if (event.data === YT.PlayerState.ENDED) {
+      if (currentVideo < videoIds.length - 1) {
+        currentVideo += 1;
+        player.loadVideoById(videoIds[currentVideo]);
+      } else {
+        currentVideo = 0;
+        player.loadVideoById(videoIds[currentVideo]);
+      }
+    }
+  }
+
+  // Auto detect visitor country and direct to local Spigen website
+  (function () {
+    var userLang = window.navigator.language || window.navigator.userLanguage || "";
+    var targetUrl = "https://spigen.co.uk"; // Universal default fallback
+
+    if (/de/i.test(userLang)) {
+      targetUrl = "https://spigen.de";
+    } else if (/fr/i.test(userLang)) {
+      targetUrl = "https://spigen.fr";
+    } else if (/it/i.test(userLang)) {
+      targetUrl = "https://spigen.it";
+    } else if (/es/i.test(userLang)) {
+      targetUrl = "https://spigen.es";
+    }
+
+    var links = document.querySelectorAll(".spigen-store-link");
+    for (var i = 0; i < links.length; i++) {
+      links[i].href = targetUrl;
+    }
+  })();
+</script>
+
+</body>
+</html>
