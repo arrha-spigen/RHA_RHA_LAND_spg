@@ -105,6 +105,7 @@ body {
   transition: border 0.5s ease;
 }
 .puzzle-container.completed { border: 5px solid #4CAF50; }
+.puzzle-container.game-over { border: 5px solid #e53935; }
 .puzzle-container.completed.tier-bronze { border-color: #cd7f32; }
 .puzzle-container.completed.tier-silver { border-color: #b0b0b8; }
 .puzzle-container.completed.tier-gold {
@@ -115,7 +116,8 @@ body {
   0%, 100% { box-shadow: 0 0 12px 2px rgba(255,215,0,0.5); }
   50% { box-shadow: 0 0 28px 10px rgba(255,215,0,0.9); }
 }
-.puzzle-container.completed::after {
+.puzzle-container.completed::after,
+.puzzle-container.game-over::after {
   content: attr(data-message);
   position: absolute;
   top: 50%; left: 50%;
@@ -154,6 +156,11 @@ body {
 .puzzle-timer {
   font-size: 18px; font-weight: bold; color: #333; margin-bottom: 10px;
   font-variant-numeric: tabular-nums;
+}
+.puzzle-retry {
+  margin-top: 16px;
+  background: #007BFF; color: #fff; border: none; padding: 10px 24px;
+  border-radius: 6px; font-size: 14px; font-weight: bold; cursor: pointer;
 }
 </style>
 <script async src="https://www.instagram.com/embed.js"></script>
@@ -237,6 +244,7 @@ body {
   <div class="original-image-container">
     <img src="https://m.media-amazon.com/images/S/al-eu-726f4d26-7fdb/69837595-94f3-42b9-af54-10c2bd8333d9._CR0%2C0%2C3000%2C1500_SX3000_.jpg" alt="Spigen Official Store preview" />
   </div>
+  <button class="puzzle-retry" id="puzzleRetryBtn" type="button">Retry</button>
 </div>
 
 <div class="instagram-feed">
@@ -393,10 +401,12 @@ body {
       tick();
     }
 
+    var TIME_LIMIT_MS = 60000;
+
     var TIERS = [
-      { max: 10000, tierClass: 'tier-gold', message: '🎉 Incredible! Under 10 seconds!', colors: ['#FFD700', '#FFA500', '#FF69B4', '#00CFFF', '#7CFC00'], count: 160 },
-      { max: 20000, tierClass: 'tier-silver', message: '⚡ Awesome! Under 20 seconds!', colors: ['#C0C0C0', '#87CEEB', '#DDA0DD', '#FFFFFF'], count: 90 },
-      { max: 30000, tierClass: 'tier-bronze', message: '✨ Nice! Under 30 seconds!', colors: ['#CD7F32', '#DEB887', '#FFDAB9'], count: 45 }
+      { max: 10000, tierClass: 'tier-gold', message: "Speedrun any% world record. You're built different.", colors: ['#FFD700', '#FFA500', '#FF69B4', '#00CFFF', '#7CFC00'], count: 160 },
+      { max: 20000, tierClass: 'tier-silver', message: "Okay that's actually kind of iconic.", colors: ['#C0C0C0', '#87CEEB', '#DDA0DD', '#FFFFFF'], count: 90 },
+      { max: 30000, tierClass: 'tier-bronze', message: 'Not bad. Solid mid-tier vibes.', colors: ['#CD7F32', '#DEB887', '#FFDAB9'], count: 45 }
     ];
 
     function celebrate(elapsedMs) {
@@ -404,11 +414,16 @@ body {
       for (var i = 0; i < TIERS.length; i++) {
         if (elapsedMs < TIERS[i].max) { tier = TIERS[i]; break; }
       }
-      container.dataset.message = tier ? tier.message : 'Puzzle Completed!';
+      container.dataset.message = tier ? tier.message : 'Puzzle complete. Took the scenic route but hey, you did it.';
       if (tier) {
         container.classList.add(tier.tierClass);
         confettiBurst(tier.count, tier.colors, 2200);
       }
+    }
+
+    function gameOver() {
+      container.classList.add('game-over');
+      container.dataset.message = "Time's up. Big skill issue energy. Run it back?";
     }
 
     var order = [];
@@ -461,11 +476,20 @@ body {
     var timerInterval = null;
     var finalElapsedMs = null;
 
+    function isEnded() {
+      return container.classList.contains('completed') || container.classList.contains('game-over');
+    }
+
     function startTimer() {
       if (startTime !== null) return;
       startTime = Date.now();
       timerInterval = setInterval(function () {
-        timerEl.textContent = formatTime(Date.now() - startTime);
+        var elapsed = Date.now() - startTime;
+        timerEl.textContent = formatTime(elapsed);
+        if (elapsed >= TIME_LIMIT_MS) {
+          clearInterval(timerInterval);
+          gameOver();
+        }
       }, 31);
     }
 
@@ -476,7 +500,7 @@ body {
     }
 
     function select(idx) {
-      if (container.classList.contains('completed')) return;
+      if (isEnded()) return;
       startTimer();
       if (selected === null) {
         selected = idx;
@@ -510,6 +534,19 @@ body {
           select(idx);
         }
       });
+    });
+
+    var retryBtn = document.getElementById('puzzleRetryBtn');
+    retryBtn.addEventListener('click', function () {
+      if (timerInterval) clearInterval(timerInterval);
+      startTime = null;
+      finalElapsedMs = null;
+      selected = null;
+      container.classList.remove('completed', 'game-over', 'tier-gold', 'tier-silver', 'tier-bronze');
+      container.removeAttribute('data-message');
+      timerEl.textContent = '00:00.000';
+      order = shuffle(order.slice().sort(function (a, b) { return a - b; }));
+      paint();
     });
   })();
 </script>
