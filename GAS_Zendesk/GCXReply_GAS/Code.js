@@ -264,7 +264,10 @@ function getAbmRelayPending_(clientVersion) {
       commentId:   row[idx('CommentId')],
       caseId:      row[idx('CaseId')],
       marketplace: row[idx('Marketplace')],
+      status:      status,
       attempts:    row[idx('Attempts')],
+      lastError:   row[idx('LastError')],
+      timestamp:   row[idx('Timestamp')],
       messageText: row[idx('MessageText')],
     });
   }
@@ -317,11 +320,13 @@ function getAbmRelayStatus_(ticketId) {
   for (let i = 1; i < data.length; i++) {
     if (String(data[i][idx('TicketId')]) === String(ticketId)) {
       rows.push({
-        relayKey:  data[i][idx('RelayKey')],
-        status:    data[i][idx('Status')],
-        attempts:  data[i][idx('Attempts')],
-        lastError: data[i][idx('LastError')],
-        timestamp: data[i][idx('Timestamp')],
+        relayKey:    data[i][idx('RelayKey')],
+        commentId:   data[i][idx('CommentId')],
+        status:      data[i][idx('Status')],
+        attempts:    data[i][idx('Attempts')],
+        lastError:   data[i][idx('LastError')],
+        timestamp:   data[i][idx('Timestamp')],
+        messageText: data[i][idx('MessageText')],
       });
     }
   }

@@ -561,6 +561,23 @@ function cleanupExistingAbmTicket_(ticketId, onlyCommentId) {
         .map(c => (c.plain_body || c.body || '').trim())
     );
 
+    // Posting a NEW public, buyer-authored comment onto a ticket that's
+    // currently solved/pending/hold makes it look exactly like the customer
+    // just replied — mergeNewTicketIntoPrimary_ already reopens the ticket in
+    // the SAME PUT that posts a genuine live merge for exactly this reason,
+    // but this function (used for backfilling old un-cleaned tickets) never
+    // did. Confirmed live and caused real confusion on #1000155360
+    // (2026-07-29): backfilling cleanup on an already-solved ticket posted
+    // the buyer's clean-copy comment with no status change, so the ticket sat
+    // "solved" despite a fresh public end-user comment. Zendesk's own native
+    // reopen-on-end-user-comment automation eventually caught it ~5.5h later,
+    // by which point it read as a mysterious duplicate customer message and
+    // an agent had to manually investigate and re-solve it as NRN. Computed
+    // once from the ticket's status at the START of this run — every posted
+    // comment in this run reopens it the same way; harmless if it's already
+    // open by a later comment in the same run.
+    const shouldReopen = ticket.status === 'solved' || ticket.status === 'pending' || ticket.status === 'hold';
+
     const cleaned = [];
     comments.forEach(c => {
       if (onlyCommentId != null && String(c.id) !== String(onlyCommentId)) return;
@@ -583,14 +600,16 @@ function cleanupExistingAbmTicket_(ticketId, onlyCommentId) {
 
       const comment = { body: bodyText, public: true, author_id: requester.id };
       if (uploadTokens.length) comment.uploads = uploadTokens;
+      const payload = { comment };
+      if (shouldReopen) payload.status = 'open';
 
       zdFetch_(`/api/v2/tickets/${ticketId}.json`, {
         method: 'put',
-        payload: JSON.stringify({ ticket: { comment } })
+        payload: JSON.stringify({ ticket: payload })
       });
       addTicketTag_(ticketId, abmCleanedTag_(c.id));
       existingBodies.add(bodyText.trim());
-      cleaned.push({ sourceCommentId: c.id, attachmentsTransferred: uploadTokens.length, attachmentsTotal: (c.attachments || []).length });
+      cleaned.push({ sourceCommentId: c.id, reopened: shouldReopen, attachmentsTransferred: uploadTokens.length, attachmentsTotal: (c.attachments || []).length });
     });
     return { status: 'ok', ticketId, cleaned };
   } finally {
@@ -1026,14 +1045,6 @@ function reconcileAbmRelays_(lookbackHours) {
   const cutoff = new Date(Date.now() - hours * 3600 * 1000).toISOString().replace(/\.\d+Z$/, 'Z');
   const query = encodeURIComponent(`type:ticket tags:${ABM_TAG} updated>${cutoff}`);
 
-  // Existing log rows, indexed per ticket for dedup.
-  const logRows = (gcxGet_('abmRelayAll', { limit: 200 }).rows) || [];
-  const byTicket = {};
-  logRows.forEach(r => {
-    const t = String(r.ticketId);
-    (byTicket[t] = byTicket[t] || []).push(r);
-  });
-
   const summary = { scanned: 0, queued: 0, skippedNoCase: 0, skippedNoReply: 0, alreadyLogged: 0, queuedTickets: [] };
 
   let url = `/api/v2/search.json?query=${query}&sort_by=updated_at&sort_order=desc`;
@@ -1053,7 +1064,27 @@ function reconcileAbmRelays_(lookbackHours) {
       const text = (reply.plain_body || '').trim();
       if (!text) { summary.skippedNoReply++; return; }
 
-      const existing = byTicket[String(t.id)] || [];
+      // Per-ticket, UNTRUNCATED history — not a slice of the account-wide
+      // log. Previously this dedup checked against only the 200 most-recent
+      // rows account-wide (one bulk `abmRelayAll` fetch before this loop),
+      // sorted by timestamp globally. With ABM_Relay_Log at 470+ rows and
+      // growing, any ticket whose relay happened more than ~200 relay-events
+      // ago (days, not months, at current volume) had its row silently
+      // pushed out of that window — so if the ticket's `updated_at` got
+      // bumped again for ANY reason within this run's lookback window (e.g.
+      // Zendesk's own automatic close-after-N-days-solved rule, which counts
+      // as an update), the dedup check saw an empty `existing` list and
+      // re-queued an ALREADY-DELIVERED reply as if it had never been sent —
+      // a genuine duplicate message to a real customer. Confirmed live and
+      // reported by an agent on ticket #1000154135 (2026-07-29): the original
+      // relay row from 2026-07-19 ranked #383 by recency among 473 total log
+      // rows, entirely outside the old top-200 window; the ticket auto-closed
+      // today, reconciliation re-scanned it, found no matching row, and
+      // re-sent the same 10-day-old reply. (The text-normalization dedup
+      // itself was verified correct — &nbsp; vs literal whitespace and
+      // &amp; vs literal & both normalize identically; this was purely a
+      // window-size/scale bug, not a normalization bug.)
+      const existing = (gcxGet_('abmRelayStatus', { ticketId: t.id }).status) || [];
       const norm = normalizeForDedup_(text);
       const dup = existing.some(r =>
         String(r.commentId) === String(reply.id) ||          // same comment already logged
