@@ -50,7 +50,8 @@ spigen-gcx-automation/
 ├── GAS_Zendesk/                         # GAS — Zendesk / CS ticketing operations
 │   ├── ABM_TicketMerge/                 # Merges duplicate Amazon Buyer Message tickets + inbound cleanup
 │   ├── PurchaseDate_Sync/               # Syncs Zendesk's custom Purchase Date field to a Monday.com board
-│   └── GCXReply_GAS/                    # GCX Reply's SP-API/Sheet-lookup backend + versioned script archive
+│   ├── GCXReply_GAS/                    # GCX Reply's SP-API/Sheet-lookup backend + versioned script archive
+│   └── PuzzleLeaderboard/               # Web App + Sheet backing the sq2gcx home_page.hbs puzzle's top-5 leaderboard
 │
 ├── Browser_Extensions/                  # Userscripts & extensions
 │   ├── tampermonkey_scripts/            # GCX Reply, MCF Autofill (EU + JP), Invoice Automation

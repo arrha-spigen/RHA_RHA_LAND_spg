@@ -15,6 +15,16 @@ version control, not a build artifact that gets deployed back automatically.
 Both themes share the same 20-template Zendesk Guide structure (`templates/*.hbs`)
 plus theme-level `script.js` and `style.css`.
 
+## sq2gcx `home_page.hbs` puzzle
+
+`home_page.hbs` on sq2gcx includes a "Piece It Together" sliding-image puzzle
+(4×4, built from the Spigen Official Store promo image, tap-two-tiles-to-swap),
+with a live mm:ss.mmm timer and a top-5 leaderboard (nickname + country flag +
+time) that visitors can submit to on solve. The leaderboard is backed by
+[GAS_Zendesk/PuzzleLeaderboard](../GAS_Zendesk/PuzzleLeaderboard/) — see that
+project's README for the API, the country-flag whitelist, and a deployment
+gotcha around Web App public-access settings.
+
 ## Editing
 
 Edits are made directly in the live theming editor via Playwright (CDP-attached to
