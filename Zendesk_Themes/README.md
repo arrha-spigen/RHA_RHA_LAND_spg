@@ -15,19 +15,32 @@ version control, not a build artifact that gets deployed back automatically.
 Both themes share the same 20-template Zendesk Guide structure (`templates/*.hbs`)
 plus theme-level `script.js` and `style.css`.
 
-## sq2gcx `home_page.hbs` puzzle
+## `home_page.hbs` puzzle (sq2gcx + spigen-eu)
 
-`home_page.hbs` on sq2gcx includes a "Piece It Together" sliding-image puzzle
-(3×3, built from the Spigen Official Store promo image, tap-two-tiles-to-swap —
-started at 4×4 but the banner's plain white background made several tiles look
-blank, so it was shrunk to 3×3) with a live mm:ss.mmm timer. Solving under
-30/20/10 seconds triggers a tiered canvas-confetti celebration (bronze/silver/
-gold — pulsing border + message), all client-side, no backend. An earlier
-version had a top-5 leaderboard backed by a Google Sheet + Apps Script Web App;
-that was removed in favor of the confetti effects, and the backend project
-(`GAS_Zendesk/PuzzleLeaderboard`) was deleted from the repo. The Google Sheet /
-Script / Web App deployment it used still exist in Drive but are now orphaned —
-not referenced by any live code — and can be deleted manually if desired.
+`home_page.hbs` on both sites includes an identical "Piece It Together"
+sliding-image puzzle (built from the Spigen Official Store promo image,
+tap-two-tiles-to-swap), all client-side, no backend. It's a 10-round
+progression: round 1 is 3×3 (started at 4×4, but the banner's plain white
+background made several tiles look blank, so it was shrunk to 3×3), and each
+subsequent round steps up one size — 4×4, 5×5, ... up to 12×12 on round 10.
+Grid sizing, tile size, and gap are computed dynamically per round (separate
+desktop/mobile total sizes), not fixed CSS.
+
+A live mm:ss.mmm timer runs per round. Clearing a round in under 20 seconds
+auto-advances to the next round; finishing a round also triggers a tiered
+canvas-confetti celebration based on absolute solve time (bronze/silver/gold —
+pulsing border + funny MZ-slang message, no emojis anywhere in the UI). A
+Retry button resets back to round 1. If 60 seconds pass without solving the
+current round, the puzzle locks into a "game over" state (red border) until
+Retry is pressed. The `.puzzle-container` has `overflow: hidden` so the
+completed/game-over border clips correctly to the rounded corners.
+
+An earlier version had a top-5 leaderboard backed by a Google Sheet + Apps
+Script Web App; that was removed in favor of the confetti effects, and the
+backend project (`GAS_Zendesk/PuzzleLeaderboard`) was deleted from the repo.
+The Google Sheet / Script / Web App deployment it used still exist in Drive
+but are now orphaned — not referenced by any live code — and can be deleted
+manually if desired.
 
 ## Editing
 
