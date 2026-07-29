@@ -1024,6 +1024,84 @@ function MCFFeeDebug(orderId, sentDate) {
 }
 
 /**
+ * Wider-window variant of MCFFeeDebug() — searches up to `windowDays` (default 270) from
+ * sentDate instead of the fixed 90-day window, and also checks the +1 GCX alias
+ * (_gcxNumAlias) so it's clear whether widening the window, the alias, or neither would help.
+ * Only returns matching rows (exact / alias / displayableOrderId) plus a summary of how many
+ * events were scanned — the raw event list can run into the thousands (mostly unrelated
+ * marketplace orders) and isn't useful for this question.
+ *
+ * @customfunction
+ * @param {string} orderId The sellerFulfillmentOrderId to debug (Q col value).
+ * @param {string} sentDate yyyy-mm-dd sent date from col P.
+ * @param {number} [windowDays] How many days from sentDate to scan. Default 270 (~9 months).
+ * @return {Array} SellerOrderId_in_API | Match type | FeeTypes | Total
+ */
+function MCFFeeDebugWide(orderId, sentDate, windowDays) {
+  if (!orderId) return [['orderId is required']];
+  if (!sentDate) return [['sentDate is required']];
+  windowDays = windowDays || 270;
+
+  try {
+    var postedAfter  = new Date(String(sentDate).trim());
+    var postedBefore = new Date(postedAfter);
+    postedBefore.setDate(postedBefore.getDate() + windowDays);
+
+    var now = new Date(Date.now() - 5 * 60 * 1000);
+    if (postedBefore > now) postedBefore = now;
+
+    var shipments = _collectShipmentEvents('EU', postedAfter, postedBefore, 15); // up to ~1500 events
+
+    var alias = _gcxNumAlias(String(orderId), 1);
+
+    var displayableId = '';
+    try {
+      var foResult  = getFulfillmentOrderRaw(String(orderId), 'EU');
+      var candidate = ((foResult.fulfillmentOrder || {}).displayableOrderId || '').trim();
+      if (candidate && candidate !== String(orderId).trim()) displayableId = candidate;
+    } catch (e) { /* ignore */ }
+
+    var rows  = [['SellerOrderId_in_API', 'Match type', 'FeeTypes', 'Total']];
+    var found = 0;
+
+    shipments.forEach(function(ev) {
+      var sid = String(ev.SellerOrderId || '').trim();
+      var matchType = null;
+      if (sid === String(orderId).trim())        matchType = 'exact (Q col)';
+      else if (alias && sid === alias)           matchType = 'alias (N+1)';
+      else if (displayableId && sid === displayableId) matchType = 'displayableOrderId';
+      if (!matchType) return;
+
+      found++;
+      var feeTypes = [], total = 0;
+      (ev.ShipmentFeeList || []).forEach(function(f) {
+        feeTypes.push(f.FeeType);
+        total += parseFloat((f.FeeAmount || {}).CurrencyAmount || 0);
+      });
+      (ev.ShipmentItemList || []).forEach(function(item) {
+        (item.ItemFeeList || []).forEach(function(f) {
+          feeTypes.push(f.FeeType);
+          total += parseFloat((f.FeeAmount || {}).CurrencyAmount || 0);
+        });
+      });
+      rows.push([sid, matchType, feeTypes.join(', '), Math.abs(total)]);
+    });
+
+    if (!found) {
+      rows.push(['(no match — scanned ' + shipments.length + ' events over ' + windowDays + ' days)', '', '', '']);
+    }
+    rows.push([
+      'window: ' + postedAfter.toISOString().slice(0, 10) + ' → ' + postedBefore.toISOString().slice(0, 10),
+      'alias tried: ' + (alias || 'n/a'),
+      'displayableId: ' + (displayableId || 'n/a'),
+      ''
+    ]);
+
+    return rows;
+  } catch (e) { return [['ERR: ' + (e.message || e)]]; }
+}
+
+/**
  * getFulfillmentPreview method — estimated MCF fee (instant, may differ from actual).
  * Currency: GBP for UK orders, EUR for other EU orders.
  */
