@@ -525,11 +525,31 @@ function cleanupExistingAbmTicket_(ticketId, onlyCommentId) {
     const asinMatch = (ticket.description || '').match(/\b(B[A-Z0-9]{9})\b/);
     autoFillAbmTicketFields_(ticket, orderIdMatch ? orderIdMatch[1] : null, asinMatch ? asinMatch[1] : null);
 
-    const data = zdFetch_(`/api/v2/tickets/${ticketId}/comments.json?sort_order=asc`);
+    const data = zdFetch_(`/api/v2/tickets/${ticketId}/comments.json?include=users&sort_order=asc`);
     const comments = data.comments || [];
+    // Identify "this is the buyer's own message" by ROLE, not by comparing
+    // c.author_id to the CURRENT ticket.requester_id. Those can legitimately
+    // diverge: normalizeAbmRequesterIdentity_ may have just merged this
+    // ticket's original (proxy-only) end-user into a different canonical
+    // end-user earlier in this SAME webhook invocation — Zendesk reassigns
+    // the TICKET's requester_id on merge but does NOT retroactively rewrite
+    // already-posted COMMENTS' author_id to match, so the ticket's own first
+    // comment keeps pointing at the now-merged-away user id forever. An
+    // author_id === requester.id check then silently skips it. Confirmed live
+    // on #1000155389 and #1000155360 (2026-07-28, the day identity
+    // normalization shipped): both ended up with cleanup: {cleaned: []} —
+    // zero comments cleaned, so no clean copy ever got posted, which in turn
+    // is exactly why GCX Reply's client-side raw-comment collapse never
+    // fired on them (by design, it never collapses a raw comment with no
+    // clean sibling to pair with — it wasn't a client-side bug at all, this
+    // was the upstream cause).
+    const roleById = {};
+    (data.users || []).forEach(u => { roleById[u.id] = u.role; });
+    const isBuyerPublicComment_ = c => c.public && roleById[c.author_id] !== 'agent' && roleById[c.author_id] !== 'admin';
+
     const done = alreadyCleanedSourceIds_(ticket, comments);
     // Defense in depth, independent of tag/marker bookkeeping: if a public,
-    // requester-authored comment with this EXACT clean text already exists,
+    // buyer-authored comment with this EXACT clean text already exists,
     // treat it as already cleaned regardless — this is what actually caught
     // (and would have prevented) the #1000153636 duplicates, since the tag
     // write was silently failing at the time. Trade-off: a buyer who
@@ -537,14 +557,14 @@ function cleanupExistingAbmTicket_(ticketId, onlyCommentId) {
     // get one clean copy — acceptable, this is a safety net, not the
     // primary mechanism (the tag is).
     const existingBodies = new Set(
-      comments.filter(c => c.public && c.author_id === requester.id)
+      comments.filter(isBuyerPublicComment_)
         .map(c => (c.plain_body || c.body || '').trim())
     );
 
     const cleaned = [];
     comments.forEach(c => {
       if (onlyCommentId != null && String(c.id) !== String(onlyCommentId)) return;
-      if (!c.public || c.author_id !== requester.id) return;
+      if (!isBuyerPublicComment_(c)) return;
       if (done.has(String(c.id))) return;
       const cleanText = cleanAbmMessageText_(c.html_body || '');
       if (cleanText === null) return; // not a raw ABM template comment — leave untouched
