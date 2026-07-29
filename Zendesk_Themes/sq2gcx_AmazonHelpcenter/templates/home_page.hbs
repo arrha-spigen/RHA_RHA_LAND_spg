@@ -102,6 +102,7 @@ body {
   background: #fff;
   box-shadow: 0 4px 8px rgba(0,0,0,0.1);
   border-radius: 10px;
+  overflow: hidden;
   transition: border 0.5s ease;
 }
 .puzzle-container.completed { border: 5px solid #4CAF50; }
@@ -146,12 +147,8 @@ body {
   max-width: 200px; border-radius: 10px;
   box-shadow: 0 4px 6px rgba(0,0,0,0.2);
 }
-@media (max-width: 460px) {
-  .puzzle-container {
-    width: 295px; height: 295px;
-    grid-template-columns: repeat(3, 95px);
-  }
-  .puzzle-container div { width: 95px; height: 95px; }
+.puzzle-round {
+  font-size: 13px; color: #666; margin-bottom: 6px;
 }
 .puzzle-timer {
   font-size: 18px; font-weight: bold; color: #333; margin-bottom: 10px;
@@ -238,7 +235,8 @@ body {
 <!-- Spigen Store Puzzle -->
 <div class="promo-article">
   <h2>Piece It Together</h2>
-  <p>Tap two tiles to swap them and reveal the Spigen Official Store.</p>
+  <p>Tap two tiles to swap them and reveal the Spigen Official Store. Clear a round in under 20 seconds to advance.</p>
+  <div class="puzzle-round" id="puzzleRound" aria-live="polite"></div>
   <div class="puzzle-timer" id="puzzleTimer" aria-live="polite">00:00</div>
   <div class="puzzle-container" id="spigenPuzzle" aria-label="Sliding image puzzle of the Spigen Official Store"></div>
   <div class="original-image-container">
@@ -327,13 +325,18 @@ body {
 <script>
   (function () {
     var IMG_URL = "https://m.media-amazon.com/images/S/al-eu-726f4d26-7fdb/69837595-94f3-42b9-af54-10c2bd8333d9._CR0%2C0%2C3000%2C1500_SX3000_.jpg";
-    var GRID = 3;
     var ASPECT = 2; // source image is 3000x1500 (2:1) — used to center-crop it into the square grid
+    var ROUND_SIZES = [3, 4, 5, 6, 7, 8, 9, 10, 11, 12];
+    var DESKTOP_TOTAL = 420;
+    var MOBILE_TOTAL = 300;
+    var TIME_LIMIT_MS = 60000;
 
     var container = document.getElementById('spigenPuzzle');
     if (!container) return;
 
     var timerEl = document.getElementById('puzzleTimer');
+    var roundEl = document.getElementById('puzzleRound');
+    var retryBtn = document.getElementById('puzzleRetryBtn');
 
     function formatTime(ms) {
       var totalSeconds = Math.floor(ms / 1000);
@@ -401,33 +404,21 @@ body {
       tick();
     }
 
-    var TIME_LIMIT_MS = 60000;
-
     var TIERS = [
       { max: 10000, tierClass: 'tier-gold', message: "Speedrun any% world record. You're built different.", colors: ['#FFD700', '#FFA500', '#FF69B4', '#00CFFF', '#7CFC00'], count: 160 },
       { max: 20000, tierClass: 'tier-silver', message: "Okay that's actually kind of iconic.", colors: ['#C0C0C0', '#87CEEB', '#DDA0DD', '#FFFFFF'], count: 90 },
       { max: 30000, tierClass: 'tier-bronze', message: 'Not bad. Solid mid-tier vibes.', colors: ['#CD7F32', '#DEB887', '#FFDAB9'], count: 45 }
     ];
 
-    function celebrate(elapsedMs) {
-      var tier = null;
-      for (var i = 0; i < TIERS.length; i++) {
-        if (elapsedMs < TIERS[i].max) { tier = TIERS[i]; break; }
-      }
-      container.dataset.message = tier ? tier.message : 'Puzzle complete. Took the scenic route but hey, you did it.';
-      if (tier) {
-        container.classList.add(tier.tierClass);
-        confettiBurst(tier.count, tier.colors, 2200);
-      }
+    function isMobile() {
+      return window.matchMedia('(max-width: 460px)').matches;
     }
 
-    function gameOver() {
-      container.classList.add('game-over');
-      container.dataset.message = "Time's up. Big skill issue energy. Run it back?";
+    function gapFor(grid) {
+      if (grid <= 6) return 5;
+      if (grid <= 9) return 3;
+      return 2;
     }
-
-    var order = [];
-    for (var i = 0; i < GRID * GRID; i++) order.push(i);
 
     function shuffle(arr) {
       for (var i = arr.length - 1; i > 0; i--) {
@@ -437,24 +428,68 @@ body {
       var solved = arr.every(function (v, idx) { return v === idx; });
       return solved ? shuffle(arr) : arr;
     }
-    order = shuffle(order);
 
+    var roundIndex = 0;
+    var GRID = ROUND_SIZES[roundIndex];
     var cells = [];
-    for (var c = 0; c < GRID * GRID; c++) {
-      var cell = document.createElement('div');
-      cell.setAttribute('role', 'button');
-      cell.setAttribute('tabindex', '0');
-      cell.setAttribute('aria-label', 'Puzzle tile ' + (c + 1));
-      var piece = document.createElement('div');
-      piece.className = 'puzzle-piece';
-      piece.style.backgroundImage = 'url(' + IMG_URL + ')';
-      cell.appendChild(piece);
-      container.appendChild(cell);
-      cells.push(cell);
+    var order = [];
+    var selected = null;
+    var startTime = null;
+    var timerInterval = null;
+    var finalElapsedMs = null;
+    var advancing = false;
+
+    function isEnded() {
+      return container.classList.contains('completed') || container.classList.contains('game-over');
+    }
+
+    function layoutContainer() {
+      var total = isMobile() ? MOBILE_TOTAL : DESKTOP_TOTAL;
+      var gap = gapFor(GRID);
+      var tile = Math.floor((total - (GRID - 1) * gap) / GRID);
+      var size = tile * GRID + (GRID - 1) * gap;
+      container.style.gridTemplateColumns = 'repeat(' + GRID + ', ' + tile + 'px)';
+      container.style.width = size + 'px';
+      container.style.height = size + 'px';
+      container.style.gap = gap + 'px';
+      cells.forEach(function (cell) {
+        cell.style.width = tile + 'px';
+        cell.style.height = tile + 'px';
+      });
+      return tile;
+    }
+
+    function buildCells() {
+      container.innerHTML = '';
+      cells = [];
+      order = [];
+      for (var i = 0; i < GRID * GRID; i++) order.push(i);
+      order = shuffle(order);
+      for (var c = 0; c < GRID * GRID; c++) {
+        var cell = document.createElement('div');
+        cell.setAttribute('role', 'button');
+        cell.setAttribute('tabindex', '0');
+        cell.setAttribute('aria-label', 'Puzzle tile ' + (c + 1));
+        var piece = document.createElement('div');
+        piece.className = 'puzzle-piece';
+        piece.style.backgroundImage = 'url(' + IMG_URL + ')';
+        cell.appendChild(piece);
+        container.appendChild(cell);
+        cells.push(cell);
+        (function (idx) {
+          cell.addEventListener('click', function () { select(idx); });
+          cell.addEventListener('keydown', function (e) {
+            if (e.key === 'Enter' || e.key === ' ') {
+              e.preventDefault();
+              select(idx);
+            }
+          });
+        })(c);
+      }
     }
 
     function paint() {
-      var tile = cells[0].getBoundingClientRect().width;
+      var tile = layoutContainer();
       var square = tile * GRID;
       var bgW = square * ASPECT;
       var bgH = square;
@@ -468,16 +503,9 @@ body {
         piece.style.backgroundPosition = (baseX - col * tile) + 'px ' + (0 - row * tile) + 'px';
       }
     }
-    paint();
-    window.addEventListener('resize', paint);
 
-    var selected = null;
-    var startTime = null;
-    var timerInterval = null;
-    var finalElapsedMs = null;
-
-    function isEnded() {
-      return container.classList.contains('completed') || container.classList.contains('game-over');
+    function updateRoundLabel() {
+      roundEl.textContent = 'Round ' + (roundIndex + 1) + ' of ' + ROUND_SIZES.length + ' — ' + GRID + '×' + GRID;
     }
 
     function startTimer() {
@@ -499,8 +527,69 @@ body {
       timerEl.textContent = formatTime(finalElapsedMs);
     }
 
+    function gameOver() {
+      container.classList.add('game-over');
+      container.dataset.message = "Time's up. Big skill issue energy. Run it back?";
+    }
+
+    function resetRoundState() {
+      if (timerInterval) clearInterval(timerInterval);
+      startTime = null;
+      finalElapsedMs = null;
+      selected = null;
+      advancing = false;
+      container.classList.remove('completed', 'game-over', 'tier-gold', 'tier-silver', 'tier-bronze');
+      container.removeAttribute('data-message');
+      timerEl.textContent = '00:00.000';
+      buildCells();
+      paint();
+      updateRoundLabel();
+    }
+
+    function nextRound() {
+      roundIndex += 1;
+      GRID = ROUND_SIZES[roundIndex];
+      resetRoundState();
+    }
+
+    var ADVANCE_THRESHOLD_MS = 20000;
+
+    function celebrate(elapsedMs) {
+      var tier = null;
+      for (var i = 0; i < TIERS.length; i++) {
+        if (elapsedMs < TIERS[i].max) { tier = TIERS[i]; break; }
+      }
+      var isFinalRound = roundIndex === ROUND_SIZES.length - 1;
+      var qualifies = elapsedMs < ADVANCE_THRESHOLD_MS;
+      var fxCount = tier ? tier.count : 90;
+      var fxColors = tier ? tier.colors : TIERS[1].colors;
+
+      if (qualifies && !isFinalRound) {
+        var nextSize = ROUND_SIZES[roundIndex + 1];
+        container.dataset.message = 'Round cleared! Advancing to ' + nextSize + '×' + nextSize + '...';
+        if (tier) container.classList.add(tier.tierClass);
+        confettiBurst(fxCount, fxColors, 1800);
+        advancing = true;
+        setTimeout(nextRound, 1800);
+        return;
+      }
+
+      if (qualifies && isFinalRound) {
+        container.dataset.message = 'ALL 10 ROUNDS CLEARED. Absolute legend status unlocked.';
+        if (tier) container.classList.add(tier.tierClass);
+        confettiBurst(220, fxColors, 3000);
+        return;
+      }
+
+      container.dataset.message = tier ? tier.message : 'Puzzle complete. Took the scenic route but hey, you did it.';
+      if (tier) {
+        container.classList.add(tier.tierClass);
+        confettiBurst(tier.count, tier.colors, 2200);
+      }
+    }
+
     function select(idx) {
-      if (isEnded()) return;
+      if (isEnded() || advancing) return;
       startTimer();
       if (selected === null) {
         selected = idx;
@@ -526,28 +615,19 @@ body {
       }
     }
 
-    cells.forEach(function (cell, idx) {
-      cell.addEventListener('click', function () { select(idx); });
-      cell.addEventListener('keydown', function (e) {
-        if (e.key === 'Enter' || e.key === ' ') {
-          e.preventDefault();
-          select(idx);
-        }
-      });
+    window.addEventListener('resize', function () {
+      if (!advancing) paint();
     });
 
-    var retryBtn = document.getElementById('puzzleRetryBtn');
     retryBtn.addEventListener('click', function () {
-      if (timerInterval) clearInterval(timerInterval);
-      startTime = null;
-      finalElapsedMs = null;
-      selected = null;
-      container.classList.remove('completed', 'game-over', 'tier-gold', 'tier-silver', 'tier-bronze');
-      container.removeAttribute('data-message');
-      timerEl.textContent = '00:00.000';
-      order = shuffle(order.slice().sort(function (a, b) { return a - b; }));
-      paint();
+      roundIndex = 0;
+      GRID = ROUND_SIZES[roundIndex];
+      resetRoundState();
     });
+
+    buildCells();
+    paint();
+    updateRoundLabel();
   })();
 </script>
 
