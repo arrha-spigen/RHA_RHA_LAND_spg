@@ -18,12 +18,16 @@ plus theme-level `script.js` and `style.css`.
 ## sq2gcx `home_page.hbs` puzzle
 
 `home_page.hbs` on sq2gcx includes a "Piece It Together" sliding-image puzzle
-(4×4, built from the Spigen Official Store promo image, tap-two-tiles-to-swap),
-with a live mm:ss.mmm timer and a top-5 leaderboard (nickname + country flag +
-time) that visitors can submit to on solve. The leaderboard is backed by
-[GAS_Zendesk/PuzzleLeaderboard](../GAS_Zendesk/PuzzleLeaderboard/) — see that
-project's README for the API, the country-flag whitelist, and a deployment
-gotcha around Web App public-access settings.
+(3×3, built from the Spigen Official Store promo image, tap-two-tiles-to-swap —
+started at 4×4 but the banner's plain white background made several tiles look
+blank, so it was shrunk to 3×3) with a live mm:ss.mmm timer. Solving under
+30/20/10 seconds triggers a tiered canvas-confetti celebration (bronze/silver/
+gold — pulsing border + message), all client-side, no backend. An earlier
+version had a top-5 leaderboard backed by a Google Sheet + Apps Script Web App;
+that was removed in favor of the confetti effects, and the backend project
+(`GAS_Zendesk/PuzzleLeaderboard`) was deleted from the repo. The Google Sheet /
+Script / Web App deployment it used still exist in Drive but are now orphaned —
+not referenced by any live code — and can be deleted manually if desired.
 
 ## Editing
 

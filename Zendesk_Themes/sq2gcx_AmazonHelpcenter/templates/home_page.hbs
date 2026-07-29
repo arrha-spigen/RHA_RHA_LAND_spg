@@ -104,15 +104,26 @@ body {
   border-radius: 10px;
   transition: border 0.5s ease;
 }
-.puzzle-container.completed { border: 5px solid red; }
+.puzzle-container.completed { border: 5px solid #4CAF50; }
+.puzzle-container.completed.tier-bronze { border-color: #cd7f32; }
+.puzzle-container.completed.tier-silver { border-color: #b0b0b8; }
+.puzzle-container.completed.tier-gold {
+  border-color: #ffd700;
+  animation: puzzleGoldPulse 0.9s ease-in-out infinite;
+}
+@keyframes puzzleGoldPulse {
+  0%, 100% { box-shadow: 0 0 12px 2px rgba(255,215,0,0.5); }
+  50% { box-shadow: 0 0 28px 10px rgba(255,215,0,0.9); }
+}
 .puzzle-container.completed::after {
-  content: "Puzzle Completed!";
+  content: attr(data-message);
   position: absolute;
   top: 50%; left: 50%;
   transform: translate(-50%, -50%);
-  font-size: 24px; font-weight: bold; color: #fff;
+  font-size: 20px; font-weight: bold; color: #fff;
   background: rgba(0,0,0,0.8);
-  padding: 20px 40px; border-radius: 10px; text-align: center; z-index: 10;
+  padding: 16px 28px; border-radius: 10px; text-align: center; z-index: 10;
+  white-space: nowrap;
 }
 .puzzle-container div {
   width: 135px; height: 135px; border: 1px solid #ddd;
@@ -144,31 +155,6 @@ body {
   font-size: 18px; font-weight: bold; color: #333; margin-bottom: 10px;
   font-variant-numeric: tabular-nums;
 }
-.puzzle-submit { margin-top: 20px; }
-.puzzle-submit input[type="text"] {
-  padding: 8px 12px; border: 1px solid #ccc; border-radius: 6px; font-size: 14px;
-  margin-bottom: 10px; width: 200px; max-width: 100%;
-}
-.country-picker { display: flex; justify-content: center; flex-wrap: wrap; gap: 8px; margin-bottom: 12px; }
-.country-flag {
-  width: 40px; height: 40px; border-radius: 50%; border: 2px solid transparent;
-  padding: 0; overflow: hidden; cursor: pointer; background: none; line-height: 0;
-}
-.country-flag img { width: 100%; height: 100%; display: block; }
-.country-flag.selected { border-color: #007BFF; }
-.puzzle-submit button {
-  background: #007BFF; color: #fff; border: none; padding: 10px 24px;
-  border-radius: 6px; font-size: 14px; font-weight: bold; cursor: pointer;
-}
-.puzzle-submit button:disabled { opacity: 0.6; cursor: default; }
-.puzzle-submit-status { font-size: 13px; color: #555; margin-top: 8px; min-height: 18px; }
-.puzzle-leaderboard { margin-top: 24px; text-align: left; max-width: 300px; margin-left: auto; margin-right: auto; }
-.puzzle-leaderboard h3 { text-align: center; margin-bottom: 10px; font-size: 13px; }
-.puzzle-leaderboard ol { list-style: decimal; padding-left: 24px; margin: 0; }
-.puzzle-leaderboard li { display: flex; align-items: center; gap: 8px; padding: 4px 0; font-size: 14px; }
-.leaderboard-flag { width: 20px; height: 20px; border-radius: 50%; }
-.leaderboard-name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.leaderboard-time { font-variant-numeric: tabular-nums; color: #555; }
 </style>
 <script async src="https://www.instagram.com/embed.js"></script>
 </head>
@@ -250,19 +236,6 @@ body {
   <div class="puzzle-container" id="spigenPuzzle" aria-label="Sliding image puzzle of the Spigen Official Store"></div>
   <div class="original-image-container">
     <img src="https://m.media-amazon.com/images/S/al-eu-726f4d26-7fdb/69837595-94f3-42b9-af54-10c2bd8333d9._CR0%2C0%2C3000%2C1500_SX3000_.jpg" alt="Spigen Official Store preview" />
-  </div>
-
-  <div class="puzzle-submit" id="puzzleSubmit" hidden>
-    <p>Solved in <strong id="puzzleFinalTime"></strong>! Add yourself to the leaderboard:</p>
-    <input type="text" id="puzzleNickname" maxlength="20" placeholder="Nickname" />
-    <div class="country-picker" id="countryPicker" role="radiogroup" aria-label="Choose your country"></div>
-    <button id="puzzleSubmitBtn" type="button">Submit</button>
-    <p class="puzzle-submit-status" id="puzzleSubmitStatus"></p>
-  </div>
-
-  <div class="puzzle-leaderboard">
-    <h3>Top 5 Players</h3>
-    <ol id="leaderboardList"></ol>
   </div>
 </div>
 
@@ -348,57 +321,11 @@ body {
     var IMG_URL = "https://m.media-amazon.com/images/S/al-eu-726f4d26-7fdb/69837595-94f3-42b9-af54-10c2bd8333d9._CR0%2C0%2C3000%2C1500_SX3000_.jpg";
     var GRID = 3;
     var ASPECT = 2; // source image is 3000x1500 (2:1) — used to center-crop it into the square grid
-    var LEADERBOARD_API_URL = "https://script.google.com/macros/s/AKfycbxRWYqoSVsWjQAjQXmsog5IPXufcOhM7WEJx4wki6c0Lb6KSq-ZuAdVfD9o8t6LwkLn/exec";
-    var COUNTRIES = [
-      { code: 'de', label: 'Germany' },
-      { code: 'gb', label: 'United Kingdom' },
-      { code: 'fr', label: 'France' },
-      { code: 'it', label: 'Italy' },
-      { code: 'es', label: 'Spain' },
-      { code: 'in', label: 'India' },
-      { code: 'jp', label: 'Japan' }
-    ];
 
     var container = document.getElementById('spigenPuzzle');
     if (!container) return;
 
     var timerEl = document.getElementById('puzzleTimer');
-    var submitBox = document.getElementById('puzzleSubmit');
-    var finalTimeEl = document.getElementById('puzzleFinalTime');
-    var nicknameInput = document.getElementById('puzzleNickname');
-    var countryPicker = document.getElementById('countryPicker');
-    var submitBtn = document.getElementById('puzzleSubmitBtn');
-    var statusEl = document.getElementById('puzzleSubmitStatus');
-    var leaderboardList = document.getElementById('leaderboardList');
-
-    function flagUrl(code) {
-      return 'https://hatscripts.github.io/circle-flags/flags/' + code + '.svg';
-    }
-
-    var selectedCountry = null;
-    COUNTRIES.forEach(function (c) {
-      var btn = document.createElement('button');
-      btn.type = 'button';
-      btn.className = 'country-flag';
-      btn.setAttribute('role', 'radio');
-      btn.setAttribute('aria-checked', 'false');
-      btn.setAttribute('aria-label', c.label);
-      btn.title = c.label;
-      var img = document.createElement('img');
-      img.src = flagUrl(c.code);
-      img.alt = c.label;
-      btn.appendChild(img);
-      btn.addEventListener('click', function () {
-        selectedCountry = c.code;
-        Array.prototype.forEach.call(countryPicker.children, function (el) {
-          el.classList.remove('selected');
-          el.setAttribute('aria-checked', 'false');
-        });
-        btn.classList.add('selected');
-        btn.setAttribute('aria-checked', 'true');
-      });
-      countryPicker.appendChild(btn);
-    });
 
     function formatTime(ms) {
       var totalSeconds = Math.floor(ms / 1000);
@@ -409,34 +336,80 @@ body {
         (msPart < 10 ? '00' : msPart < 100 ? '0' : '') + msPart;
     }
 
-    function renderLeaderboard(list) {
-      leaderboardList.innerHTML = '';
-      (list || []).forEach(function (entry) {
-        var li = document.createElement('li');
-        var flag = document.createElement('img');
-        flag.className = 'leaderboard-flag';
-        flag.src = flagUrl(entry.country);
-        flag.alt = entry.country;
-        var name = document.createElement('span');
-        name.className = 'leaderboard-name';
-        name.textContent = entry.nickname;
-        var time = document.createElement('span');
-        time.className = 'leaderboard-time';
-        time.textContent = formatTime(entry.timeMs);
-        li.appendChild(flag);
-        li.appendChild(name);
-        li.appendChild(time);
-        leaderboardList.appendChild(li);
-      });
+    // One-shot canvas confetti burst — count/colors/duration scale by finish-time tier.
+    function confettiBurst(count, colors, durationMs) {
+      var canvas = document.createElement('canvas');
+      canvas.style.position = 'fixed';
+      canvas.style.top = '0';
+      canvas.style.left = '0';
+      canvas.style.width = '100vw';
+      canvas.style.height = '100vh';
+      canvas.style.pointerEvents = 'none';
+      canvas.style.zIndex = '9999';
+      canvas.width = window.innerWidth;
+      canvas.height = window.innerHeight;
+      document.body.appendChild(canvas);
+      var ctx = canvas.getContext('2d');
+      var originX = canvas.width / 2;
+      var originY = canvas.height / 3;
+      var particles = [];
+      for (var i = 0; i < count; i++) {
+        var angle = Math.random() * Math.PI * 2;
+        var speed = 4 + Math.random() * 8;
+        particles.push({
+          x: originX,
+          y: originY,
+          vx: Math.cos(angle) * speed,
+          vy: Math.sin(angle) * speed - 4,
+          size: 4 + Math.random() * 5,
+          color: colors[Math.floor(Math.random() * colors.length)],
+          rotation: Math.random() * 360,
+          vr: (Math.random() - 0.5) * 20
+        });
+      }
+      var start = Date.now();
+      function tick() {
+        var elapsed = Date.now() - start;
+        ctx.clearRect(0, 0, canvas.width, canvas.height);
+        particles.forEach(function (p) {
+          p.vy += 0.25;
+          p.x += p.vx;
+          p.y += p.vy;
+          p.rotation += p.vr;
+          ctx.save();
+          ctx.globalAlpha = Math.max(0, 1 - elapsed / durationMs);
+          ctx.translate(p.x, p.y);
+          ctx.rotate((p.rotation * Math.PI) / 180);
+          ctx.fillStyle = p.color;
+          ctx.fillRect(-p.size / 2, -p.size / 2, p.size, p.size);
+          ctx.restore();
+        });
+        if (elapsed < durationMs) {
+          requestAnimationFrame(tick);
+        } else {
+          canvas.remove();
+        }
+      }
+      tick();
     }
 
-    function loadLeaderboard() {
-      fetch(LEADERBOARD_API_URL)
-        .then(function (r) { return r.json(); })
-        .then(function (data) { renderLeaderboard(data.leaderboard); })
-        .catch(function () {});
+    var TIERS = [
+      { max: 10000, tierClass: 'tier-gold', message: '🎉 Incredible! Under 10 seconds!', colors: ['#FFD700', '#FFA500', '#FF69B4', '#00CFFF', '#7CFC00'], count: 160 },
+      { max: 20000, tierClass: 'tier-silver', message: '⚡ Awesome! Under 20 seconds!', colors: ['#C0C0C0', '#87CEEB', '#DDA0DD', '#FFFFFF'], count: 90 },
+      { max: 30000, tierClass: 'tier-bronze', message: '✨ Nice! Under 30 seconds!', colors: ['#CD7F32', '#DEB887', '#FFDAB9'], count: 45 }
+    ];
+
+    function celebrate(elapsedMs) {
+      var tier = null;
+      for (var i = 0; i < TIERS.length; i++) {
+        if (elapsedMs < TIERS[i].max) { tier = TIERS[i]; break; }
+      }
+      container.dataset.message = tier ? tier.message : 'Puzzle Completed!';
+      if (tier) {
+        container.classList.add(tier.tierClass);
+        confettiBurst(tier.count, tier.colors, 2200);
+      }
     }
-    loadLeaderboard();
 
     var order = [];
     for (var i = 0; i < GRID * GRID; i++) order.push(i);
@@ -525,8 +498,7 @@ body {
       if (solved) {
         container.classList.add('completed');
         stopTimer();
-        finalTimeEl.textContent = formatTime(finalElapsedMs);
-        submitBox.hidden = false;
+        celebrate(finalElapsedMs);
       }
     }
 
@@ -538,33 +510,6 @@ body {
           select(idx);
         }
       });
-    });
-
-    submitBtn.addEventListener('click', function () {
-      var nickname = nicknameInput.value.trim();
-      if (!nickname) { statusEl.textContent = 'Please enter a nickname.'; return; }
-      if (!selectedCountry) { statusEl.textContent = 'Please choose your country.'; return; }
-      submitBtn.disabled = true;
-      statusEl.textContent = 'Submitting…';
-      fetch(LEADERBOARD_API_URL, {
-        method: 'POST',
-        body: JSON.stringify({ nickname: nickname, country: selectedCountry, timeMs: finalElapsedMs })
-      })
-        .then(function (r) { return r.json(); })
-        .then(function (data) {
-          if (data.error) {
-            statusEl.textContent = 'Could not submit: ' + data.error;
-            submitBtn.disabled = false;
-            return;
-          }
-          renderLeaderboard(data.leaderboard);
-          statusEl.textContent = 'Added to the leaderboard!';
-          submitBox.hidden = true;
-        })
-        .catch(function () {
-          statusEl.textContent = 'Network error — please try again.';
-          submitBtn.disabled = false;
-        });
     });
   })();
 </script>
