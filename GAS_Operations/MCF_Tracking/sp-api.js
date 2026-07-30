@@ -889,6 +889,142 @@ function _buildFeeMapForWindow(ep, postedAfter, postedBefore) {
   return feeMap;
 }
 
+// Representative marketplaceId per endpoint group for settlement-report listing.
+// EU settlement reports are unified across all EU marketplaces regardless of which
+// EU marketplaceId is passed here (confirmed live: a DE-scoped list call returned GCX-FR/GCX-UK
+// orders too) — same for FE (JP covers JP/AU/SG).
+function _settlementMarketplaceId(ep) {
+  return ep === 'FE' ? 'A1VC38T7YXB528' /* JP */ : 'A1PA6795UKMFR9' /* DE */;
+}
+
+// European settlement TSVs use a locale decimal comma ("7,50"); NA/other locales use a dot.
+// Replacing "," with "." is safe here since these are per-line-item amounts, never
+// thousands-grouped.
+function _parseSettlementAmount(s) {
+  var n = parseFloat(String(s || '').replace(',', '.'));
+  return isNaN(n) ? 0 : n;
+}
+
+/**
+ * Builds a merchant-order-id → fee map from GET_V2_SETTLEMENT_REPORT_DATA_FLAT_FILE_V2 reports.
+ *
+ * Why this exists (confirmed live, 2026-07-30): Amazon's Finances API
+ * (/finances/v0/financialEvents and /finances/v0/orders/{id}/financialEvents) has NO fee data
+ * at all for these self-created ("Non-Amazon <country>" marketplace) MCF shipments — their
+ * ShipmentEventList entries use a synthetic "S02-..." order id, never the GCX sheet id, and a
+ * targeted single-order lookup by the GCX id returns a structurally valid but completely empty
+ * result. The **Settlement Report**, however, preserves the sheet's exact GCX id in its
+ * `merchant-order-id` column, alongside a proper `ItemFees` / `FBAPerUnitFulfillmentFee` line —
+ * e.g. confirmed live: merchant-order-id=GCX-FR-260716-2695, amount-type=ItemFees,
+ * amount-description=FBAPerUnitFulfillmentFee, amount=-7,50. So this is now the primary (only
+ * working) source for col Y fees, keyed by a **direct** match against the sheet's Q-column value
+ * — no numeric alias or displayableOrderId resolution needed.
+ *
+ * Hard constraint: the reports-listing endpoint rejects `createdSince` older than ~90 days
+ * ("RequestedFromDate ... is more than 90 days old"), so this can only ever cover the last ~89
+ * days — which happens to match backfillMCFFeesRecent()'s own scoping. Older pending rows are
+ * simply outside what SP-API allows querying at all via this mechanism.
+ *
+ * @param ep 'EU' or 'FE'.
+ * @param sinceDate Date — clamped internally to at most 89 days ago.
+ * @return plain object { [merchant-order-id]: absoluteFeeAmount }
+ */
+function _buildSettlementFeeMap(ep, sinceDate) {
+  var feeMap = {};
+  var now = new Date(Date.now() - 5 * 60 * 1000);
+  var earliestAllowed = new Date(now.getTime() - 89 * 24 * 3600 * 1000);
+  var since = (sinceDate && sinceDate > earliestAllowed) ? sinceDate : earliestAllowed;
+
+  var marketplaceId = _settlementMarketplaceId(ep);
+  var reports = [];
+  var nextToken = null;
+  var page = 0;
+
+  do {
+    // The reports-listing endpoint rejects nextToken combined with any other query param
+    // ("NextToken cannot be specified with other input parameters") — confirmed live, since
+    // this account settles often enough to exceed one page within the 89-day window.
+    var qs = nextToken
+      ? 'nextToken=' + encodeURIComponent(nextToken)
+      : 'reportTypes=GET_V2_SETTLEMENT_REPORT_DATA_FLAT_FILE_V2' +
+        '&processingStatuses=DONE' +
+        '&marketplaceIds=' + marketplaceId +
+        '&createdSince=' + encodeURIComponent(since.toISOString()) +
+        '&createdUntil=' + encodeURIComponent(now.toISOString()) +
+        '&pageSize=100';
+
+    var res = spapiFetchWithRetry('GET', '/reports/2021-06-30/reports', { queryString: qs, endpoint: ep }, 2, 15000);
+    var payload = res.payload || res;
+    reports = reports.concat(payload.reports || []);
+    nextToken = payload.nextToken || null;
+    page++;
+  } while (nextToken && page < 10);
+
+  // This account can settle very frequently (100+ reports observed within the 89-day window,
+  // some with 200k+ lines) — cap how many get downloaded+parsed per run so this can't run away
+  // past GAS's execution time limit. Newest first: a pending row's fee is far more likely to
+  // have posted recently than in an old settlement batch, and rows already resolved are skipped
+  // on future runs anyway, so this naturally converges over successive 30-min runs.
+  reports.sort(function(a, b) { return new Date(b.createdTime) - new Date(a.createdTime); });
+  var maxReports = 40;
+  var toScan = reports.slice(0, maxReports);
+  Logger.log('_buildSettlementFeeMap[%s]: %s settlement report(s) in window since %s — scanning %s most recent',
+    ep, reports.length, since.toISOString().slice(0,10), toScan.length);
+
+  var startTime = Date.now();
+  var timeBudgetMs = 4.5 * 60 * 1000; // bail before GAS's execution limit, not after
+  var scanned = 0;
+
+  for (var ri = 0; ri < toScan.length; ri++) {
+    if (Date.now() - startTime > timeBudgetMs) {
+      Logger.log('_buildSettlementFeeMap[%s]: time budget reached — scanned %s/%s, rest deferred to next run', ep, scanned, toScan.length);
+      break;
+    }
+    var r = toScan[ri];
+    scanned++;
+    try {
+      var docRes = spapiFetchWithRetry('GET', '/reports/2021-06-30/documents/' + encodeURIComponent(r.reportDocumentId), { endpoint: ep }, 2, 15000);
+      var doc = docRes.payload || docRes;
+      var resp = UrlFetchApp.fetch(doc.url, { muteHttpExceptions: true });
+      var text;
+      if (doc.compressionAlgorithm === 'GZIP') {
+        text = Utilities.ungzip(Utilities.newBlob(resp.getBlob().getBytes(), 'application/gzip')).getDataAsString('UTF-8');
+      } else {
+        text = resp.getContentText('UTF-8');
+      }
+
+      var lines = text.split('\n');
+      if (!lines.length) continue;
+      var header = lines[0].split('\t');
+      var moiIdx = header.indexOf('merchant-order-id');
+      var typeIdx = header.indexOf('amount-type');
+      var amtIdx = header.indexOf('amount');
+      if (moiIdx < 0 || typeIdx < 0 || amtIdx < 0) {
+        Logger.log('  report %s: unexpected header, skipping', r.reportId);
+        continue;
+      }
+
+      for (var i = 1; i < lines.length; i++) {
+        if (!lines[i]) continue;
+        var f = lines[i].split('\t');
+        var moi = (f[moiIdx] || '').trim();
+        if (!moi || f[typeIdx] !== 'ItemFees') continue;
+        var amt = Math.abs(_parseSettlementAmount(f[amtIdx]));
+        if (amt === 0) continue;
+        feeMap[moi] = (feeMap[moi] || 0) + amt;
+      }
+    } catch (e) {
+      // spapiFetchWithRetry above already retries once on 429 (15s wait) — if it still failed,
+      // this report is simply skipped and picked up on a later run.
+      Logger.log('  report %s: error — %s', r.reportId, e.message || e);
+    }
+    Utilities.sleep(800); // pace document downloads — confirmed live this endpoint 429s in bursts
+  }
+
+  Logger.log('_buildSettlementFeeMap[%s]: resolved fees for %s order id(s)', ep, Object.keys(feeMap).length);
+  return feeMap;
+}
+
 /**
  * Paginates ShipmentEventList for one endpoint + date window.
  * Returns a flat array of all ShipmentEvent objects (up to maxPages × 100).

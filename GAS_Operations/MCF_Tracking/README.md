@@ -182,32 +182,63 @@ retryZeroTransportationFees()
 
 ---
 
-## Known limitation: col Y can only ever auto-fill for a minority of rows (confirmed 2026-07-30)
+## Col Y fee source: Settlement Reports, not Finances API (rebuilt 2026-07-30)
 
-`backfillMCFFeesRecent()` is installed as a 30-min time-driven trigger (Head deployment) and no
-longer crashes (see bug below) — but live testing across a diverse sample of orders (spanning
-2025-03 through 2026-07) confirmed that **Amazon's Finances API has no fee record at all for
-seller-created MCF shipments that aren't linked to a real Amazon retail order** — which is nearly
-every row in this sheet:
+`backfillMCFFeesRecent()` is installed as a 30-min time-driven trigger (Head deployment).
 
-- `getFulfillmentOrderRaw(orderId)` succeeds for these orders and returns a real
-  `fulfillmentShipments[].amazonShipmentId` + tracking number — the order genuinely exists and
-  shipped.
-- But `GET /finances/v0/financialEvents` for that date window (all 35 event-list types, not just
-  `ShipmentEventList`) never contains the GCX order ID, the resolved `displayableOrderId` (which is
-  usually identical to the GCX id — Amazon doesn't reassign a separate order number), or the
-  `amazonShipmentId` anywhere in the response.
+### Why the Finances API doesn't work for this sheet's orders
+Live testing across a diverse sample of orders (spanning 2025-03 → 2026-07) confirmed Amazon's
+Finances API has **no fee record at all** for these self-created ("Non-Amazon `<country>`"
+marketplace) MCF shipments — which is nearly every row in this sheet:
+
+- `getFulfillmentOrderRaw(orderId)` succeeds and returns a real `fulfillmentShipments[].amazonShipmentId`
+  + tracking number — the order genuinely exists and shipped.
+- But `GET /finances/v0/financialEvents` for the matching window (checked all 35 event-list types,
+  not just `ShipmentEventList`) never contains the GCX order id, the resolved `displayableOrderId`
+  (usually identical to the GCX id — Amazon doesn't reassign a separate order number), or the
+  `amazonShipmentId`, anywhere.
 - `GET /finances/v0/orders/{orderId}/financialEvents` using the GCX id directly returns a
-  structurally valid but completely empty `FinancialEvents` object (not an error) — Amazon simply
-  doesn't index these shipments under any ID we have.
+  structurally valid but completely empty `FinancialEvents` object — Amazon just doesn't index
+  these shipments under any ID we have via this API surface.
+- Even the standard **Settlement Report scanned by `SellerOrderId`/`order-id`** doesn't match —
+  these shipments post under a synthetic `S02-...` pseudo order id there, never the GCX id.
 
-So `MCFFee()`/`MCFFee_JP()` and `backfillMCFFees()`/`backfillMCFFeesRecent()` can only ever resolve
-a real fee for the rare MCF order that happens to be linked to an actual Amazon marketplace order
-(where `SellerOrderId` in Finances API really is a fulfillable retail order). For the rest, the fee
-is presumably only obtainable via a **different SP-API surface** (Reports API —
-e.g. a fulfillment-fee report type — rather than the live Finances endpoints these functions call),
-which is a materially bigger integration than a bug fix. Until that's built, col Y will stay blank
-for self-created MCF shipments no matter how often the trigger runs.
+### What actually works: `merchant-order-id` in the Settlement Report
+The `GET_V2_SETTLEMENT_REPORT_DATA_FLAT_FILE_V2` report (Reports API, not Finances API) has a
+**separate `merchant-order-id` column that preserves the sheet's exact GCX id**, alongside a
+proper fee line — confirmed live:
+```
+merchant-order-id=GCX-FR-260716-2695  amount-type=ItemFees  amount-description=FBAPerUnitFulfillmentFee  amount=-7,50
+```
+`_buildSettlementFeeMap(ep, sinceDate)` (sp-api.js) lists settlement reports created in the window,
+downloads + parses each (tab-delimited, gzip sometimes), and sums `amount-type === 'ItemFees'` rows
+per `merchant-order-id` — this is a **direct match** against the sheet's Q-column value, no numeric
+alias or `displayableOrderId` resolution needed (unlike the old Finances-API approach).
+`backfillMCFFeesRecent()` calls this directly now instead of the old windowed Finances API scan.
+
+First real run after this fix (2026-07-30): **109 rows written** with real fee values (e.g. 3.48,
+4.96, 7.5, 8.35, 16.28 €/£) out of 695 pending, confirmed visually in the sheet.
+
+### Constraints that shape the design
+- The reports-listing endpoint (`GET /reports/2021-06-30/reports`) rejects `createdSince` older
+  than ~90 days ("RequestedFromDate ... is more than 90 days old") — so this can only ever cover
+  the last ~89 days, which is exactly why `backfillMCFFeesRecent()` (not the unbounded
+  `backfillMCFFees()`) is the one wired to the 30-min trigger. `days` beyond 89 is clamped down.
+- This account settles very frequently — **109 settlement reports** were found within one 89-day
+  window in testing, some with 200k+ lines. `_buildSettlementFeeMap()` sorts newest-first and caps
+  to the 40 most recent reports per run, plus a 4.5-minute wall-clock budget that bails early and
+  logs how many were scanned — both so one run can't blow past GAS's execution time limit. Rows
+  whose fee posted in an older/unscanned batch simply resolve on a later 30-min run once it rotates
+  through more of the window (already-filled rows are always skipped, so this converges over time
+  without reprocessing anything).
+- The report-**document** download endpoint (`GET /reports/.../documents/{id}`) 429s in bursts —
+  confirmed live (~20 successful downloads then a wall of `QuotaExceeded`). Each download is paced
+  800ms apart and wrapped in `spapiFetchWithRetry` (one retry, 15s wait); a report that still fails
+  is skipped and picked up on a later run rather than blocking the rest.
+- Settlement report amounts use a locale decimal **comma** in EU reports (`"7,50"`, not `"7.50"`) —
+  `_parseSettlementAmount()` handles both.
+- `nextToken` must be sent **alone** on paginated listing calls — combining it with the original
+  filter params 400s with `"NextToken cannot be specified with other input parameters"`.
 
 ### Bug fixed 2026-07-30: `backfillMCFFeesRecent()` crashed on every scheduled run
 Apps Script time-driven triggers call the handler with a trigger event object as the first
@@ -218,10 +249,7 @@ argument (not `undefined`) — `days = days || 90` let that object through as a 
 `RangeError: Invalid time value at backfillMCFFeesRecent(autoFill:669:28)`. Manual "Run" clicks in
 the editor never hit this (no event object passed), which is why a handful of col Y values existed
 despite the trigger never working. Fixed by guarding `days` to require an actual finite number;
-the old 5-min trigger was deleted and replaced with a correct 30-min one. Also added the
-`displayableOrderId` fallback (mirroring `backfillMCFFees()`) that `backfillMCFFeesRecent()` was
-missing — harmless and still worth having for the rare marketplace-linked order, even though (per
-above) it doesn't move the needle for most rows.
+the old 5-min trigger was deleted and replaced with a correct 30-min one.
 
 ---
 

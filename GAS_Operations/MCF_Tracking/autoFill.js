@@ -8,7 +8,6 @@ var BF_COL_SENT    = 16;   // P — MCF sent date (yyyy-mm-dd)
 var BF_COL_RESULT  = 26;   // Z — static tracking number
                             //     replace =AMZTK(Q…) formula with =IF(Z…="","",HYPERLINK(…Z…,Z…))
 var BF_COL_FEE     = 25;   // Y — Transportation Fee (€, ¥, £) written by backfillMCFFees()
-var BF_RECENT_DISPLAYABLE_MAX_ROWS_PER_RUN = 60; // cap on getFulfillmentOrderRaw calls per backfillMCFFeesRecent() run
 
 /**
  * Writes tracking numbers as static values into BF_COL_RESULT.
@@ -607,19 +606,19 @@ function backfillMCFFees() {
 
 /**
  * Scoped variant of backfillMCFFees() — only processes rows sent within the last `days` days
- * (default 90), and clamps the Finances API scan window to that same range instead of using
- * the earliest pending row's date.
+ * (default 90).
  *
- * backfillMCFFees() always scans from the earliest pending row's sentDate to now — with the
- * current backlog that means ~9 EU + 9 FE 60-day windows covering March 2025 → now, which is
- * expensive enough that back-to-back runs don't give SP-API's Finances API quota enough real
- * time to recover between attempts (confirmed live: a run that succeeded got followed by one
- * that immediately hit persistent 429 again ~10 minutes later). This variant costs ~2 windows
- * instead of ~9, is far more likely to succeed even while quota is still recovering, and
- * prioritizes the most recent (most operationally relevant) orders. Older pending rows outside
- * the window are left for a later backfillMCFFees() run once quota is more comfortably available.
+ * Fee source: GET_V2_SETTLEMENT_REPORT_DATA_FLAT_FILE_V2 settlement reports via
+ * _buildSettlementFeeMap() (see that function's doc comment in sp-api.js for why — short version:
+ * confirmed live 2026-07-30 that Amazon's Finances API has no fee data at all for these
+ * self-created MCF shipments, but the settlement report's `merchant-order-id` column preserves
+ * the exact GCX sheet id, so this is a **direct** match — no numeric alias or
+ * displayableOrderId resolution needed, and no per-row SP-API calls at all (unlike the old
+ * approach). The settlement report listing endpoint itself refuses `createdSince` older than
+ * ~90 days, which is exactly why this function (and not the unbounded backfillMCFFees()) is the
+ * one that can actually work — `days` beyond ~89 is clamped down to fit.
  *
- * Run manually from the Apps Script editor.
+ * Run manually from the Apps Script editor, or via the 30-min time-driven trigger.
  */
 function backfillMCFFeesRecent(days) {
   // Time-driven triggers call the handler with a trigger event object as the first
@@ -628,7 +627,7 @@ function backfillMCFFeesRecent(days) {
   // cutoff.toISOString() below threw immediately on every scheduled run (100% failure,
   // confirmed in Executions log: "RangeError: Invalid time value at
   // backfillMCFFeesRecent(autoFill:669:28)"), before ever reaching SP-API.
-  days = (typeof days === 'number' && isFinite(days) && days > 0) ? days : 90;
+  days = (typeof days === 'number' && isFinite(days) && days > 0) ? Math.min(days, 89) : 89;
 
   var ss    = SpreadsheetApp.getActiveSpreadsheet();
   var sheet = ss.getSheetByName(BF_SHEET_NAME);
@@ -675,124 +674,23 @@ function backfillMCFFeesRecent(days) {
   Logger.log('backfillMCFFeesRecent: %s rows pending, window %s → now (last %s days)',
     pending.length, cutoff.toISOString().slice(0, 10), days);
 
-  function fetchFeeMap(ep) {
-    var feeMap      = {};
-    var windowStart = new Date(cutoff);
-
-    while (windowStart < now) {
-      var windowEnd = new Date(windowStart);
-      windowEnd.setDate(windowEnd.getDate() + 60);
-      if (windowEnd > now) windowEnd = now;
-      if (windowStart >= windowEnd) break;
-
-      try {
-        var chunk = _buildFeeMapForWindow(ep, windowStart, windowEnd);
-        var keys  = Object.keys(chunk);
-        keys.forEach(function(k) { feeMap[k] = chunk[k]; });
-        Logger.log('  [%s] %s – %s: %s orders found', ep,
-          windowStart.toISOString().slice(0, 10), windowEnd.toISOString().slice(0, 10), keys.length);
-      } catch (e) {
-        if (_isRateLimit429(e)) {
-          Logger.log('  [%s] 429 — sleeping 15 s, retrying window', ep);
-          Utilities.sleep(15000);
-          try {
-            var chunk2 = _buildFeeMapForWindow(ep, windowStart, windowEnd);
-            Object.keys(chunk2).forEach(function(k) { feeMap[k] = chunk2[k]; });
-          } catch (e2) {
-            Logger.log('  [%s] retry also failed: %s', ep, e2.message);
-          }
-        } else {
-          Logger.log('  [%s] window error (%s): %s', ep, windowStart.toISOString().slice(0, 10), e.message);
-        }
-      }
-
-      windowStart = new Date(windowEnd);
-      windowStart.setDate(windowStart.getDate() + 1);
-      Utilities.sleep(500);
-    }
-
-    return feeMap;
-  }
-
-  var euMap = fetchFeeMap('EU');
-  var feMap = hasJP ? fetchFeeMap('FE') : {};
+  var euMap = _buildSettlementFeeMap('EU', cutoff);
+  var feMap = hasJP ? _buildSettlementFeeMap('FE', cutoff) : {};
 
   var written = 0, notSettled = 0;
-  var unfilledRows = [];
 
   pending.forEach(function(r) {
-    var primaryMap   = r.isJP ? feMap : euMap;
-    var secondaryMap = r.isJP ? euMap : feMap;
-    var fee = primaryMap[r.orderId]   !== undefined ? primaryMap[r.orderId]
-            : secondaryMap[r.orderId] !== undefined ? secondaryMap[r.orderId]
-            : null;
+    var map = r.isJP ? feMap : euMap;
+    var fee = map[r.orderId];
 
-    if (fee !== null) {
+    if (fee !== undefined) {
       sheet.getRange(BF_START_ROW + r.i, BF_COL_FEE).setValue(fee);
       Logger.log('Row %s (%s): fee = %s', BF_START_ROW + r.i, r.orderId, fee);
       written++;
     } else {
-      unfilledRows.push(r);
+      notSettled++;
     }
   });
-
-  // displayableOrderId fallback: confirmed live (auditYColumnFees, 2026-07-30) that GCX seller-
-  // fulfillment orders NEVER post to the Finances API under their GCX-XX-YYMMDD-NN sheet ID —
-  // ShipmentEventList always carries Amazon's own order ID (e.g. "304-8764277-1363525") as
-  // SellerOrderId. A 420-event / 90-day sample matched 0 GCX-prefixed IDs. So the direct/alias
-  // match above can only ever succeed for the rare order that's linked to a real marketplace
-  // order; every other row requires resolving the real ID via getFulfillmentOrderRaw first.
-  // Capped per run (BF_RECENT_DISPLAYABLE_MAX_ROWS_PER_RUN) so a single 30-min trigger run can't
-  // turn into ~2000 sequential FBA Outbound API calls — remaining rows resolve on later runs.
-  if (unfilledRows.length) {
-    var toResolve = unfilledRows.slice(0, BF_RECENT_DISPLAYABLE_MAX_ROWS_PER_RUN);
-    Logger.log('backfillMCFFeesRecent: %s rows unmatched — resolving displayableOrderId for %s of them this run',
-      unfilledRows.length, toResolve.length);
-
-    var consec429 = 0;
-    for (var u = 0; u < toResolve.length; u++) {
-      var r2 = toResolve[u];
-      if (consec429 >= 5) {
-        Logger.log('backfillMCFFeesRecent: quota still exhausted after 5 consecutive 429s — stopping this run.');
-        break;
-      }
-      try {
-        var ep2      = r2.isJP ? 'FE' : 'EU';
-        var foResult = getFulfillmentOrderRaw(r2.orderId, ep2);
-        var dispId   = ((foResult.fulfillmentOrder || {}).displayableOrderId || '').trim();
-        consec429 = 0;
-        if (dispId && dispId !== r2.orderId) {
-          var primaryMap2   = r2.isJP ? feMap : euMap;
-          var secondaryMap2 = r2.isJP ? euMap : feMap;
-          var fee2 = primaryMap2[dispId]   !== undefined ? primaryMap2[dispId]
-                   : secondaryMap2[dispId] !== undefined ? secondaryMap2[dispId]
-                   : null;
-          if (fee2 !== null) {
-            sheet.getRange(BF_START_ROW + r2.i, BF_COL_FEE).setValue(fee2);
-            Logger.log('Row %s (%s → %s): fee = %s via displayableOrderId', BF_START_ROW + r2.i, r2.orderId, dispId, fee2);
-            written++;
-          } else {
-            notSettled++;
-          }
-        } else {
-          notSettled++;
-        }
-      } catch (e) {
-        if (_isRateLimit429(e)) {
-          consec429++;
-          Logger.log('Row %s (%s): 429 resolving displayableOrderId (%s/5 consecutive)', BF_START_ROW + r2.i, r2.orderId, consec429);
-        } else {
-          Logger.log('Row %s (%s): displayableOrderId lookup error: %s', BF_START_ROW + r2.i, r2.orderId, e.message || e);
-        }
-        notSettled++;
-      }
-      Utilities.sleep(400);
-    }
-
-    if (unfilledRows.length > toResolve.length) {
-      notSettled += (unfilledRows.length - toResolve.length);
-    }
-  }
 
   Logger.log('backfillMCFFeesRecent done — written: %s, not settled: %s (older rows outside the %s-day window untouched)',
     written, notSettled, days);
