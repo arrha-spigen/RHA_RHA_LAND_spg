@@ -182,6 +182,49 @@ retryZeroTransportationFees()
 
 ---
 
+## Known limitation: col Y can only ever auto-fill for a minority of rows (confirmed 2026-07-30)
+
+`backfillMCFFeesRecent()` is installed as a 30-min time-driven trigger (Head deployment) and no
+longer crashes (see bug below) — but live testing across a diverse sample of orders (spanning
+2025-03 through 2026-07) confirmed that **Amazon's Finances API has no fee record at all for
+seller-created MCF shipments that aren't linked to a real Amazon retail order** — which is nearly
+every row in this sheet:
+
+- `getFulfillmentOrderRaw(orderId)` succeeds for these orders and returns a real
+  `fulfillmentShipments[].amazonShipmentId` + tracking number — the order genuinely exists and
+  shipped.
+- But `GET /finances/v0/financialEvents` for that date window (all 35 event-list types, not just
+  `ShipmentEventList`) never contains the GCX order ID, the resolved `displayableOrderId` (which is
+  usually identical to the GCX id — Amazon doesn't reassign a separate order number), or the
+  `amazonShipmentId` anywhere in the response.
+- `GET /finances/v0/orders/{orderId}/financialEvents` using the GCX id directly returns a
+  structurally valid but completely empty `FinancialEvents` object (not an error) — Amazon simply
+  doesn't index these shipments under any ID we have.
+
+So `MCFFee()`/`MCFFee_JP()` and `backfillMCFFees()`/`backfillMCFFeesRecent()` can only ever resolve
+a real fee for the rare MCF order that happens to be linked to an actual Amazon marketplace order
+(where `SellerOrderId` in Finances API really is a fulfillable retail order). For the rest, the fee
+is presumably only obtainable via a **different SP-API surface** (Reports API —
+e.g. a fulfillment-fee report type — rather than the live Finances endpoints these functions call),
+which is a materially bigger integration than a bug fix. Until that's built, col Y will stay blank
+for self-created MCF shipments no matter how often the trigger runs.
+
+### Bug fixed 2026-07-30: `backfillMCFFeesRecent()` crashed on every scheduled run
+Apps Script time-driven triggers call the handler with a trigger event object as the first
+argument (not `undefined`) — `days = days || 90` let that object through as a truthy value, so
+`days * 24 * 3600 * 1000` evaluated to `NaN`, `cutoff` became an `Invalid Date`, and
+`cutoff.toISOString()` threw immediately, before any SP-API call was made. This was firing every
+5 minutes (not 30) and failing 100% of the time — confirmed in the Executions log:
+`RangeError: Invalid time value at backfillMCFFeesRecent(autoFill:669:28)`. Manual "Run" clicks in
+the editor never hit this (no event object passed), which is why a handful of col Y values existed
+despite the trigger never working. Fixed by guarding `days` to require an actual finite number;
+the old 5-min trigger was deleted and replaced with a correct 30-min one. Also added the
+`displayableOrderId` fallback (mirroring `backfillMCFFees()`) that `backfillMCFFeesRecent()` was
+missing — harmless and still worth having for the rare marketplace-linked order, even though (per
+above) it doesn't move the needle for most rows.
+
+---
+
 ## `onEdit` Automation (`autoFill.js`)
 
 Fires on any edit in the `MCF 발송 로그` sheet (rows 4+):

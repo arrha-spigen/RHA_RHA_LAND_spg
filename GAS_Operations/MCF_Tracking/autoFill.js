@@ -8,6 +8,7 @@ var BF_COL_SENT    = 16;   // P — MCF sent date (yyyy-mm-dd)
 var BF_COL_RESULT  = 26;   // Z — static tracking number
                             //     replace =AMZTK(Q…) formula with =IF(Z…="","",HYPERLINK(…Z…,Z…))
 var BF_COL_FEE     = 25;   // Y — Transportation Fee (€, ¥, £) written by backfillMCFFees()
+var BF_RECENT_DISPLAYABLE_MAX_ROWS_PER_RUN = 60; // cap on getFulfillmentOrderRaw calls per backfillMCFFeesRecent() run
 
 /**
  * Writes tracking numbers as static values into BF_COL_RESULT.
@@ -621,7 +622,13 @@ function backfillMCFFees() {
  * Run manually from the Apps Script editor.
  */
 function backfillMCFFeesRecent(days) {
-  days = days || 90;
+  // Time-driven triggers call the handler with a trigger event object as the first
+  // argument (not undefined) — `days || 90` let that object through as a truthy value,
+  // so `days * 24 * 3600 * 1000` became NaN, cutoff became an Invalid Date, and
+  // cutoff.toISOString() below threw immediately on every scheduled run (100% failure,
+  // confirmed in Executions log: "RangeError: Invalid time value at
+  // backfillMCFFeesRecent(autoFill:669:28)"), before ever reaching SP-API.
+  days = (typeof days === 'number' && isFinite(days) && days > 0) ? days : 90;
 
   var ss    = SpreadsheetApp.getActiveSpreadsheet();
   var sheet = ss.getSheetByName(BF_SHEET_NAME);
@@ -711,6 +718,7 @@ function backfillMCFFeesRecent(days) {
   var feMap = hasJP ? fetchFeeMap('FE') : {};
 
   var written = 0, notSettled = 0;
+  var unfilledRows = [];
 
   pending.forEach(function(r) {
     var primaryMap   = r.isJP ? feMap : euMap;
@@ -724,9 +732,67 @@ function backfillMCFFeesRecent(days) {
       Logger.log('Row %s (%s): fee = %s', BF_START_ROW + r.i, r.orderId, fee);
       written++;
     } else {
-      notSettled++;
+      unfilledRows.push(r);
     }
   });
+
+  // displayableOrderId fallback: confirmed live (auditYColumnFees, 2026-07-30) that GCX seller-
+  // fulfillment orders NEVER post to the Finances API under their GCX-XX-YYMMDD-NN sheet ID —
+  // ShipmentEventList always carries Amazon's own order ID (e.g. "304-8764277-1363525") as
+  // SellerOrderId. A 420-event / 90-day sample matched 0 GCX-prefixed IDs. So the direct/alias
+  // match above can only ever succeed for the rare order that's linked to a real marketplace
+  // order; every other row requires resolving the real ID via getFulfillmentOrderRaw first.
+  // Capped per run (BF_RECENT_DISPLAYABLE_MAX_ROWS_PER_RUN) so a single 30-min trigger run can't
+  // turn into ~2000 sequential FBA Outbound API calls — remaining rows resolve on later runs.
+  if (unfilledRows.length) {
+    var toResolve = unfilledRows.slice(0, BF_RECENT_DISPLAYABLE_MAX_ROWS_PER_RUN);
+    Logger.log('backfillMCFFeesRecent: %s rows unmatched — resolving displayableOrderId for %s of them this run',
+      unfilledRows.length, toResolve.length);
+
+    var consec429 = 0;
+    for (var u = 0; u < toResolve.length; u++) {
+      var r2 = toResolve[u];
+      if (consec429 >= 5) {
+        Logger.log('backfillMCFFeesRecent: quota still exhausted after 5 consecutive 429s — stopping this run.');
+        break;
+      }
+      try {
+        var ep2      = r2.isJP ? 'FE' : 'EU';
+        var foResult = getFulfillmentOrderRaw(r2.orderId, ep2);
+        var dispId   = ((foResult.fulfillmentOrder || {}).displayableOrderId || '').trim();
+        consec429 = 0;
+        if (dispId && dispId !== r2.orderId) {
+          var primaryMap2   = r2.isJP ? feMap : euMap;
+          var secondaryMap2 = r2.isJP ? euMap : feMap;
+          var fee2 = primaryMap2[dispId]   !== undefined ? primaryMap2[dispId]
+                   : secondaryMap2[dispId] !== undefined ? secondaryMap2[dispId]
+                   : null;
+          if (fee2 !== null) {
+            sheet.getRange(BF_START_ROW + r2.i, BF_COL_FEE).setValue(fee2);
+            Logger.log('Row %s (%s → %s): fee = %s via displayableOrderId', BF_START_ROW + r2.i, r2.orderId, dispId, fee2);
+            written++;
+          } else {
+            notSettled++;
+          }
+        } else {
+          notSettled++;
+        }
+      } catch (e) {
+        if (_isRateLimit429(e)) {
+          consec429++;
+          Logger.log('Row %s (%s): 429 resolving displayableOrderId (%s/5 consecutive)', BF_START_ROW + r2.i, r2.orderId, consec429);
+        } else {
+          Logger.log('Row %s (%s): displayableOrderId lookup error: %s', BF_START_ROW + r2.i, r2.orderId, e.message || e);
+        }
+        notSettled++;
+      }
+      Utilities.sleep(400);
+    }
+
+    if (unfilledRows.length > toResolve.length) {
+      notSettled += (unfilledRows.length - toResolve.length);
+    }
+  }
 
   Logger.log('backfillMCFFeesRecent done — written: %s, not settled: %s (older rows outside the %s-day window untouched)',
     written, notSettled, days);
