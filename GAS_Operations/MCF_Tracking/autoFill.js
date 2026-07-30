@@ -934,3 +934,90 @@ function onEdit_mcf(e) {
     return;
   }
 }
+
+/**
+ * Converts col R (Tracking Number) cells from a LIVE =AMZTK()/=AMZTK_JP() formula to a static
+ * =HYPERLINK() referencing the already-resolved tracking number in col Z, for any row where
+ * BF_COL_RESULT (Z) is already filled.
+ *
+ * Why this exists (confirmed live, 2026-07-30): 2,489 of 3,755 rows in col R still had a live
+ * AMZTK()/AMZTK_JP() formula. Every time Google Sheets does a broad recalculation (opening the
+ * file, an edit elsewhere, etc.) it fires a burst of dozens-to-hundreds of these custom-function
+ * calls simultaneously — confirmed in the Executions log, ~50+ AMZTK/AMZTK_JP calls within the
+ * same 3-second window — which floods the FBA Outbound API (GetFulfillmentOrder) and produces
+ * fresh "EU ERR: SP-API error 429" text in col R almost immediately, faster than the hourly
+ * retryR429Errors() trigger (capped at 40 rows/run, and only scanning row 1108+) can keep up
+ * with. Meanwhile 2,817 rows already have a resolved tracking number sitting unused in col Z
+ * (from backfillTrackingNumbers()) — col R was never actually wired to read it.
+ *
+ * This function costs zero SP-API calls — it's a pure spreadsheet read/write — so it's safe to
+ * run any time. Only rewrites cells whose current formula contains "AMZTK" AND whose Z value is
+ * non-empty; every other cell (already-frozen HYPERLINK, blank, or some other static value) is
+ * left completely untouched, to avoid ever clobbering a cell that isn't a live AMZTK formula.
+ * Batches contiguous qualifying rows into single setFormulas() calls for speed.
+ *
+ * Run manually from the Apps Script editor.
+ */
+function freezeTrackingColumnR() {
+  var ss    = SpreadsheetApp.getActiveSpreadsheet();
+  var sheet = ss.getSheetByName(BF_SHEET_NAME);
+  if (!sheet) throw new Error('Sheet not found: ' + BF_SHEET_NAME);
+
+  var lastRow = sheet.getLastRow();
+  if (lastRow < BF_START_ROW) return;
+
+  var numRows   = lastRow - BF_START_ROW + 1;
+  var rFormulas = sheet.getRange(BF_START_ROW, RETRY_R_COL,  numRows, 1).getFormulas();
+  var zValues   = sheet.getRange(BF_START_ROW, BF_COL_RESULT, numRows, 1).getValues();
+  var regions   = sheet.getRange(BF_START_ROW, BF_COL_REGION, numRows, 1).getValues();
+  var orderIds  = sheet.getRange(BF_START_ROW, BF_COL_ORDER,  numRows, 1).getValues();
+
+  function qualifies(i) {
+    var f = rFormulas[i][0] || '';
+    var z = String(zValues[i][0] || '').trim();
+    var orderId = String(orderIds[i][0] || '').trim();
+    return f.toUpperCase().indexOf('AMZTK') >= 0 && z !== '' && orderId !== '';
+  }
+
+  function formulaFor(i) {
+    var z = String(zValues[i][0]).trim();
+    var isJP = String(regions[i][0] || '').trim().toUpperCase() === 'JP';
+    var domain = isJP ? 'jp' : 'de';
+    return '=HYPERLINK("https://www.swiship.' + domain + '/track?id=' + z + '","' + z + '")';
+  }
+
+  var frozen = 0, runStart = -1;
+  for (var i = 0; i <= numRows; i++) {
+    var q = i < numRows && qualifies(i);
+    if (q && runStart < 0) {
+      runStart = i;
+    } else if (!q && runStart >= 0) {
+      var runLen = i - runStart;
+      var batch = [];
+      for (var j = runStart; j < i; j++) batch.push([formulaFor(j)]);
+      sheet.getRange(BF_START_ROW + runStart, RETRY_R_COL, runLen, 1).setFormulas(batch);
+      frozen += runLen;
+      runStart = -1;
+    }
+  }
+
+  Logger.log('freezeTrackingColumnR done — %s cell(s) converted from live AMZTK formula to static HYPERLINK (zero SP-API calls).', frozen);
+}
+
+/**
+ * Daily maintenance for col R (Tracking Number): resolves any newly-created rows' tracking
+ * numbers into col Z, then freezes col R's live AMZTK()/AMZTK_JP() formula to a static
+ * HYPERLINK for any row where that just became possible.
+ *
+ * Keeps col R permanently protected from the recalculation-burst 429 problem (fixed 2026-07-30 —
+ * see freezeTrackingColumnR()'s doc comment) as new orders get added over time: a brand-new row's
+ * R cell still starts as a live AMZTK formula (copied down from the row above), but this daily
+ * sweep resolves and freezes it within a day instead of leaving thousands of already-resolvable
+ * cells sitting as live formulas indefinitely.
+ *
+ * Installed as a daily time-driven trigger.
+ */
+function dailyTrackingMaintenance() {
+  backfillTrackingNumbers();
+  freezeTrackingColumnR();
+}

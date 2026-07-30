@@ -905,6 +905,41 @@ function _parseSettlementAmount(s) {
   return isNaN(n) ? 0 : n;
 }
 
+// Persists which settlement reportIds have already been scanned, as { reportId: createdTime },
+// so successive backfillMCFFeesRecent() runs can prioritize reports they haven't seen yet instead
+// of always re-scanning the same newest N (see _buildSettlementFeeMap).
+function _getScannedSettlementReportIds(ep) {
+  var raw = _prop('SETTLEMENT_SCANNED_' + ep, '');
+  if (!raw) return {};
+  try { return JSON.parse(raw); } catch (e) { return {}; }
+}
+
+// Saves the scanned-report map, pruning entries whose report has already aged out of the 90-day
+// listing window (no longer useful to remember, keeps the stored property small).
+function _saveScannedSettlementReportIds(ep, map) {
+  var cutoff = Date.now() - 90 * 24 * 3600 * 1000;
+  var pruned = {};
+  Object.keys(map).forEach(function(id) {
+    var t = new Date(map[id]).getTime();
+    if (t >= cutoff) pruned[id] = map[id];
+  });
+  PropertiesService.getScriptProperties().setProperty('SETTLEMENT_SCANNED_' + ep, JSON.stringify(pruned));
+}
+
+/**
+ * Forces every settlement report in the 90-day window to be re-scanned on the next
+ * backfillMCFFeesRecent() run, for both EU and FE. Only needed if a row was reset back to
+ * pending (e.g. via retryZeroTransportationFees()) whose fee actually posted in a report that's
+ * already marked scanned — normally _buildSettlementFeeMap()'s scanned-tracking should just be
+ * left alone. Run manually from the Apps Script editor.
+ */
+function clearSettlementScanCache() {
+  var props = PropertiesService.getScriptProperties();
+  props.deleteProperty('SETTLEMENT_SCANNED_EU');
+  props.deleteProperty('SETTLEMENT_SCANNED_FE');
+  Logger.log('clearSettlementScanCache: cleared — all settlement reports in the 90-day window will be re-scanned on the next run.');
+}
+
 /**
  * Builds a merchant-order-id → fee map from GET_V2_SETTLEMENT_REPORT_DATA_FLAT_FILE_V2 reports.
  *
@@ -962,18 +997,27 @@ function _buildSettlementFeeMap(ep, sinceDate) {
 
   // This account can settle very frequently (100+ reports observed within the 89-day window,
   // some with 200k+ lines) — cap how many get downloaded+parsed per run so this can't run away
-  // past GAS's execution time limit. Newest first: a pending row's fee is far more likely to
-  // have posted recently than in an old settlement batch, and rows already resolved are skipped
-  // on future runs anyway, so this naturally converges over successive 30-min runs.
-  reports.sort(function(a, b) { return new Date(b.createdTime) - new Date(a.createdTime); });
+  // past GAS's execution time limit.
+  //
+  // Bug fixed 2026-07-30: originally always took the N most-recent reports every run. Since
+  // brand-new reports keep appearing, any report ranked below the cap NEVER gets scanned before
+  // it ages out of the 89-day window — silently losing that data forever, not just deferring it.
+  // Fix: persist which reportIds have already been scanned (Script Properties, survives across
+  // runs) and prioritize UNSCANNED reports, oldest first — oldest because those are closest to
+  // aging out of the listing window and need to be captured before that happens. Already-scanned
+  // reports need never be re-read (settlement reports are immutable once DONE).
+  var scannedIds = _getScannedSettlementReportIds(ep);
+  var unscanned = reports.filter(function(r) { return !scannedIds[r.reportId]; });
+  unscanned.sort(function(a, b) { return new Date(a.createdTime) - new Date(b.createdTime); }); // oldest first
   var maxReports = 40;
-  var toScan = reports.slice(0, maxReports);
-  Logger.log('_buildSettlementFeeMap[%s]: %s settlement report(s) in window since %s — scanning %s most recent',
-    ep, reports.length, since.toISOString().slice(0,10), toScan.length);
+  var toScan = unscanned.slice(0, maxReports);
+  Logger.log('_buildSettlementFeeMap[%s]: %s report(s) in window since %s, %s already scanned, %s new this run (oldest-unscanned-first)',
+    ep, reports.length, since.toISOString().slice(0,10), reports.length - unscanned.length, toScan.length);
 
   var startTime = Date.now();
   var timeBudgetMs = 4.5 * 60 * 1000; // bail before GAS's execution limit, not after
   var scanned = 0;
+  var newlyScanned = {};
 
   for (var ri = 0; ri < toScan.length; ri++) {
     if (Date.now() - startTime > timeBudgetMs) {
@@ -1013,6 +1057,7 @@ function _buildSettlementFeeMap(ep, sinceDate) {
         if (amt === 0) continue;
         feeMap[moi] = (feeMap[moi] || 0) + amt;
       }
+      newlyScanned[r.reportId] = r.createdTime; // only mark done on full success — a failed report retries next run
     } catch (e) {
       // spapiFetchWithRetry above already retries once on 429 (15s wait) — if it still failed,
       // this report is simply skipped and picked up on a later run.
@@ -1021,7 +1066,12 @@ function _buildSettlementFeeMap(ep, sinceDate) {
     Utilities.sleep(800); // pace document downloads — confirmed live this endpoint 429s in bursts
   }
 
-  Logger.log('_buildSettlementFeeMap[%s]: resolved fees for %s order id(s)', ep, Object.keys(feeMap).length);
+  var mergedScanned = scannedIds;
+  Object.keys(newlyScanned).forEach(function(id) { mergedScanned[id] = newlyScanned[id]; });
+  _saveScannedSettlementReportIds(ep, mergedScanned);
+
+  Logger.log('_buildSettlementFeeMap[%s]: resolved fees for %s order id(s) — %s report(s) newly marked scanned (%s total tracked)',
+    ep, Object.keys(feeMap).length, Object.keys(newlyScanned).length, Object.keys(mergedScanned).length);
   return feeMap;
 }
 
