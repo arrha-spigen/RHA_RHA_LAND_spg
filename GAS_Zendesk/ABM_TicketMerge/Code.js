@@ -978,6 +978,13 @@ function testMergeOnTicket(ticketId) {
 // GCX Reply web app (owns the ABM_Relay_Log sheet + its endpoints).
 const GCX_GAS_URL = 'https://script.google.com/macros/s/AKfycbw2Vdwk197LXB6oUAzuHS8sKamD5uqKZJDLvcHzbftWJk-M65XV1fAnTqiZo7ZEm4hk/exec';
 
+// Minimum age (from the reply's own created_at) before reconciliation will
+// consider it — see the usage site in reconcileAbmRelays_ for the race this
+// closes (reconciliation running before the live browser relay has finished
+// logging its own attempt). Comfortably longer than the live relay's own
+// retry budget (up to 3 attempts with backoff) could plausibly take.
+const ABM_RECONCILE_MIN_AGE_MS = 10 * 60 * 1000; // 10 minutes
+
 // EU marketplaces whose Seller Central messaging is served from amazon.de
 // (single EU login covers them via marketplaceId) — mirrors GCX Reply's
 // EU_SC_REDIRECT so the queued row's marketplace matches what the browser
@@ -1045,7 +1052,7 @@ function reconcileAbmRelays_(lookbackHours) {
   const cutoff = new Date(Date.now() - hours * 3600 * 1000).toISOString().replace(/\.\d+Z$/, 'Z');
   const query = encodeURIComponent(`type:ticket tags:${ABM_TAG} updated>${cutoff}`);
 
-  const summary = { scanned: 0, queued: 0, skippedNoCase: 0, skippedNoReply: 0, alreadyLogged: 0, queuedTickets: [] };
+  const summary = { scanned: 0, queued: 0, skippedNoCase: 0, skippedNoReply: 0, skippedTooRecent: 0, alreadyLogged: 0, queuedTickets: [] };
 
   let url = `/api/v2/search.json?query=${query}&sort_by=updated_at&sort_order=desc`;
   let guard = 0;
@@ -1061,6 +1068,27 @@ function reconcileAbmRelays_(lookbackHours) {
 
       const reply = latestAgentPublicComment_(t.id, t.requester_id);
       if (!reply) { summary.skippedNoReply++; return; }
+
+      // A SEPARATE bug from the dedup-window one above: the LIVE browser
+      // relay (relayAbmReply_) fires the instant an agent's reply posts, but
+      // its round-trip (send + log) takes real time — anywhere from a couple
+      // seconds to longer with retries. If this reconciliation run's own
+      // scheduled tick happens to land in that gap, its dedup check (however
+      // thorough) finds NOTHING yet, because the live relay simply hasn't
+      // logged its own attempt yet — so it queues a genuine duplicate that
+      // some browser then actually sends. Confirmed live via ABM_Relay_Log
+      // (2026-07-30): 22 real tickets got double-sent this way, with gaps as
+      // small as 6 seconds between the live relay's send and reconciliation's
+      // duplicate (e.g. #1000154373, #1000154472, #1000154485) — no amount of
+      // improving the DEDUP CHECK closes this, since the race is about
+      // WHETHER a row exists yet at all, not whether it's visible once it
+      // does. Fix: never consider a reply for reconciliation until it's had a
+      // safe head start — comfortably longer than the live relay's own retry
+      // budget (up to 3 attempts with backoff) could plausibly take. A reply
+      // that's still this young will simply be reconsidered on next run.
+      const replyAgeMs = Date.now() - new Date(reply.created_at).getTime();
+      if (replyAgeMs < ABM_RECONCILE_MIN_AGE_MS) { summary.skippedTooRecent++; return; }
+
       const text = (reply.plain_body || '').trim();
       if (!text) { summary.skippedNoReply++; return; }
 
