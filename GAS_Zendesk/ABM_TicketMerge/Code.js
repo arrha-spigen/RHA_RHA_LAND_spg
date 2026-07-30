@@ -51,6 +51,21 @@ function zdAuthHeader_() {
   return 'Basic ' + Utilities.base64Encode(`${ZENDESK_EMAIL}/token:${ZENDESK_TOKEN}`);
 }
 
+// Found live 2026-07-30 investigating ticket #1000155549 (never got its
+// inbound cleanup/collapse pair): the webhook trigger fired and returned
+// HTTP 200, but handleNewAbmTicket_ had actually thrown mid-run —
+// `Exception: Address unavailable: https://spigenhelp.zendesk.com/api/v2/...`
+// — a transient GAS UrlFetchApp connection-level failure that `muteHttpExceptions`
+// does NOT catch (that flag only suppresses non-2xx HTTP responses; this is a
+// failure to even get a response). Since Apps Script's ContentService can't
+// return a real non-200 status from doPost, Zendesk had no signal to retry —
+// it saw 200 and considered the webhook successfully delivered, permanently
+// stranding the ticket. Scanned every webhook invocation over the past week:
+// found 4 tickets hit this exact pattern (on 3 different endpoints — getUser_,
+// search.json, getTicket_ — confirming it's generic UrlFetchApp flakiness, not
+// one bad call site), roughly one every few days. Fixed at the shared fetch
+// layer so every call site gets the retry, not just the ones seen so far.
+const ZD_FETCH_RETRIES = 3;
 function zdFetch_(path, options) {
   const url = path.startsWith('http') ? path : `https://${ZENDESK_SUBDOMAIN}.zendesk.com${path}`;
   const opts = Object.assign({
@@ -58,13 +73,21 @@ function zdFetch_(path, options) {
     contentType: 'application/json',
     muteHttpExceptions: true
   }, options || {});
-  const res = UrlFetchApp.fetch(url, opts);
-  const code = res.getResponseCode();
-  const body = res.getContentText();
-  if (code >= 300) {
-    throw new Error(`Zendesk API ${opts.method || 'GET'} ${url} -> ${code}: ${body}`);
+  for (let attempt = 1; attempt <= ZD_FETCH_RETRIES; attempt++) {
+    let res;
+    try {
+      res = UrlFetchApp.fetch(url, opts);
+    } catch (e) {
+      if (attempt < ZD_FETCH_RETRIES) { Utilities.sleep(500 * attempt); continue; }
+      throw new Error(`Zendesk API ${opts.method || 'GET'} ${url} -> connection failed after ${ZD_FETCH_RETRIES} attempts: ${e.message}`);
+    }
+    const code = res.getResponseCode();
+    const body = res.getContentText();
+    if (code >= 300) {
+      throw new Error(`Zendesk API ${opts.method || 'GET'} ${url} -> ${code}: ${body}`);
+    }
+    return body ? JSON.parse(body) : {};
   }
-  return body ? JSON.parse(body) : {};
 }
 
 function getTicket_(ticketId) {
