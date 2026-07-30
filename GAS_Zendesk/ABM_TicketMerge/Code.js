@@ -626,14 +626,55 @@ function testCleanupOnTicket(ticketId) {
   return result;
 }
 
-// Seller Central case ID embedded in the Amazon buyer proxy from-address,
-// e.g. "s0574jllj4n84kf+76c079d3-2f98-4aec-bc42-16aab22433ee@marketplace.amazon.co.jp".
-// null when the address has no such segment (older tickets, empty address).
+const CASE_ID_RE = /\+([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})@marketplace\./i;
+
+function caseIdFromAddress_(addr) {
+  const m = String(addr || '').match(CASE_ID_RE);
+  return m ? m[1] : null;
+}
+
+// Seller Central case ID for a ticket. Confirmed live (2026-07-30, ticket
+// #1000155523 investigation) that Amazon's ABM notification email NEVER
+// carries the case-specific "+uuid" address in the literal From: header —
+// `ticket.via.source.from.address` is always the bare buyer-proxy address
+// (e.g. "wplt48syb1tpfwx@marketplace.amazon.de"). The "+uuid" address is only
+// present as one of the message's OTHER original recipients (confirmed
+// identical across an order-less ticket and an order-linked invoice-request
+// ticket, so this isn't specific to one ABM message type) — Zendesk exposes
+// that only via the ticket's first audit event
+// (`via.source.from.original_recipients`), never on the plain ticket object.
+// This means `.address` alone NEVER resolves a case ID in practice — every
+// prior "confirmed working" case-ID resolution actually only ever worked via
+// the caller's separate Order-ID/ASIN fallback (see relayAbmReply_ in GCX
+// Reply.user.js). reconcileAbmRelays_ below has NO such fallback (it can't —
+// order/ASIN matching needs a live, cookie-authenticated Seller Central
+// browser session, which a GAS backend can't hold), so it silently could
+// never rescue anything until this fix. Kept the from.address check FIRST
+// (free, no extra API call) in case Amazon ever changes the email format to
+// put it there directly; falls back to the audits lookup (one extra API
+// call, only paid when the fast path misses).
 function caseIdFromTicket_(ticket) {
   const addr = (ticket && ticket.via && ticket.via.source && ticket.via.source.from
     && ticket.via.source.from.address) || '';
-  const m = addr.match(/\+([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})@marketplace\./i);
-  return m ? m[1] : null;
+  const direct = caseIdFromAddress_(addr);
+  if (direct) return direct;
+  return (ticket && ticket.id) ? caseIdFromOriginalRecipients_(ticket.id) : null;
+}
+
+function caseIdFromOriginalRecipients_(ticketId) {
+  try {
+    const data = zdFetch_(`/api/v2/tickets/${ticketId}/audits.json?sort_order=asc`);
+    const first = (data.audits || [])[0];
+    const recipients = (first && first.via && first.via.source && first.via.source.from
+      && first.via.source.from.original_recipients) || [];
+    for (const addr of recipients) {
+      const c = caseIdFromAddress_(addr);
+      if (c) return c;
+    }
+  } catch (e) {
+    Logger.log(`caseIdFromOriginalRecipients_(${ticketId}): ${e.message}`);
+  }
+  return null;
 }
 
 // Amazon's ABM buyer-proxy address is unique PER CASE (the "+<uuid>" segment
