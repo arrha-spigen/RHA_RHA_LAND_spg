@@ -710,9 +710,16 @@ function backfillMCFFeesRecent(days) {
 
 /**
  * STEP 1 — run this first to undo the bad freeze.
- * Scans for HYPERLINK formulas whose "tracking number" looks like a price
- * (pure decimal number < 1000, e.g. "22.99") and restores the original
+ * Scans for HYPERLINK formulas whose "tracking number" looks like a price/margin value
+ * (see _looksLikePriceNotTracking()) and restores the original
  * =IF(OR(B…,Q…),"",IF(B…<>"JP", HYPERLINK(…AMZTK…), HYPERLINK(…AMZTK_JP…))) formula.
+ *
+ * FIXED 2026-07-31: this used to have its own inline check (`parseFloat(m[2]) >= 500`) instead of
+ * calling the shared _looksLikePriceNotTracking(). That threshold only caught EUR/GBP-style
+ * decimal prices and completely missed JPY-style col Z margin values (bare integers, no decimal,
+ * routinely in the thousands — e.g. "2799") — a real corruption incident on JP rows went
+ * undetected by this exact function until caught manually. Now uses the same, more reliable
+ * shared heuristic everywhere so the two checks can't silently drift apart again.
  */
 function unfreezeAmztkFormulas() {
   var sheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName(BF_SHEET_NAME);
@@ -724,7 +731,7 @@ function unfreezeAmztkFormulas() {
 
   var numRows     = lastRow - BF_START_ROW + 1;
   var allFormulas = sheet.getRange(BF_START_ROW, 1, numRows, lastCol).getFormulas();
-  // Matches =HYPERLINK("https://www.swiship.XX/track?id=22.99","22.99")
+  // Matches =HYPERLINK("https://www.swiship.XX/track?id=2799","2799")
   var feePattern  = /^=HYPERLINK\("https:\/\/www\.swiship\.(de|jp)\/track\?id=(\d+\.?\d*)","(\d+\.?\d*)"\)$/i;
 
   var restored = 0;
@@ -736,8 +743,7 @@ function unfreezeAmztkFormulas() {
       var f = allFormulas[i][c] || '';
       var m = f.match(feePattern);
       if (!m) continue;
-      // Tracking numbers are never plain small decimals — prices are (< 500 €/¥)
-      if (parseFloat(m[2]) >= 500) continue;
+      if (!_looksLikePriceNotTracking(m[2])) continue;
       var orig =
         '=IF(OR(' + bRef + '="",' + qRef + '=""),"",IF(' + bRef + '<>"JP",' +
         'HYPERLINK("https://www.swiship.de/track?id="&AMZTK(' + qRef + '),AMZTK(' + qRef + ')),' +
@@ -980,12 +986,19 @@ function onEdit_mcf(e) {
  *
  * Run manually from the Apps Script editor.
  */
+// FIXED 2026-07-31: the original "< 500" threshold only caught EUR/GBP-style decimal prices
+// (e.g. "17.99"). It completely missed JPY-style col Z margin values, which are bare integers
+// with NO decimal point and are routinely in the thousands (e.g. "2799", "4712") — well over 500.
+// Confirmed live: JP rows corrupted by the same freezeTrackingColumnR() bug slipped through this
+// exact check undetected, in both the original incident and the first "clean" verification pass.
+// Real tracking numbers observed on this sheet are either alphanumeric with a country prefix
+// ("UK4618438146", "JJD000390016584418318") or a bare digit string of 12+ digits
+// ("371434845460", "00340434685209460376") — never a decimal, never under 8 digits. That's a much
+// safer signal than any currency-shaped magnitude threshold.
 function _looksLikePriceNotTracking(v) {
-  // Real tracking numbers are never a bare decimal under 500 (e.g. "17.99") — they're either
-  // alphanumeric ("JJD000390016584418318") or a long digit string with no decimal point that
-  // parses to a much larger number. Same heuristic already used by unfreezeAmztkFormulas().
-  if (!/^\d+\.?\d*$/.test(v)) return false;
-  return parseFloat(v) < 500;
+  if (!/^\d+\.?\d*$/.test(v)) return false;   // has letters → real tracking-number shape, not a price
+  if (v.indexOf('.') >= 0) return true;        // any decimal point at all → price, never a tracking number
+  return v.length < 8;                         // short bare integer → margin/price, not a 12+ digit tracking number
 }
 
 // DISABLED 2026-07-31 — see backfillTrackingNumbers()'s doc comment. Col Z (BF_COL_RESULT) is a

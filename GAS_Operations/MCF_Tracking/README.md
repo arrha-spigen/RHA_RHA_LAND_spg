@@ -185,7 +185,25 @@ number, 2,613 (70%) were plain prices). `freezeTrackingColumnR()`'s first run fr
 values straight into col R, displaying numbers like `17.99` where a tracking number like
 `JJD000390016584418318` should have been. Caught and reported immediately by the sheet owner;
 reverted live via `unfreezeAmztkFormulas()` (1,448 cells restored), confirmed clean by a full
-column scan (0 remaining price-like frozen cells).
+column scan against a "< 500" price-magnitude heuristic (0 remaining cells flagged).
+
+**That heuristic itself had a blind spot, and it hid a second corrupted pocket.** The "< 500"
+threshold was tuned for EUR/GBP-style decimal prices (e.g. `17.99`) and completely missed col Z's
+JPY-region margin values, which are bare integers with no decimal point and are routinely in the
+thousands (e.g. `2799`, `4712`, `3222`) — comfortably over 500. Every JP row's col R had been
+frozen the same way and displayed a plain yen amount instead of a real Yamato tracking number
+(confirmed via a raw `GetFulfillmentOrder` dump: the actual tracking numbers, e.g.
+`371434845460`, were never anywhere near `2799`). Reported by the sheet owner again with a
+screenshot. Fixed by replacing the magnitude threshold with a shape-based check in
+`_looksLikePriceNotTracking()`: any value containing a decimal point, or any bare digit string
+under 8 digits, is treated as a price/margin, never a tracking number (real tracking numbers on
+this sheet are always either alphanumeric with a country prefix, or a 12+ digit all-numeric
+string). `unfreezeAmztkFormulas()` was also fixed to call this shared function instead of its own
+separate, independently-wrong inline check — the two had drifted apart, which is exactly how the
+JP pocket went undetected through the first "clean" verification. Re-running
+`unfreezeAmztkFormulas()` with the fixed heuristic restored **73 more cells**; a follow-up scan
+confirmed 0 remaining price-like frozen cells anywhere in col R, and spot-checked JP rows now
+resolve to real Yamato tracking numbers.
 
 ### `freezeTrackingColumnR()`, `backfillTrackingNumbers()`, `dailyTrackingMaintenance()` — DISABLED 2026-07-31
 All three are now stubs that throw immediately instead of running, so a stray manual run (or a
