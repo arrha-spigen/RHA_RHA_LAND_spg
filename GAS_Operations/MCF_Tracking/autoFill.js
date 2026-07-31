@@ -5,19 +5,31 @@ var BF_START_ROW   = 4;    // first data row (skip headers)
 var BF_COL_REGION  = 2;    // B — "JP" triggers FE-first, anything else EU-first
 var BF_COL_ORDER   = 17;   // Q — sellerFulfillmentOrderId
 var BF_COL_SENT    = 16;   // P — MCF sent date (yyyy-mm-dd)
-var BF_COL_RESULT  = 26;   // Z — static tracking number
-                            //     replace =AMZTK(Q…) formula with =IF(Z…="","",HYPERLINK(…Z…,Z…))
+var BF_COL_RESULT  = 26;   // Z — NOT a tracking number cache (confirmed 2026-07-31: it's a live
+                            //     ARRAYFORMULA computing "Product Price − Shipping Fee", spilled
+                            //     from Z3; verified across all 3,755 data rows — 0 held a formula
+                            //     at the row level, 0 looked like a tracking number, 2,613 (70%)
+                            //     were plain prices). This comment used to claim otherwise — that
+                            //     was wrong and caused the col R corruption incident. Do not read
+                            //     from or write to this column expecting tracking data.
 var BF_COL_FEE     = 25;   // Y — Transportation Fee (€, ¥, £) written by backfillMCFFees()
 
 /**
- * Writes tracking numbers as static values into BF_COL_RESULT.
- * - Skips rows that already have a valid (non-error) tracking number.
- * - Retries rows whose result cell contains an error string ("EU ERR:…", "ERR:…", etc.).
- * - On 429 / transient error, writes the error back to the cell so the next run retries it.
+ * DISABLED 2026-07-31 — do not re-enable without picking a different target column.
  *
- * Run manually or set a daily time-based trigger on this function.
+ * This function assumed BF_COL_RESULT (Z) was an available static cache for tracking numbers.
+ * Confirmed false: Z is a live ARRAYFORMULA (anchored at Z3) computing
+ * "Product Price − Transportation Fee" across the entire column — there is no free column here
+ * to write tracking numbers into. Every "already has a value" row this function skipped was
+ * actually skipping a live profit-margin number, and every row where Z looked resolvable via
+ * freezeTrackingColumnR() got a price frozen into col R as a fake tracking number — that's the
+ * corruption incident from earlier today. Left in place (not deleted) for reference; throws
+ * immediately so a manual run from the editor can't repeat the damage.
  */
 function backfillTrackingNumbers() {
+  throw new Error('backfillTrackingNumbers() is disabled: col Z (BF_COL_RESULT) is a live profit-margin ' +
+    'ARRAYFORMULA, not a tracking-number cache. See the function doc comment before re-enabling.');
+  // eslint-disable-next-line no-unreachable
   var ss    = SpreadsheetApp.getActiveSpreadsheet();
   var sheet = ss.getSheetByName(BF_SHEET_NAME);
   if (!sheet) throw new Error('Sheet not found: ' + BF_SHEET_NAME);
@@ -956,9 +968,36 @@ function onEdit_mcf(e) {
  * left completely untouched, to avoid ever clobbering a cell that isn't a live AMZTK formula.
  * Batches contiguous qualifying rows into single setFormulas() calls for speed.
  *
+ * BUG FIXED 2026-07-30 (same day, caught by user within minutes): the first version of this
+ * function only checked that col Z was non-empty before freezing it into col R as "the tracking
+ * number" — it never validated that the value actually looked like one. For a batch of rows, col
+ * Z held a plain price (e.g. "17.99") instead of a tracking number, and got frozen straight into
+ * col R, displaying prices where tracking numbers should be. Reverted live via the existing
+ * unfreezeAmztkFormulas() (already built for exactly this "tracking number looks like a price"
+ * shape) and fixed here with the same validation that function already uses: a bare number under
+ * 500 is treated as a price, never a tracking number, and is now skipped rather than frozen —
+ * that row's live AMZTK formula is left alone so it keeps trying to resolve the real value.
+ *
  * Run manually from the Apps Script editor.
  */
+function _looksLikePriceNotTracking(v) {
+  // Real tracking numbers are never a bare decimal under 500 (e.g. "17.99") — they're either
+  // alphanumeric ("JJD000390016584418318") or a long digit string with no decimal point that
+  // parses to a much larger number. Same heuristic already used by unfreezeAmztkFormulas().
+  if (!/^\d+\.?\d*$/.test(v)) return false;
+  return parseFloat(v) < 500;
+}
+
+// DISABLED 2026-07-31 — see backfillTrackingNumbers()'s doc comment. Col Z (BF_COL_RESULT) is a
+// live profit-margin ARRAYFORMULA, not a resolved-tracking-number cache, so freezing its value
+// into col R produces fake tracking numbers that are actually prices. This is what corrupted col R
+// earlier today; the _looksLikePriceNotTracking() guard below only caught values under 500, which
+// is not a real fix — it's disabled outright until col R's 429 problem gets a real target column
+// (or a different approach) instead of Z.
 function freezeTrackingColumnR() {
+  throw new Error('freezeTrackingColumnR() is disabled: col Z (BF_COL_RESULT) is a live profit-margin ' +
+    'ARRAYFORMULA, not a tracking-number cache. See the function doc comment before re-enabling.');
+  // eslint-disable-next-line no-unreachable
   var ss    = SpreadsheetApp.getActiveSpreadsheet();
   var sheet = ss.getSheetByName(BF_SHEET_NAME);
   if (!sheet) throw new Error('Sheet not found: ' + BF_SHEET_NAME);
@@ -972,11 +1011,15 @@ function freezeTrackingColumnR() {
   var regions   = sheet.getRange(BF_START_ROW, BF_COL_REGION, numRows, 1).getValues();
   var orderIds  = sheet.getRange(BF_START_ROW, BF_COL_ORDER,  numRows, 1).getValues();
 
+  var skippedPriceLike = 0;
+
   function qualifies(i) {
     var f = rFormulas[i][0] || '';
     var z = String(zValues[i][0] || '').trim();
     var orderId = String(orderIds[i][0] || '').trim();
-    return f.toUpperCase().indexOf('AMZTK') >= 0 && z !== '' && orderId !== '';
+    if (f.toUpperCase().indexOf('AMZTK') < 0 || z === '' || orderId === '') return false;
+    if (_looksLikePriceNotTracking(z)) { skippedPriceLike++; return false; }
+    return true;
   }
 
   function formulaFor(i) {
@@ -1001,23 +1044,15 @@ function freezeTrackingColumnR() {
     }
   }
 
-  Logger.log('freezeTrackingColumnR done — %s cell(s) converted from live AMZTK formula to static HYPERLINK (zero SP-API calls).', frozen);
+  Logger.log('freezeTrackingColumnR done — %s cell(s) converted from live AMZTK formula to static HYPERLINK (zero SP-API calls). %s row(s) skipped because col Z held a price-like value, not a tracking number.',
+    frozen, skippedPriceLike);
 }
 
-/**
- * Daily maintenance for col R (Tracking Number): resolves any newly-created rows' tracking
- * numbers into col Z, then freezes col R's live AMZTK()/AMZTK_JP() formula to a static
- * HYPERLINK for any row where that just became possible.
- *
- * Keeps col R permanently protected from the recalculation-burst 429 problem (fixed 2026-07-30 —
- * see freezeTrackingColumnR()'s doc comment) as new orders get added over time: a brand-new row's
- * R cell still starts as a live AMZTK formula (copied down from the row above), but this daily
- * sweep resolves and freezes it within a day instead of leaving thousands of already-resolvable
- * cells sitting as live formulas indefinitely.
- *
- * Installed as a daily time-driven trigger.
- */
+// DISABLED 2026-07-31 — both functions this calls are disabled (see their doc comments); the
+// underlying premise (col Z as a tracking-number cache) is false. The trigger for this function
+// was already deleted live during the col R corruption cleanup; this stub just makes sure a stray
+// manual run or a re-added trigger fails loudly instead of writing bad data again.
 function dailyTrackingMaintenance() {
-  backfillTrackingNumbers();
-  freezeTrackingColumnR();
+  throw new Error('dailyTrackingMaintenance() is disabled: it composes backfillTrackingNumbers() and ' +
+    'freezeTrackingColumnR(), both disabled because col Z is not a tracking-number cache.');
 }

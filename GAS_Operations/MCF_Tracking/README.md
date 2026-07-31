@@ -12,7 +12,7 @@ Google Apps Script project for Spigen GCX — Multi-Channel Fulfillment (MCF) or
 | File | Purpose |
 |------|---------|
 | `sp-api.js` | SP-API auth (LWA + AWS SigV4), core fetch, retry logic, and all custom sheet formulas (`AMZTK`, `AMZTK_JP`, `MCFFee`, `MCFFee_JP`, `getMcfStockByAsin`, `MCFFeeDebug`) |
-| `autoFill.js` | `onEdit` trigger, `backfillTrackingNumbers()`/`backfillMCFFees()`/`backfillMCFFeesRecent()` (batch fee/tracking writes to col Y/Z), `freezeTrackingColumnR()` + `dailyTrackingMaintenance()` (converts col R off live AMZTK formulas) |
+| `autoFill.js` | `onEdit` trigger, `backfillMCFFees()`/`backfillMCFFeesRecent()` (batch fee writes to col Y via Settlement Reports). `backfillTrackingNumbers()`, `freezeTrackingColumnR()`, `dailyTrackingMaintenance()` are **disabled** (col Z is not a tracking-number cache — see `retryR429Errors()` section) |
 | `main.js` | `MCFReporter` — daily Google Chat card alert listing rows missing a tracking number |
 | `MCFGen.js` | (Archived / commented out) MCF order creation and stock-check helpers via SP-API |
 | `triggerGen.js` | `triggerTester()` — schedules a one-off `MCFReporter` test run 1 minute out |
@@ -129,8 +129,11 @@ Writes MCF fulfillment fees as **static values** into col Y (`Transportation Fee
 backfillMCFFees()
 ```
 
-### `backfillTrackingNumbers()`
-Same pattern for tracking numbers → writes static values into col Z.
+### `backfillTrackingNumbers()` — DISABLED 2026-07-31
+~~Same pattern for tracking numbers → writes static values into col Z.~~ This assumed col Z
+(`BF_COL_RESULT`) was a free static cache. It isn't — see the "Root cause" note below for what
+actually happened. The function now throws immediately instead of running. Left in the file for
+reference; do not re-enable without re-reading that section and picking a real target column.
 
 ### `retryR429Errors()`
 Scans col R (row 1108+) for cells whose live `=AMZTK()`/`=AMZTK_JP()` formula is currently
@@ -163,49 +166,41 @@ the codebase). Manage or remove it from **Apps Script editor → Triggers** (clo
 retryR429Errors()
 ```
 
-**Root cause fixed 2026-07-30 — read this before touching `retryR429Errors()` again:** the 429s
-weren't primarily an SP-API problem, they were a *design* problem. As of 2026-07-30, **2,489 of
-3,755** col R cells still held a live `=AMZTK()`/`=AMZTK_JP()` formula. Every time Google Sheets
+**2026-07-30 diagnosis (later found incomplete — see the 2026-07-31 correction right below):** the
+429s weren't primarily an SP-API problem, they were a *design* problem. As of 2026-07-30, **2,489
+of 3,755** col R cells still held a live `=AMZTK()`/`=AMZTK_JP()` formula. Every time Google Sheets
 does a broad recalculation (opening the file, any edit, etc.) it fires a burst of dozens-to-
 hundreds of these custom-function calls **simultaneously** — confirmed live in the Executions log,
 ~50+ AMZTK/AMZTK_JP calls within the same 3-second window — which floods the FBA Outbound API
 (`GetFulfillmentOrder`) and produces fresh 429s faster than this hourly, 40-row-capped,
-row-1108+-only retry could ever keep up with. Meanwhile **2,817 rows already had a resolved
-tracking number sitting unused in col Z** (from `backfillTrackingNumbers()`) — col R was never
-actually wired to read it.
+row-1108+-only retry could ever keep up with. The diagnosis at the time *assumed* col Z
+(`BF_COL_RESULT`) held 2,817 already-resolved tracking numbers sitting unused, and built
+`freezeTrackingColumnR()` to copy those into col R as static values.
 
-### `freezeTrackingColumnR()` — the real fix
-Converts col R from a live `AMZTK()`/`AMZTK_JP()` formula to a static `=HYPERLINK()` referencing
-the already-resolved value in col Z (`BF_COL_RESULT`), for any row where Z is already filled.
-**Zero SP-API calls** — pure spreadsheet read/write — so it's always safe to run. Only touches
-cells whose formula contains `"AMZTK"` AND whose Z value is non-empty; every other cell (already
-frozen, blank, or some other static value) is left untouched. Batches contiguous qualifying rows
-into single `setFormulas()` calls for speed.
+**That assumption was wrong, and acting on it corrupted col R the same day.** Col Z is not a
+tracking-number cache — it's a live `ARRAYFORMULA` anchored at Z3 that computes
+`Product Price − Transportation Fee` for the whole column (confirmed 2026-07-31 by reading Z3's
+actual formula, and by scanning all 3,755 rows: 0 held anything that looked like a tracking
+number, 2,613 (70%) were plain prices). `freezeTrackingColumnR()`'s first run froze those price
+values straight into col R, displaying numbers like `17.99` where a tracking number like
+`JJD000390016584418318` should have been. Caught and reported immediately by the sheet owner;
+reverted live via `unfreezeAmztkFormulas()` (1,448 cells restored), confirmed clean by a full
+column scan (0 remaining price-like frozen cells).
 
-First run (2026-07-30) converted **1,521 cells** in ~8 seconds. Of the remaining 968 live-formula
-cells, **all 968 have a blank order ID** — their formula's own `IF(OR(B="",Q=""),"","")` guard
-means they never call the API at all regardless. Result: 429 count dropped from **47 → 10**
-immediately, with no further SP-API load.
+### `freezeTrackingColumnR()`, `backfillTrackingNumbers()`, `dailyTrackingMaintenance()` — DISABLED 2026-07-31
+All three are now stubs that throw immediately instead of running, so a stray manual run (or a
+re-added trigger) can't repeat the corruption. The `dailyTrackingMaintenance()` daily trigger that
+caused the incident has already been deleted from **Apps Script editor → Triggers**. Only
+`backfillMCFFeesRecent()` (30 min) and `retryR429Errors()` (hourly) triggers remain active.
 
-```javascript
-// Safe to run any time, zero API cost:
-freezeTrackingColumnR()
-```
-
-### `dailyTrackingMaintenance()` — keeps this fixed going forward
-```javascript
-function dailyTrackingMaintenance() {
-  backfillTrackingNumbers();
-  freezeTrackingColumnR();
-}
-```
-Installed as a **daily** time-driven trigger (00:00–01:00 KST). New rows still start with a live
-AMZTK formula (copied down from the row above) — this sweep resolves and freezes each one within
-a day instead of letting thousands of already-resolvable cells sit as live formulas indefinitely,
-which is exactly the condition that caused the original problem. `retryR429Errors()`'s hourly
-trigger is still in place as a backstop for whatever's left, but should see far less to do now —
-its `RETRY_R_START_ROW = 1108` assumption is also stale (live 429s were observed as early as row
-29), worth revisiting if it's ever relied on again.
+**Do not re-enable these** without first deciding what column (if any) can safely hold a resolved
+tracking-number cache — col Z cannot, since it's genuinely in use for the profit-margin figure.
+Options not yet evaluated: use a new/unused column as the real cache; skip caching entirely and
+throttle the live `AMZTK()`/`AMZTK_JP()` calls directly (e.g. stagger recalculation, add a sheet
+add-on level rate limiter); or keep relying on `retryR429Errors()` alone and simply widen its
+row range past the stale `RETRY_R_START_ROW = 1108` assumption (live 429s were observed as early
+as row 29). This is an open design question — raise it with the sheet owner before building
+anything new here.
 
 ### `retryZeroTransportationFees()`
 Cleans up the col Y "literal 0" backlog left over from the GCX fee-type filtering bug (see the
