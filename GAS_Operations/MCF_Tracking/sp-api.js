@@ -1100,10 +1100,22 @@ function _buildSettlementFeeMap(ep, sinceDate) {
   var timeBudgetMs = 4.5 * 60 * 1000; // bail before GAS's execution limit, not after
   var scanned = 0;
   var newlyScanned = {};
+  // FIXED 2026-08-01: this loop had no circuit breaker — under sustained account-wide
+  // throttling (confirmed live: runs where every single attempt 429s) it would burn the entire
+  // 4.5-minute budget retrying doomed reports one by one, making zero progress each time.
+  // retryR429Errors() (col R) already bails out after 5 consecutive 429s for the same reason;
+  // mirror that here instead of wasting the whole run when the API is clearly still saturated.
+  var maxConsec429 = 5;
+  var consec429 = 0;
 
   for (var ri = 0; ri < toScan.length; ri++) {
     if (Date.now() - startTime > timeBudgetMs) {
       Logger.log('_buildSettlementFeeMap[%s]: time budget reached — scanned %s/%s, rest deferred to next run', ep, scanned, toScan.length);
+      break;
+    }
+    if (consec429 >= maxConsec429) {
+      Logger.log('_buildSettlementFeeMap[%s]: %s consecutive 429s — quota clearly still exhausted, stopping early (scanned %s/%s, rest deferred to next run)',
+        ep, consec429, scanned, toScan.length);
       break;
     }
     var r = toScan[ri];
@@ -1147,10 +1159,12 @@ function _buildSettlementFeeMap(ep, sinceDate) {
         if (!reportIdByOrder[moi]) reportIdByOrder[moi] = r.reportId;
       }
       newlyScanned[r.reportId] = r.createdTime; // only mark done on full success — a failed report retries next run
+      consec429 = 0;
     } catch (e) {
       // spapiFetchWithRetry above already retries once on 429 (15s wait) — if it still failed,
       // this report is simply skipped and picked up on a later run.
       Logger.log('  report %s: error — %s', r.reportId, e.message || e);
+      if (_isRateLimit429(e)) consec429++;
     }
     Utilities.sleep(800); // pace document downloads — confirmed live this endpoint 429s in bursts
   }
