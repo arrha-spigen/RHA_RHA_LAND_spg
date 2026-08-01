@@ -940,6 +940,87 @@ function clearSettlementScanCache() {
   Logger.log('clearSettlementScanCache: cleared — all settlement reports in the 90-day window will be re-scanned on the next run.');
 }
 
+/***** ========= PERSISTENT FEE CACHE (fixes the "steady state = permanently stuck" bug) ========= *****/
+// FIXED 2026-07-31: _buildSettlementFeeMap() used to return a fee map built ONLY from reports
+// scanned in the CURRENT run. Once every report in the 90-day window had been marked "scanned"
+// (which happens naturally after enough runs — confirmed live: 109/109 already scanned), the map
+// came back empty on every subsequent run, and backfillMCFFeesRecent() permanently reported every
+// remaining pending row as "not settled" — even for orders whose fee had already been extracted
+// in a past run and then silently discarded, because only the report-id bookkeeping was persisted,
+// never the fee data itself. This sheet-backed cache persists every (merchant-order-id → fee)
+// pair the moment it's extracted, independent of whether it matched a currently-pending row, so
+// it accumulates across runs instead of resetting to empty once scanning catches up.
+var FEE_CACHE_SHEET_NAME = '_SettlementFeeCache';
+var FEE_CACHE_HEADER = ['merchant-order-id', 'fee', 'endpoint', 'reportId', 'cachedAt'];
+
+function _getFeeCacheSheet() {
+  var ss = SpreadsheetApp.getActiveSpreadsheet();
+  var sheet = ss.getSheetByName(FEE_CACHE_SHEET_NAME);
+  if (!sheet) {
+    sheet = ss.insertSheet(FEE_CACHE_SHEET_NAME);
+    sheet.getRange(1, 1, 1, FEE_CACHE_HEADER.length).setValues([FEE_CACHE_HEADER]);
+    sheet.hideSheet();
+  }
+  return sheet;
+}
+
+// Loads the whole cache into { [merchant-order-id]: fee }.
+function _loadFeeCache() {
+  var sheet = _getFeeCacheSheet();
+  var lastRow = sheet.getLastRow();
+  if (lastRow < 2) return {};
+  var data = sheet.getRange(2, 1, lastRow - 1, 2).getValues();
+  var map = {};
+  data.forEach(function(r) {
+    var id = String(r[0] || '').trim();
+    if (id) map[id] = Number(r[1]) || 0;
+  });
+  return map;
+}
+
+// Appends entries not already present in the cache (never overwrites an existing row — settlement
+// data is immutable once posted, so the first value seen for an order id is authoritative).
+// Returns how many new rows were appended.
+function _appendToFeeCache(ep, entries, reportIdByOrder) {
+  var sheet = _getFeeCacheSheet();
+  var existing = _loadFeeCache();
+  var rows = [];
+  var now = new Date();
+  Object.keys(entries).forEach(function(orderId) {
+    if (existing.hasOwnProperty(orderId)) return;
+    rows.push([orderId, entries[orderId], ep, (reportIdByOrder && reportIdByOrder[orderId]) || '', now]);
+  });
+  if (rows.length) {
+    sheet.getRange(sheet.getLastRow() + 1, 1, rows.length, FEE_CACHE_HEADER.length).setValues(rows);
+  }
+  return rows.length;
+}
+
+/**
+ * ONE-TIME CLEANUP — run once from the editor after deploying the "GCX-" filter above.
+ * The very first post-fix scan (before the filter existed) wrote ~188,000 rows into
+ * _SettlementFeeCache, the overwhelming majority of them ordinary Amazon retail orders this sheet
+ * will never look up. Rewrites the sheet keeping only GCX- prefixed rows. Safe to run any time —
+ * read-then-overwrite, no data this sheet actually needs is at risk.
+ */
+function pruneFeeCacheToGcxOnly() {
+  var sheet = _getFeeCacheSheet();
+  var lastRow = sheet.getLastRow();
+  if (lastRow < 2) {
+    Logger.log('pruneFeeCacheToGcxOnly: cache is empty, nothing to prune.');
+    return;
+  }
+  var data = sheet.getRange(2, 1, lastRow - 1, FEE_CACHE_HEADER.length).getValues();
+  var kept = data.filter(function(r) { return String(r[0] || '').indexOf('GCX-') === 0; });
+
+  sheet.getRange(2, 1, lastRow - 1, FEE_CACHE_HEADER.length).clearContent();
+  if (kept.length) {
+    sheet.getRange(2, 1, kept.length, FEE_CACHE_HEADER.length).setValues(kept);
+  }
+  Logger.log('pruneFeeCacheToGcxOnly: %s rows before, %s GCX- rows kept, %s non-GCX rows removed.',
+    data.length, kept.length, data.length - kept.length);
+}
+
 /**
  * Builds a merchant-order-id → fee map from GET_V2_SETTLEMENT_REPORT_DATA_FLAT_FILE_V2 reports.
  *
@@ -966,6 +1047,7 @@ function clearSettlementScanCache() {
  */
 function _buildSettlementFeeMap(ep, sinceDate) {
   var feeMap = {};
+  var reportIdByOrder = {};
   var now = new Date(Date.now() - 5 * 60 * 1000);
   var earliestAllowed = new Date(now.getTime() - 89 * 24 * 3600 * 1000);
   var since = (sinceDate && sinceDate > earliestAllowed) ? sinceDate : earliestAllowed;
@@ -1052,10 +1134,17 @@ function _buildSettlementFeeMap(ep, sinceDate) {
         if (!lines[i]) continue;
         var f = lines[i].split('\t');
         var moi = (f[moiIdx] || '').trim();
-        if (!moi || f[typeIdx] !== 'ItemFees') continue;
+        // A settlement report covers the ENTIRE seller account, not just this sheet's
+        // self-created MCF orders — confirmed live: 19 reports alone produced 124,647 distinct
+        // order ids, the overwhelming majority of which are ordinary Amazon retail orders
+        // ("111-1234567-1234567" style) this sheet will never look up. Filtering to this sheet's
+        // own ID scheme keeps the persistent cache from growing into a multi-hundred-thousand-row
+        // sheet full of data nothing ever reads.
+        if (!moi || moi.indexOf('GCX-') !== 0 || f[typeIdx] !== 'ItemFees') continue;
         var amt = Math.abs(_parseSettlementAmount(f[amtIdx]));
         if (amt === 0) continue;
         feeMap[moi] = (feeMap[moi] || 0) + amt;
+        if (!reportIdByOrder[moi]) reportIdByOrder[moi] = r.reportId;
       }
       newlyScanned[r.reportId] = r.createdTime; // only mark done on full success — a failed report retries next run
     } catch (e) {
@@ -1070,9 +1159,23 @@ function _buildSettlementFeeMap(ep, sinceDate) {
   Object.keys(newlyScanned).forEach(function(id) { mergedScanned[id] = newlyScanned[id]; });
   _saveScannedSettlementReportIds(ep, mergedScanned);
 
-  Logger.log('_buildSettlementFeeMap[%s]: resolved fees for %s order id(s) — %s report(s) newly marked scanned (%s total tracked)',
-    ep, Object.keys(feeMap).length, Object.keys(newlyScanned).length, Object.keys(mergedScanned).length);
-  return feeMap;
+  // Persist every fee extracted this run into the durable cache immediately — regardless of
+  // whether it matches a row that happens to be pending in THIS run's sheet snapshot. This is
+  // what makes the fix durable: once a report has been scanned, its data is never lost, even
+  // after the report itself is never looked at again.
+  var newlyCached = _appendToFeeCache(ep, feeMap, reportIdByOrder);
+
+  // Return the FULL persistent cache merged with this run's fresh finds, not just this run's
+  // finds — so a caller always sees every fee ever extracted, including from reports scanned in
+  // past runs whose data would otherwise have been silently discarded once scanning caught up.
+  var cached = _loadFeeCache();
+  var merged = {};
+  Object.keys(cached).forEach(function(id) { merged[id] = cached[id]; });
+  Object.keys(feeMap).forEach(function(id) { merged[id] = feeMap[id]; });
+
+  Logger.log('_buildSettlementFeeMap[%s]: %s order id(s) resolved this run (%s newly cached), %s report(s) newly marked scanned, %s total order id(s) available (persistent cache + this run)',
+    ep, Object.keys(feeMap).length, newlyCached, Object.keys(newlyScanned).length, Object.keys(merged).length);
+  return merged;
 }
 
 /**
