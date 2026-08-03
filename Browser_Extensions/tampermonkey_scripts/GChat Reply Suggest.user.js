@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         GChat Reply Suggest
 // @namespace    https://spigen.com/gcx
-// @version      2.1.1
+// @version      2.2.0
 // @description  Alt+G suggests AI reply sentences in most Google Chat rooms; in designated "ticket forward" rooms it instead offers a deterministic ticket-forward template (no AI) sourced from recently-visited Zendesk tickets
 // @author       Spigen GCX
 // @updateURL    https://raw.githubusercontent.com/codingintheusa0402/spigen-gcx-automation/main/Browser_Extensions/tampermonkey_scripts/GChat%20Reply%20Suggest.user.js
@@ -394,20 +394,64 @@
     return `${referenceLineText(t, index)}\n${t.url}`;
   }
 
-  function buildForwardText(t, index) {
+  function buildForwardText(t, index, mentionName) {
     // Zendesk's own option labels sometimes already carry parens (e.g.
     // "(Urgent)_리스팅오류") — strip a wrapping pair so we don't double up.
     const reason = (t.inquiryReason || "문의").trim().replace(/^\((.*)\)$/, "$1");
-    return `안녕하세요 프로님, 담당하시는 제품 관련 (${reason}) 문의가 들어와 전달드립니다. 확인 후 회신해 주시면 감사하겠습니다!\n\n${referenceBlock(t, index)}`;
+    const prefix = mentionName ? `@${mentionName} ` : "";
+    return `${prefix}안녕하세요 프로님, 담당하시는 제품 관련 (${reason}) 문의가 들어와 전달드립니다. 확인 후 회신해 주시면 감사하겠습니다!\n\n${referenceBlock(t, index)}`;
   }
 
-  function buildConfirmText(senderName, pending) {
-    return `@${senderName} 확인 감사합니다 프로님. 주신 답변 확인 후 처리하도록 하겠습니다!\n\n${referenceBlock(pending, pending.index)}`;
+  function buildConfirmText(pending, mentionName) {
+    const prefix = mentionName ? `@${mentionName} ` : "";
+    return `${prefix}확인 감사합니다 프로님. 주신 답변 확인 후 처리하도록 하겠습니다!\n\n${referenceBlock(pending, pending.index)}`;
+  }
+
+  // Index numbers are shared across everyone posting in the room (not just
+  // this browser's local counter) — a colleague using this same script, or
+  // you on a different day/session, may have already sent index N today.
+  // So the real source of truth is what's actually in the chat log: scan
+  // today's visible messages for the highest reference-line index used,
+  // and start from there. The local GM counter is kept only as a fallback
+  // for the rare case a past forward has scrolled out of the DOM.
+  function findMaxIndexInMain(main) {
+    const headings = Array.from(main.querySelectorAll('[role="heading"]'));
+    const todayHeading = headings.find((h) => (h.textContent || "").trim() === "Today");
+    let text;
+    if (todayHeading) {
+      const range = document.createRange();
+      range.setStartBefore(todayHeading);
+      range.setEndAfter(main.lastChild || main);
+      text = range.toString();
+    } else {
+      // No "Today" separator rendered — either nothing sent today yet, or
+      // every visible message already is today's (small/fresh room).
+      text = main.innerText || "";
+    }
+
+    // Not anchored to line start/end: Chat's innerText doesn't reliably put a
+    // newline between consecutive messages from the same sender (verified —
+    // they can run together with zero separator), so a ^...$ line match
+    // silently finds nothing. Instead anchor on the distinctive shape of our
+    // own reference line — "<index> <2-letter country> ... [ASIN]" — which
+    // is specific enough to not false-match other bot/summary messages
+    // (those use "ASIN=XXXX", not "[XXXX]").
+    let max = 0;
+    const re = /(\d+)\s+([A-Z]{2})\s+.{3,80}?\[([A-Za-z0-9]{6,12})\]/g;
+    let m;
+    while ((m = re.exec(text))) {
+      const n = parseInt(m[1], 10);
+      if (!Number.isNaN(n) && n > max) max = n;
+    }
+    return max;
   }
 
   function nextIndexForToday(spaceId) {
+    const main = document.querySelector('[role="main"]');
+    const maxSeen = main ? findMaxIndexInMain(main) : 0;
     const key = DAILY_INDEX_PREFIX + spaceId + "_" + todayKST();
-    const next = GM_getValue(key, 0) + 1;
+    const localMax = GM_getValue(key, 0);
+    const next = Math.max(maxSeen, localMax) + 1;
     GM_setValue(key, next);
     return next;
   }
@@ -421,17 +465,69 @@
     return `${Math.round(hrs / 24)}d ago`;
   }
 
-  // Active ticket-picker state (null when picker isn't open). Tracks the
-  // currently arrow-key-highlighted ticket so Up/Down/Enter can drive it.
+  // Active picker state (null when no picker is open). Generic across the
+  // ticket picker and the member/@mention picker so both share one
+  // arrow-key-nav + Enter/click/Escape implementation.
+  // Shape: { items, selectedIndex, box, onConfirm(item) }
   let pickerState = null;
 
   function confirmPickerSelection() {
     if (!pickerState) return;
-    const { tickets, selectedIndex, box } = pickerState;
-    const t = tickets[selectedIndex];
+    const { items, selectedIndex } = pickerState;
+    const item = items[selectedIndex];
+    const onConfirm = pickerState.onConfirm;
+    removeBar(); // clears pickerState
+    onConfirm(item);
+  }
+
+  function highlightPickerSelection() {
+    if (!pickerState) return;
+    const els = document.querySelectorAll(`#${BAR_ID} .grs-item`);
+    els.forEach((el, i) => {
+      el.classList.toggle("grs-item-default", i === pickerState.selectedIndex);
+    });
+    const active = els[pickerState.selectedIndex];
+    if (active) active.scrollIntoView({ block: "nearest" });
+  }
+
+  function openPicker(box, title, items, defaultIndex, renderItem, onConfirm) {
+    removeBar();
+    pickerState = { items, selectedIndex: defaultIndex, box, onConfirm };
+
+    const bar = document.createElement("div");
+    bar.id = BAR_ID;
+    const panel = document.createElement("div");
+    panel.className = "grs-panel";
+
+    const titleEl = document.createElement("div");
+    titleEl.className = "grs-panel-title";
+    titleEl.textContent = title;
+    panel.appendChild(titleEl);
+
+    items.forEach((item, i) => {
+      const el = document.createElement("div");
+      el.className = "grs-item" + (i === defaultIndex ? " grs-item-default" : "");
+      renderItem(el, item, i);
+      el.addEventListener("click", () => {
+        if (pickerState) pickerState.selectedIndex = i;
+        confirmPickerSelection();
+      });
+      panel.appendChild(el);
+    });
+
+    bar.appendChild(panel);
+    document.body.appendChild(bar);
+    positionBarAbove(box, bar);
+  }
+
+  const NO_MENTION = "(no mention)";
+
+  function insertForwardWithMention(t, mentionName) {
+    const box = getComposeBox();
+    if (!box) return;
     const spaceId = getSpaceId();
     const index = nextIndexForToday(spaceId);
-    insertIntoCompose(box, buildForwardText(t, index));
+    insertIntoCompose(box, buildForwardText(t, index, mentionName));
     applyReferenceLineFormatting(box, referenceLineText(t, index), t.url);
     GM_setValue(PENDING_CONFIRM_PREFIX + spaceId, {
       index,
@@ -443,17 +539,24 @@
       awaiting: true,
       setAt: Date.now(),
     });
-    removeBar();
   }
 
-  function highlightPickerSelection() {
-    if (!pickerState) return;
-    const items = document.querySelectorAll(`#${BAR_ID} .grs-item`);
-    items.forEach((el, i) => {
-      el.classList.toggle("grs-item-default", i === pickerState.selectedIndex);
-    });
-    const active = items[pickerState.selectedIndex];
-    if (active) active.scrollIntoView({ block: "nearest" });
+  function showMentionPicker(title, defaultSender, onPicked) {
+    const box = getComposeBox();
+    if (!box) return;
+    const senders = getRecentSenders();
+    const names = defaultSender && !senders.includes(defaultSender) ? [defaultSender, ...senders] : senders;
+    const items = [...names, NO_MENTION];
+    openPicker(
+      box,
+      title,
+      items,
+      0,
+      (el, name) => {
+        el.textContent = name;
+      },
+      (name) => onPicked(name === NO_MENTION ? null : name)
+    );
   }
 
   function showTicketPicker() {
@@ -467,71 +570,37 @@
       return;
     }
 
-    removeBar();
-    pickerState = { tickets, selectedIndex: 0, box };
-
-    const bar = document.createElement("div");
-    bar.id = BAR_ID;
-    const panel = document.createElement("div");
-    panel.className = "grs-panel";
-
-    const title = document.createElement("div");
-    title.className = "grs-panel-title";
-    title.textContent = "Forward which ticket? (↑↓ to browse, Enter to pick)";
-    panel.appendChild(title);
-
-    tickets.forEach((t, i) => {
-      const item = document.createElement("div");
-      item.className = "grs-item" + (i === 0 ? " grs-item-default" : "");
-      const subject = document.createElement("div");
-      subject.className = "grs-item-subject";
-      subject.textContent = `#${t.id} — ${t.subject}`;
-      const meta = document.createElement("div");
-      meta.className = "grs-item-meta";
-      meta.textContent = `${t.country || "?"} · ${t.device || "?"} · ${t.productName || "?"} · ${t.asin || "?"} · ${relativeTime(t.visitedAt)}`;
-      item.appendChild(subject);
-      item.appendChild(meta);
-      item.addEventListener("click", () => {
-        if (pickerState) pickerState.selectedIndex = i;
-        confirmPickerSelection();
-      });
-      panel.appendChild(item);
-    });
-
-    bar.appendChild(panel);
-    document.body.appendChild(bar);
-    positionBarAbove(box, bar);
+    openPicker(
+      box,
+      "Forward which ticket? (↑↓ to browse, Enter to pick)",
+      tickets,
+      0,
+      (el, t) => {
+        const subject = document.createElement("div");
+        subject.className = "grs-item-subject";
+        subject.textContent = `#${t.id} — ${t.subject}`;
+        const meta = document.createElement("div");
+        meta.className = "grs-item-meta";
+        meta.textContent = `${t.country || "?"} · ${t.device || "?"} · ${t.productName || "?"} · ${t.asin || "?"} · ${relativeTime(t.visitedAt)}`;
+        el.appendChild(subject);
+        el.appendChild(meta);
+      },
+      (t) => {
+        showMentionPicker("Mention who? (↑↓, Enter to pick)", null, (mentionName) => {
+          insertForwardWithMention(t, mentionName);
+        });
+      }
+    );
   }
 
   function showConfirmSuggestion(pending, defaultSender) {
-    const box = getComposeBox();
-    if (!box) return;
-
-    removeBar();
-    const bar = document.createElement("div");
-    bar.id = BAR_ID;
-
-    const senders = getRecentSenders();
-    const names = defaultSender && !senders.includes(defaultSender) ? [defaultSender, ...senders] : senders;
-
-    const row = document.createElement("div");
-    row.className = "grs-row";
-    (names.length ? names : [defaultSender || "(name)"]).slice(0, 4).forEach((name) => {
-      const chip = document.createElement("div");
-      chip.className = "grs-chip";
-      chip.textContent = `Reply as confirm to: ${name}`;
-      chip.title = buildConfirmText(name, pending);
-      chip.addEventListener("click", () => {
-        insertIntoCompose(box, buildConfirmText(name, pending));
-        applyReferenceLineFormatting(box, referenceLineText(pending, pending.index), pending.url);
-        GM_setValue(PENDING_CONFIRM_PREFIX + getSpaceId(), { ...pending, awaiting: false });
-        removeBar();
-      });
-      row.appendChild(chip);
+    showMentionPicker("Reply as confirm to whom? (↑↓, Enter to pick)", defaultSender, (mentionName) => {
+      const box = getComposeBox();
+      if (!box) return;
+      insertIntoCompose(box, buildConfirmText(pending, mentionName));
+      applyReferenceLineFormatting(box, referenceLineText(pending, pending.index), pending.url);
+      GM_setValue(PENDING_CONFIRM_PREFIX + getSpaceId(), { ...pending, awaiting: false });
     });
-    bar.appendChild(row);
-    document.body.appendChild(bar);
-    positionBarAbove(box, bar);
   }
 
   // Watches for a new incoming message while a forward is pending
@@ -574,7 +643,7 @@
       if (pickerState) {
         if (e.key === "ArrowDown") {
           e.preventDefault();
-          pickerState.selectedIndex = Math.min(pickerState.selectedIndex + 1, pickerState.tickets.length - 1);
+          pickerState.selectedIndex = Math.min(pickerState.selectedIndex + 1, pickerState.items.length - 1);
           highlightPickerSelection();
           return;
         }

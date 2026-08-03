@@ -85,7 +85,7 @@ Adds a "Run Now" button on Amazon.de Seller Central order pages. On click, attem
 
 ---
 
-### GChat Reply Suggest (`v2.1.1`)
+### GChat Reply Suggest (`v2.2.0`)
 **Matches:** `chat.google.com/*` and `spigenhelp.zendesk.com/agent/tickets/*` (works inside the Chrome-PWA "desktop app" install too, since it's the same Chrome origin/extension context)
 
 Alt+G behaves differently depending on the Chat room:
@@ -97,19 +97,20 @@ Alt+G behaves differently depending on the Chat room:
 - Backend must be running for suggestions to work: `python3 ~/Desktop/GCX/Browser_Extensions/gchat_reply_suggest_server.py` (not yet wired to auto-start on login — run manually, or ask to set up a LaunchAgent)
 
 **In designated "ticket forward" rooms** — Alt+G instead shows a **deterministic, no-AI** ticket-forward picker:
-- Rooms are matched by Chat **space ID** (the `/app/chat/<ID>` segment of the URL), not by display name — `document.title` turned out to be unreliable for this (Chat rewrites it for unread counts, "X messaged you", etc., not just a stable "RoomName - Chat" string). Configured in `TEMPLATE_ROOM_IDS` near the top of the script. Currently only `Private` (`AAQAc9NQmJQ`) is confirmed; **to add another room** (e.g. GCX전략xADS3), open it, press Option+G once, then check the browser console — the script logs the current space ID and name every time, ready to copy into the config
+- Rooms are matched by Chat **space ID** (the `/app/chat/<ID>` segment of the URL), not by display name — `document.title` turned out to be unreliable for this (Chat rewrites it for unread counts, "X messaged you", etc., not just a stable "RoomName - Chat" string). Configured in `TEMPLATE_ROOM_IDS` near the top of the script. Currently `Private` (`AAQAc9NQmJQ`) and `GCX전략 x ADS3` (`AAAAKwBoZPU`) are confirmed; **to add another room**, open it, press Option+G once, then check the browser console — the script logs the current space ID and name every time, ready to copy into the config
 - The Zendesk-side half of this same script (`@match spigenhelp.zendesk.com/agent/tickets/*`) records Country/Device/Product Name/ASIN (same custom-field IDs as GCX Reply's `ZD` constant) for every ticket you visit, into a shared list of the 10 most recent
-- Alt+G in a template room shows that list (most recent pre-highlighted); **↑/↓ arrow keys browse older tickets, Enter confirms** (mouse click also works). Picking one inserts:
+- Alt+G in a template room shows that list (most recent pre-highlighted); **↑/↓ arrow keys browse older tickets, Enter confirms** (mouse click also works). Picking one opens a second picker — **who to @mention** (defaults to `(no mention)`, plus every sender seen in the visible conversation) — then inserts:
   ```
-  안녕하세요 프로님, 담당하시는 제품 관련 (사유) 문의가 들어와 전달드립니다. 확인 후 회신해 주시면 감사하겠습니다!
+  [@{담당자} ]안녕하세요 프로님, 담당하시는 제품 관련 (사유) 문의가 들어와 전달드립니다. 확인 후 회신해 주시면 감사하겠습니다!
 
   **{일련번호} {국가} {기종}용 {제품명} [{ASIN}]**
   {티켓 링크, 실제 하이퍼링크}
   ```
   The reference line renders **bold** and the ticket link is a real clickable hyperlink — both verified to survive an actual send, not just the draft view. (Chat's compose box enforces a Trusted Types CSP that blocks `execCommand("insertHTML", ...)`; formatting is applied by inserting plain text first, then wrapping the exact substrings with real DOM nodes — `document.createElement("b"/"a")` — which sidesteps Trusted Types entirely since no HTML string is ever parsed.)
-  The index number is a per-room (by space ID), per-day (KST) counter that auto-increments on each forward
-- After a forward, the script watches for the next incoming message in that room and auto-offers a confirm-reply chip (`@{답변자} 확인 감사합니다 프로님...`, reusing the same bold/hyperlinked ticket reference line), with the @mention defaulting to whoever just replied — click a name chip to insert
+  - **The index number is shared, not per-browser**: rather than a local counter (which would collide the moment a colleague using this same script — or you, on a different day — already sent index N in that room), it's derived by scanning the room's actual messages for the highest index used **today** and continuing from there. Chat's `innerText` doesn't reliably insert a line break between consecutive messages from the same sender (verified empirically — they can run together with zero separator), so the scan isn't a `^...$` line match; it anchors on the reference line's distinctive shape (`<number> <2-letter country> ... [ASIN]`) wherever it appears in the text, and is scoped to the "Today" heading so it resets the next day. A local counter is kept only as a fallback for tickets that scrolled out of the DOM.
+- After a forward, the script watches for the next incoming message in that room and auto-offers the same @mention picker for a confirm-reply (`[@{답변자} ]확인 감사합니다 프로님...`, reusing the same bold/hyperlinked ticket reference line), pre-selecting whoever just replied
 - **Known limitation:** the `@mention` inserted is plain text, not a real Google Chat mention chip (that would require automating Chat's own live autocomplete) — re-type `@` yourself if you need the person actually pinged
+- The member list offered in the @mention picker comes from distinct sender names seen in the currently-visible conversation (not the space's official member list, which would need navigating Chat's own People panel) — good enough in practice, but someone who hasn't posted recently won't show up
 
 ---
 
