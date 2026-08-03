@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         GChat Reply Suggest
 // @namespace    https://spigen.com/gcx
-// @version      2.1.0
+// @version      2.1.1
 // @description  Alt+G suggests AI reply sentences in most Google Chat rooms; in designated "ticket forward" rooms it instead offers a deterministic ticket-forward template (no AI) sourced from recently-visited Zendesk tickets
 // @author       Spigen GCX
 // @updateURL    https://raw.githubusercontent.com/codingintheusa0402/spigen-gcx-automation/main/Browser_Extensions/tampermonkey_scripts/GChat%20Reply%20Suggest.user.js
@@ -30,7 +30,7 @@
   // and name every time so you can copy it in here.
   const TEMPLATE_ROOM_IDS = {
     AAQAc9NQmJQ: "Private", // confirmed 2026-08-03
-    // "<space id>": "GCX전략xADS3", // TODO: fill in once confirmed
+    AAAAKwBoZPU: "GCX전략 x ADS3", // confirmed 2026-08-03 (note: space around "x", not "GCX전략xADS3")
   };
 
   // Same custom-field IDs GCX Reply.user.js already uses (ZD constant there),

@@ -85,7 +85,7 @@ Adds a "Run Now" button on Amazon.de Seller Central order pages. On click, attem
 
 ---
 
-### GChat Reply Suggest (`v2.1.0`)
+### GChat Reply Suggest (`v2.1.1`)
 **Matches:** `chat.google.com/*` and `spigenhelp.zendesk.com/agent/tickets/*` (works inside the Chrome-PWA "desktop app" install too, since it's the same Chrome origin/extension context)
 
 Alt+G behaves differently depending on the Chat room:
