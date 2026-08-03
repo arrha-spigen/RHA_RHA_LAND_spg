@@ -85,6 +85,18 @@ Adds a "Run Now" button on Amazon.de Seller Central order pages. On click, attem
 
 ---
 
+### GChat Reply Suggest (`v1.0.0`)
+**Matches:** `chat.google.com/*` (works inside the Chrome-PWA "desktop app" install too, since it's the same Chrome origin/extension context)
+
+Alt+G suggests 3 short candidate reply sentences for the current Google Chat conversation as clickable chips docked above the compose box. Click a chip to insert it into the compose box (cursor-position insert, doesn't clobber anything already typed); Esc dismisses the bar.
+
+- Grabs the tail (~2000 chars) of `[role="main"]`'s `innerText` as conversation context — deliberately avoids Google Chat's hashed/obfuscated class names, which rotate on redeploy
+- Picks the last visible `[role="textbox"][contenteditable="true"]` on the page as the active compose box (Google Chat renders more than one; the others are hidden thread/history boxes)
+- Calls a **local** backend (`../gchat_reply_suggest_server.py`, listens on `127.0.0.1:8765`) rather than a cloud API — the backend shells out to the existing `claude` CLI (`~/.local/bin/claude -p`), so it reuses the Claude Code subscription with no separate API key or per-token billing
+- Backend must be running for suggestions to work: `python3 ~/Desktop/GCX/Browser_Extensions/gchat_reply_suggest_server.py` (not yet wired to auto-start on login — run manually, or ask to set up a LaunchAgent)
+
+---
+
 ## Installation
 
 1. Install the [Tampermonkey extension](https://www.tampermonkey.net/) in Chrome.

@@ -53,8 +53,9 @@ spigen-gcx-automation/
 │   └── GCXReply_GAS/                    # GCX Reply's SP-API/Sheet-lookup backend + versioned script archive
 │
 ├── Browser_Extensions/                  # Userscripts & extensions
-│   ├── tampermonkey_scripts/            # GCX Reply, MCF Autofill (EU + JP), Invoice Automation
-│   └── gcx-reply-extension/             # WIP native Chrome extension (MV3) port of GCX Reply
+│   ├── tampermonkey_scripts/            # GCX Reply, MCF Autofill (EU + JP), Invoice Automation, GChat Reply Suggest
+│   ├── gcx-reply-extension/             # WIP native Chrome extension (MV3) port of GCX Reply
+│   └── gchat_reply_suggest_server.py    # Local claude-CLI backend for GChat Reply Suggest.user.js
 │
 ├── Zendesk_Themes/                      # Zendesk Guide Help Center theme exports (version control mirror)
 │   ├── sq2gcx_AmazonHelpcenter/         # Amazon EU claim-form Help Center theme
@@ -120,7 +121,7 @@ spigen-gcx-automation/
 
 | Project | Description | README |
 |---------|-------------|--------|
-| [Browser_Extensions/tampermonkey_scripts](Browser_Extensions/tampermonkey_scripts/) | **GCX Reply** (`v3.5.2`) — Zendesk order/product lookup panel, Auto-Fill, MCF handoff, ABM auto-relay + NRN. **Amazon MCF Autofill** (`v1.4.3`) — EU Seller Central MCF order-page autofill. **Amazon JP MCF Autofill** (`v1.5.2`) — JP variant. **Amazon Invoice Automation** (`v1.5`) — Amazon.de invoice download. Install `.user.js` files via Tampermonkey Dashboard → Import. | [README](Browser_Extensions/tampermonkey_scripts/README.md) |
+| [Browser_Extensions/tampermonkey_scripts](Browser_Extensions/tampermonkey_scripts/) | **GCX Reply** (`v3.5.2`) — Zendesk order/product lookup panel, Auto-Fill, MCF handoff, ABM auto-relay + NRN. **Amazon MCF Autofill** (`v1.4.3`) — EU Seller Central MCF order-page autofill. **Amazon JP MCF Autofill** (`v1.5.2`) — JP variant. **Amazon Invoice Automation** (`v1.5`) — Amazon.de invoice download. **GChat Reply Suggest** (`v1.0.0`) — Alt+G suggests 3 AI reply sentences in Google Chat (incl. the Chrome-PWA desktop app), backed by a local server (`Browser_Extensions/gchat_reply_suggest_server.py`) that calls the `claude` CLI directly. Install `.user.js` files via Tampermonkey Dashboard → Import. | [README](Browser_Extensions/tampermonkey_scripts/README.md) |
 
 ### Zendesk Guide theme exports
 
