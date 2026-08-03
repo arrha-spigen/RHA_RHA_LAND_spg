@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         GChat Reply Suggest
 // @namespace    https://spigen.com/gcx
-// @version      2.0.0
+// @version      2.1.0
 // @description  Alt+G suggests AI reply sentences in most Google Chat rooms; in designated "ticket forward" rooms it instead offers a deterministic ticket-forward template (no AI) sourced from recently-visited Zendesk tickets
 // @author       Spigen GCX
 // @updateURL    https://raw.githubusercontent.com/codingintheusa0402/spigen-gcx-automation/main/Browser_Extensions/tampermonkey_scripts/GChat%20Reply%20Suggest.user.js
@@ -20,10 +20,18 @@
 (function () {
   "use strict";
 
-  // Rooms (Chat "space" title, whitespace-insensitive match) that get the
-  // deterministic ticket-forward template instead of AI-suggested replies.
-  // Add more room names here as needed.
-  const TEMPLATE_ROOMS = ["GCX전략xADS3", "Private"];
+  // Rooms that get the deterministic ticket-forward template instead of
+  // AI-suggested replies, keyed by Chat "space" ID — the /app/chat/<ID>
+  // segment of the URL. This is NOT the room's display name: document.title
+  // is unreliable (Chat rewrites it for unread counts, "X messaged you",
+  // etc.), so the space ID is the only stable identifier. To add a room:
+  // open it, press Option+G once (even if it falls through to AI-suggest),
+  // and check the browser console — this script logs the current space ID
+  // and name every time so you can copy it in here.
+  const TEMPLATE_ROOM_IDS = {
+    AAQAc9NQmJQ: "Private", // confirmed 2026-08-03
+    // "<space id>": "GCX전략xADS3", // TODO: fill in once confirmed
+  };
 
   // Same custom-field IDs GCX Reply.user.js already uses (ZD constant there),
   // kept in sync so both scripts read the same ticket data the same way.
@@ -42,10 +50,6 @@
   const FIELD_OPTS_TTL_MS = 24 * 60 * 60 * 1000;
   const PENDING_CONFIRM_PREFIX = "grs_pending_confirm_";
   const DAILY_INDEX_PREFIX = "grs_idx_";
-
-  function normalizeRoomName(s) {
-    return (s || "").replace(/\s+/g, "").trim();
-  }
 
   function todayKST() {
     return new Intl.DateTimeFormat("en-CA", {
@@ -201,13 +205,22 @@
     return boxes.length ? boxes[boxes.length - 1] : null;
   }
 
+  function getSpaceId() {
+    const m = location.pathname.match(/\/chat\/([^/?#]+)/);
+    return m ? m[1] : null;
+  }
+
+  // Best-effort display name, only used for logging/labels — never for the
+  // template-room decision itself (see TEMPLATE_ROOM_IDS comment above).
   function getRoomName() {
-    return (document.title || "").replace(/\s*-\s*Chat\s*$/, "").trim();
+    return (document.title || "")
+      .replace(/^\(\d+\)\s*/, "")
+      .replace(/\s*-\s*Chat\s*$/, "")
+      .trim();
   }
 
   function isTemplateRoom() {
-    const current = normalizeRoomName(getRoomName());
-    return TEMPLATE_ROOMS.some((r) => normalizeRoomName(r) === current);
+    return getSpaceId() in TEMPLATE_ROOM_IDS;
   }
 
   function getTranscriptTail() {
@@ -233,6 +246,7 @@
   }
 
   function removeBar() {
+    pickerState = null;
     const existing = document.getElementById(BAR_ID);
     if (existing) existing.remove();
   }
@@ -252,6 +266,41 @@
     range.collapse(false); // cursor at end
     sel.addRange(range);
     document.execCommand("insertText", false, text);
+  }
+
+  // Chat's compose box enforces a Trusted Types CSP, so execCommand("insertHTML", ...)
+  // throws. Instead: find the plain text we just inserted and wrap it with real
+  // DOM nodes (createElement + appendChild — no HTML-string parsing involved,
+  // so Trusted Types doesn't apply), then fire an input event so Chat's own
+  // compose-state sync picks up the change. Verified this survives an actual
+  // send (not just the draft view).
+  function wrapSubstringWithElement(box, needle, makeWrapper) {
+    if (!needle) return false;
+    const walker = document.createTreeWalker(box, NodeFilter.SHOW_TEXT);
+    let node;
+    while ((node = walker.nextNode())) {
+      const idx = node.textContent.indexOf(needle);
+      if (idx === -1) continue;
+      const after = node.splitText(idx);
+      after.splitText(needle.length);
+      const wrapper = makeWrapper();
+      after.parentNode.insertBefore(wrapper, after);
+      wrapper.appendChild(after);
+      return true;
+    }
+    return false;
+  }
+
+  function applyReferenceLineFormatting(box, refLineText, url) {
+    wrapSubstringWithElement(box, refLineText, () => document.createElement("b"));
+    wrapSubstringWithElement(box, url, () => {
+      const a = document.createElement("a");
+      a.href = url;
+      a.target = "_blank";
+      a.rel = "noopener noreferrer";
+      return a;
+    });
+    box.dispatchEvent(new InputEvent("input", { bubbles: true, cancelable: true, inputType: "insertText" }));
   }
 
   function renderChips(box, suggestions) {
@@ -337,23 +386,27 @@
   }
 
   // ---- Ticket-forward template flow (template rooms) ----
-  function referenceLine(t, index) {
-    return `${index} ${t.country} ${t.device}용 ${t.productName} [${t.asin}]\n${t.url}`;
+  function referenceLineText(t, index) {
+    return `${index} ${t.country} ${t.device}용 ${t.productName} [${t.asin}]`;
+  }
+
+  function referenceBlock(t, index) {
+    return `${referenceLineText(t, index)}\n${t.url}`;
   }
 
   function buildForwardText(t, index) {
     // Zendesk's own option labels sometimes already carry parens (e.g.
     // "(Urgent)_리스팅오류") — strip a wrapping pair so we don't double up.
     const reason = (t.inquiryReason || "문의").trim().replace(/^\((.*)\)$/, "$1");
-    return `안녕하세요 프로님, 담당하시는 제품 관련 (${reason}) 문의가 들어와 전달드립니다. 확인 후 회신해 주시면 감사하겠습니다!\n\n${referenceLine(t, index)}`;
+    return `안녕하세요 프로님, 담당하시는 제품 관련 (${reason}) 문의가 들어와 전달드립니다. 확인 후 회신해 주시면 감사하겠습니다!\n\n${referenceBlock(t, index)}`;
   }
 
   function buildConfirmText(senderName, pending) {
-    return `@${senderName} 확인 감사합니다 프로님. 주신 답변 확인 후 처리하도록 하겠습니다!\n\n${referenceLine(pending, pending.index)}`;
+    return `@${senderName} 확인 감사합니다 프로님. 주신 답변 확인 후 처리하도록 하겠습니다!\n\n${referenceBlock(pending, pending.index)}`;
   }
 
-  function nextIndexForToday(room) {
-    const key = DAILY_INDEX_PREFIX + normalizeRoomName(room) + "_" + todayKST();
+  function nextIndexForToday(spaceId) {
+    const key = DAILY_INDEX_PREFIX + spaceId + "_" + todayKST();
     const next = GM_getValue(key, 0) + 1;
     GM_setValue(key, next);
     return next;
@@ -368,6 +421,41 @@
     return `${Math.round(hrs / 24)}d ago`;
   }
 
+  // Active ticket-picker state (null when picker isn't open). Tracks the
+  // currently arrow-key-highlighted ticket so Up/Down/Enter can drive it.
+  let pickerState = null;
+
+  function confirmPickerSelection() {
+    if (!pickerState) return;
+    const { tickets, selectedIndex, box } = pickerState;
+    const t = tickets[selectedIndex];
+    const spaceId = getSpaceId();
+    const index = nextIndexForToday(spaceId);
+    insertIntoCompose(box, buildForwardText(t, index));
+    applyReferenceLineFormatting(box, referenceLineText(t, index), t.url);
+    GM_setValue(PENDING_CONFIRM_PREFIX + spaceId, {
+      index,
+      country: t.country,
+      device: t.device,
+      productName: t.productName,
+      asin: t.asin,
+      url: t.url,
+      awaiting: true,
+      setAt: Date.now(),
+    });
+    removeBar();
+  }
+
+  function highlightPickerSelection() {
+    if (!pickerState) return;
+    const items = document.querySelectorAll(`#${BAR_ID} .grs-item`);
+    items.forEach((el, i) => {
+      el.classList.toggle("grs-item-default", i === pickerState.selectedIndex);
+    });
+    const active = items[pickerState.selectedIndex];
+    if (active) active.scrollIntoView({ block: "nearest" });
+  }
+
   function showTicketPicker() {
     const box = getComposeBox();
     if (!box) return;
@@ -380,6 +468,8 @@
     }
 
     removeBar();
+    pickerState = { tickets, selectedIndex: 0, box };
+
     const bar = document.createElement("div");
     bar.id = BAR_ID;
     const panel = document.createElement("div");
@@ -387,7 +477,7 @@
 
     const title = document.createElement("div");
     title.className = "grs-panel-title";
-    title.textContent = "Forward which ticket? (most recent pre-highlighted)";
+    title.textContent = "Forward which ticket? (↑↓ to browse, Enter to pick)";
     panel.appendChild(title);
 
     tickets.forEach((t, i) => {
@@ -402,20 +492,8 @@
       item.appendChild(subject);
       item.appendChild(meta);
       item.addEventListener("click", () => {
-        const room = getRoomName();
-        const index = nextIndexForToday(room);
-        insertIntoCompose(box, buildForwardText(t, index));
-        GM_setValue(PENDING_CONFIRM_PREFIX + normalizeRoomName(room), {
-          index,
-          country: t.country,
-          device: t.device,
-          productName: t.productName,
-          asin: t.asin,
-          url: t.url,
-          awaiting: true,
-          setAt: Date.now(),
-        });
-        removeBar();
+        if (pickerState) pickerState.selectedIndex = i;
+        confirmPickerSelection();
       });
       panel.appendChild(item);
     });
@@ -445,8 +523,8 @@
       chip.title = buildConfirmText(name, pending);
       chip.addEventListener("click", () => {
         insertIntoCompose(box, buildConfirmText(name, pending));
-        const room = getRoomName();
-        GM_setValue(PENDING_CONFIRM_PREFIX + normalizeRoomName(room), { ...pending, awaiting: false });
+        applyReferenceLineFormatting(box, referenceLineText(pending, pending.index), pending.url);
+        GM_setValue(PENDING_CONFIRM_PREFIX + getSpaceId(), { ...pending, awaiting: false });
         removeBar();
       });
       row.appendChild(chip);
@@ -465,8 +543,7 @@
     let debounceTimer = null;
     const observer = new MutationObserver(() => {
       if (!isTemplateRoom()) return;
-      const room = getRoomName();
-      const pending = GM_getValue(PENDING_CONFIRM_PREFIX + normalizeRoomName(room), null);
+      const pending = GM_getValue(PENDING_CONFIRM_PREFIX + getSpaceId(), null);
       if (!pending || !pending.awaiting) return;
 
       clearTimeout(debounceTimer);
@@ -480,6 +557,11 @@
   }
 
   function requestSuggestions() {
+    // Self-service room-ID discovery: to add a new template room, open it,
+    // press Option+G once, then check this log line and copy the id into
+    // TEMPLATE_ROOM_IDS above.
+    console.log(`[GChat Reply Suggest] space id: ${getSpaceId()} | name: ${getRoomName()} | isTemplateRoom: ${isTemplateRoom()}`);
+
     if (isTemplateRoom()) {
       showTicketPicker();
     } else {
@@ -489,6 +571,31 @@
 
   function initChatSide() {
     document.addEventListener("keydown", (e) => {
+      if (pickerState) {
+        if (e.key === "ArrowDown") {
+          e.preventDefault();
+          pickerState.selectedIndex = Math.min(pickerState.selectedIndex + 1, pickerState.tickets.length - 1);
+          highlightPickerSelection();
+          return;
+        }
+        if (e.key === "ArrowUp") {
+          e.preventDefault();
+          pickerState.selectedIndex = Math.max(pickerState.selectedIndex - 1, 0);
+          highlightPickerSelection();
+          return;
+        }
+        if (e.key === "Enter") {
+          e.preventDefault();
+          confirmPickerSelection();
+          return;
+        }
+        if (e.key === "Escape") {
+          e.preventDefault();
+          removeBar();
+          return;
+        }
+      }
+
       // Use e.code (physical key), not e.key: on Mac, Option+G produces "©"
       // as e.key (dead-key/diacritic composition), not the letter "g".
       if (e.altKey && !e.ctrlKey && !e.metaKey && !e.shiftKey && e.code === "KeyG") {
