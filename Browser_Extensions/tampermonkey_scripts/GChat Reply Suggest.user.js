@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         GChat Reply Suggest
 // @namespace    https://spigen.com/gcx
-// @version      1.0.0
+// @version      1.0.1
 // @description  Alt+G suggests 3 AI reply sentences for the current Google Chat conversation, via a local Claude CLI backend
 // @author       Spigen GCX
 // @updateURL    https://raw.githubusercontent.com/codingintheusa0402/spigen-gcx-automation/main/Browser_Extensions/tampermonkey_scripts/GChat%20Reply%20Suggest.user.js
@@ -164,7 +164,9 @@
   }
 
   document.addEventListener("keydown", (e) => {
-    if (e.altKey && !e.ctrlKey && !e.metaKey && !e.shiftKey && e.key.toLowerCase() === "g") {
+    // Use e.code (physical key), not e.key: on Mac, Option+G produces "©" as
+    // e.key (dead-key/diacritic composition), not the letter "g".
+    if (e.altKey && !e.ctrlKey && !e.metaKey && !e.shiftKey && e.code === "KeyG") {
       e.preventDefault();
       requestSuggestions();
     }

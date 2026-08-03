@@ -85,7 +85,7 @@ Adds a "Run Now" button on Amazon.de Seller Central order pages. On click, attem
 
 ---
 
-### GChat Reply Suggest (`v1.0.0`)
+### GChat Reply Suggest (`v1.0.1`)
 **Matches:** `chat.google.com/*` (works inside the Chrome-PWA "desktop app" install too, since it's the same Chrome origin/extension context)
 
 Alt+G suggests 3 short candidate reply sentences for the current Google Chat conversation as clickable chips docked above the compose box. Click a chip to insert it into the compose box (cursor-position insert, doesn't clobber anything already typed); Esc dismisses the bar.
