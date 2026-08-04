@@ -1,0 +1,635 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Fixed Layout Example</title>
+<style>
+body {
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: flex-start;
+  font-family: Arial, sans-serif;
+}
+.flags-container {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  margin-bottom: 20px;
+  border: 2px solid #ddd;
+  padding: 10px;
+  border-radius: 10px;
+  background-color: #fff;
+}
+.logo-container {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  margin-bottom: 20px;
+}
+.amazon-logo { width: 80px; margin-right: 10px; }
+.link-text { font-size: 16px; color: #333; font-weight: bold; }
+.flag-images {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-wrap: wrap;
+}
+.flag-image { margin: 5px; }
+.flag-image img { width: 40px; cursor: pointer; }
+
+.video-container {
+  width: 100%;
+  max-width: 800px;
+  margin-bottom: 20px;
+  position: relative;
+  padding-bottom: 56.25%;
+  height: 0;
+  background: #000;
+}
+.video-container iframe,
+.video-container #youtubePlayer {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 100%;
+  height: 100%;
+  border: 0;
+}
+
+.promo-article {
+  width: 100%;
+  max-width: 800px;
+  text-align: center;
+  margin-top: 20px;
+  padding: 20px;
+  border: 1px solid #ddd;
+  border-radius: 10px;
+  box-shadow: 0 0 10px rgba(0,0,0,0.1);
+  margin-bottom: 40px;
+  overflow: hidden;
+  box-sizing: border-box;
+}
+.promo-article a { color: #007BFF; text-decoration: none; }
+.promo-article a:hover { text-decoration: underline; }
+.image-container img {
+  width: 100%;
+  height: auto;
+  border-radius: 10px;
+  box-shadow: 0 0 10px rgba(0,0,0,0.1);
+  transition: transform 0.3s ease;
+}
+
+.instagram-feed {
+  width: 100%;
+  max-width: 540px;
+  margin: 0 auto;
+  text-align: center;
+}
+
+.puzzle-container {
+  display: grid;
+  grid-template-columns: repeat(3, 135px);
+  grid-gap: 5px;
+  position: relative;
+  margin: 40px auto;
+  width: 415px;
+  height: 415px;
+  background: #fff;
+  box-shadow: 0 4px 8px rgba(0,0,0,0.1);
+  border-radius: 10px;
+  overflow: hidden;
+  transition: border 0.5s ease;
+}
+.puzzle-container.completed { border: 5px solid #4CAF50; }
+.puzzle-container.game-over { border: 5px solid #e53935; }
+.puzzle-container.completed.tier-bronze { border-color: #cd7f32; }
+.puzzle-container.completed.tier-silver { border-color: #b0b0b8; }
+.puzzle-container.completed.tier-gold {
+  border-color: #ffd700;
+  animation: puzzleGoldPulse 0.9s ease-in-out infinite;
+}
+@keyframes puzzleGoldPulse {
+  0%, 100% { box-shadow: 0 0 12px 2px rgba(255,215,0,0.5); }
+  50% { box-shadow: 0 0 28px 10px rgba(255,215,0,0.9); }
+}
+.puzzle-container.completed::after,
+.puzzle-container.game-over::after {
+  content: attr(data-message);
+  position: absolute;
+  top: 50%; left: 50%;
+  transform: translate(-50%, -50%);
+  font-size: 20px; font-weight: bold; color: #fff;
+  background: rgba(0,0,0,0.8);
+  padding: 16px 28px; border-radius: 10px; text-align: center; z-index: 10;
+  white-space: nowrap;
+}
+.puzzle-container div {
+  width: 135px; height: 135px; border: 1px solid #ddd;
+  display: flex; align-items: center; justify-content: center;
+  background: #f0f0f0; cursor: pointer;
+}
+.puzzle-container div.selected {
+  outline: 3px solid #007BFF; outline-offset: -3px;
+}
+.puzzle-piece {
+  width: 100%; height: 100%;
+  background-position: center; background-repeat: no-repeat;
+}
+.original-image-container {
+  margin-top: 20px; text-align: center;
+}
+.original-image-container img {
+  max-width: 200px; border-radius: 10px;
+  box-shadow: 0 4px 6px rgba(0,0,0,0.2);
+}
+.puzzle-round {
+  font-size: 13px; color: #666; margin-bottom: 6px;
+}
+.puzzle-timer {
+  font-size: 18px; font-weight: bold; color: #333; margin-bottom: 10px;
+  font-variant-numeric: tabular-nums;
+}
+.puzzle-retry {
+  margin-top: 16px;
+  background: #007BFF; color: #fff; border: none; padding: 10px 24px;
+  border-radius: 6px; font-size: 14px; font-weight: bold; cursor: pointer;
+}
+</style>
+<script async src="https://www.instagram.com/embed.js"></script>
+</head>
+<body>
+
+<!-- Flags / store links -->
+<div class="flags-container">
+  <div class="logo-container">
+    <img src="https://upload.wikimedia.org/wikipedia/commons/a/a9/Amazon_logo.svg" alt="Amazon Logo" class="amazon-logo" />
+    <div class="link-text">Shop Now</div>
+  </div>
+  <div class="flag-images">
+    <div class="flag-image">
+      <a href="https://www.amazon.de/stores/page/B6624ED6-A9E0-43A8-A04F-FED2B88749B7?maas=maas_adg_8EA6BC74BC9C69A84689F7221305456D_afap_abs&ref_=aa_maas&tag=maas&ingress=3">
+        <img src="https://hatscripts.github.io/circle-flags/flags/de.svg" alt="DE" />
+      </a>
+    </div>
+    <div class="flag-image">
+      <a href="https://www.amazon.co.uk/stores/page/1CC14E85-E807-4348-9C5D-077E26E83EEA?maas=maas_adg_D4BE5FD5018AB796537E0C4C66012CE9_afap_abs&ref_=aa_maas&tag=maas">
+        <img src="https://hatscripts.github.io/circle-flags/flags/gb.svg" alt="UK" />
+      </a>
+    </div>
+    <div class="flag-image">
+      <a href="https://www.amazon.fr/stores/page/5992C5CC-2C2C-4B53-B739-21D7C37544EF?maas=maas_adg_6696DB51E6FCE591FE458698FA3A7EFA_afap_abs&ref_=aa_maas&tag=maas&ingress=3">
+        <img src="https://hatscripts.github.io/circle-flags/flags/fr.svg" alt="FR" />
+      </a>
+    </div>
+    <div class="flag-image">
+      <a href="https://www.amazon.it/stores/page/3E8E9F0A-6CCE-46FF-95CD-D118F6B75BD6?maas=maas_adg_769F1D0DC860348A04423D5DE1ECA4D2_afap_abs&ref_=aa_maas&tag=maas&ingress=3">
+        <img src="https://hatscripts.github.io/circle-flags/flags/it.svg" alt="IT" />
+      </a>
+    </div>
+    <div class="flag-image">
+      <a href="https://www.amazon.es/stores/page/5A919E3F-9901-4A60-B109-B48DECEF5694?maas=maas_adg_6A47C50E29CC497763C2287FE07CE770_afap_abs&ref_=aa_maas&tag=maas&channel=GCX">
+        <img src="https://hatscripts.github.io/circle-flags/flags/es.svg" alt="ES" />
+      </a>
+    </div>
+    <div class="flag-image">
+      <a href="https://www.amazon.in/stores/page/FB61ADA2-F77A-413C-97C9-BB74C754829D?channel=Zendesk">
+        <img src="https://hatscripts.github.io/circle-flags/flags/in.svg" alt="IN" />
+      </a>
+    </div>
+    <div class="flag-image">
+      <a href="https://www.amazon.co.jp/stores/page/9C9D5F10-22B6-4F85-9155-EADEF00D7554?channel=GCX">
+        <img src="https://hatscripts.github.io/circle-flags/flags/jp.svg" alt="JP" />
+      </a>
+    </div>
+  </div>
+</div>
+
+<!-- YouTube sequential player -->
+<div class="video-container">
+  <div id="youtubePlayer"></div>
+</div>
+
+<div class="promo-article">
+  <h2>Discover Our Latest Video Content</h2>
+  <p>Watch our latest video to see the new features and products we offer. Stay tuned for more updates!</p>
+  <a href="https://youtube.com/@spigenukofficial?si=5a5Ej1L4wkXC2b3A">Subscribe to our channel</a>
+</div>
+
+<!-- Spigen Store Promo Card -->
+<div class="promo-article spigen-promo-card">
+  <div class="image-container">
+    <a class="spigen-store-link" href="https://www.amazon.co.uk/stores/page/9ACCFF27-B9B7-4FC8-8A01-A936CA988E0C">
+      <img alt="Spigen Official Store" class="EditorialTileInteractiveImage__image__f9WWf" src="https://m.media-amazon.com/images/S/al-eu-726f4d26-7fdb/69837595-94f3-42b9-af54-10c2bd8333d9._CR0%2C0%2C3000%2C1500_SX3000_.jpg" data-feature="cf" data-testid="image">
+    </a>
+  </div>
+  <h2>Welcome to the Official Spigen Store</h2>
+  <p>Explore Spigen cases, screen protectors, and MagSafe compatible accessories.</p>
+  <a class="spigen-store-link" href="https://www.amazon.co.uk/stores/page/9ACCFF27-B9B7-4FC8-8A01-A936CA988E0C">Visit Store</a>
+</div>
+
+<!-- Spigen Store Puzzle -->
+<div class="promo-article">
+  <h2>Piece It Together</h2>
+  <p>Tap two tiles to swap them and reveal the Spigen Official Store. Clear a round in under 20 seconds to advance.</p>
+  <div class="puzzle-round" id="puzzleRound" aria-live="polite"></div>
+  <div class="puzzle-timer" id="puzzleTimer" aria-live="polite">00:00</div>
+  <div class="puzzle-container" id="spigenPuzzle" aria-label="Sliding image puzzle of the Spigen Official Store"></div>
+  <div class="original-image-container">
+    <img src="https://m.media-amazon.com/images/S/al-eu-726f4d26-7fdb/69837595-94f3-42b9-af54-10c2bd8333d9._CR0%2C0%2C3000%2C1500_SX3000_.jpg" alt="Spigen Official Store preview" />
+  </div>
+  <button class="puzzle-retry" id="puzzleRetryBtn" type="button">Retry</button>
+</div>
+
+<div class="instagram-feed">
+  <blockquote class="instagram-media" data-instgrm-permalink="https://www.instagram.com/spigenuk/?hl=ko" data-instgrm-version="12" style="width:100%; max-width:540px; margin:0 auto;">
+  </blockquote>
+</div>
+
+<!-- Scripts -->
+<script>
+  // YouTube API initialization
+  (function () {
+    var tag = document.createElement('script');
+    tag.src = "https://www.youtube.com/iframe_api";
+    var firstScriptTag = document.getElementsByTagName('script')[0];
+    firstScriptTag.parentNode.insertBefore(tag, firstScriptTag);
+  })();
+
+  var player;
+  var videoIds = ['KwYuPA7_ZBk', 'VnDFLfBSrAk'];
+  var currentVideo = 0;
+
+  function onYouTubeIframeAPIReady() {
+    player = new YT.Player('youtubePlayer', {
+      width: '100%',
+      height: '100%',
+      videoId: videoIds[0],
+      playerVars: {
+        autoplay: 1,
+        mute: 1,
+        controls: 0,
+        rel: 0,
+        modestbranding: 1,
+        playsinline: 1
+      },
+      events: {
+        onStateChange: onPlayerStateChange
+      }
+    });
+  }
+
+  function onPlayerStateChange(event) {
+    if (event.data === YT.PlayerState.ENDED) {
+      if (currentVideo < videoIds.length - 1) {
+        currentVideo += 1;
+        player.loadVideoById(videoIds[currentVideo]);
+      } else {
+        currentVideo = 0;
+        player.loadVideoById(videoIds[currentVideo]);
+      }
+    }
+  }
+
+  (function () {
+    var userLang = window.navigator.language || window.navigator.userLanguage || '';
+    var domain = 'co.uk'; // Default marketplace for EU Zendesk domain
+
+    if (userLang.match(/de/i)) {
+      domain = 'de';
+    } else if (userLang.match(/fr/i)) {
+      domain = 'fr';
+    } else if (userLang.match(/it/i)) {
+      domain = 'it';
+    } else if (userLang.match(/es/i)) {
+      domain = 'es';
+    } else if (userLang.match(/ja|jp/i)) {
+      domain = 'co.jp';
+    } else if (userLang.match(/en-US/i)) {
+      domain = 'com';
+    }
+
+    var localStoreUrl = 'https://www.amazon.' + domain + '/stores/page/9ACCFF27-B9B7-4FC8-8A01-A936CA988E0C';
+    var links = document.querySelectorAll('.spigen-store-link');
+    links.forEach(function (link) {
+      link.href = localStoreUrl;
+    });
+  })();
+</script>
+
+<!-- Spigen Store Puzzle -->
+<script>
+  (function () {
+    var IMG_URL = "https://m.media-amazon.com/images/S/al-eu-726f4d26-7fdb/69837595-94f3-42b9-af54-10c2bd8333d9._CR0%2C0%2C3000%2C1500_SX3000_.jpg";
+    var ASPECT = 2; // source image is 3000x1500 (2:1) — used to center-crop it into the square grid
+    var ROUND_SIZES = [3, 4, 5, 6, 7, 8, 9, 10, 11, 12];
+    var DESKTOP_TOTAL = 420;
+    var MOBILE_TOTAL = 300;
+    var TIME_LIMIT_MS = 60000;
+
+    var container = document.getElementById('spigenPuzzle');
+    if (!container) return;
+
+    var timerEl = document.getElementById('puzzleTimer');
+    var roundEl = document.getElementById('puzzleRound');
+    var retryBtn = document.getElementById('puzzleRetryBtn');
+
+    function formatTime(ms) {
+      var totalSeconds = Math.floor(ms / 1000);
+      var m = Math.floor(totalSeconds / 60);
+      var s = totalSeconds % 60;
+      var msPart = Math.floor(ms % 1000);
+      return (m < 10 ? '0' : '') + m + ':' + (s < 10 ? '0' : '') + s + '.' +
+        (msPart < 10 ? '00' : msPart < 100 ? '0' : '') + msPart;
+    }
+
+    // One-shot canvas confetti burst — count/colors/duration scale by finish-time tier.
+    function confettiBurst(count, colors, durationMs) {
+      var canvas = document.createElement('canvas');
+      canvas.style.position = 'fixed';
+      canvas.style.top = '0';
+      canvas.style.left = '0';
+      canvas.style.width = '100vw';
+      canvas.style.height = '100vh';
+      canvas.style.pointerEvents = 'none';
+      canvas.style.zIndex = '9999';
+      canvas.width = window.innerWidth;
+      canvas.height = window.innerHeight;
+      document.body.appendChild(canvas);
+      var ctx = canvas.getContext('2d');
+      var originX = canvas.width / 2;
+      var originY = canvas.height / 3;
+      var particles = [];
+      for (var i = 0; i < count; i++) {
+        var angle = Math.random() * Math.PI * 2;
+        var speed = 4 + Math.random() * 8;
+        particles.push({
+          x: originX,
+          y: originY,
+          vx: Math.cos(angle) * speed,
+          vy: Math.sin(angle) * speed - 4,
+          size: 4 + Math.random() * 5,
+          color: colors[Math.floor(Math.random() * colors.length)],
+          rotation: Math.random() * 360,
+          vr: (Math.random() - 0.5) * 20
+        });
+      }
+      var start = Date.now();
+      function tick() {
+        var elapsed = Date.now() - start;
+        ctx.clearRect(0, 0, canvas.width, canvas.height);
+        particles.forEach(function (p) {
+          p.vy += 0.25;
+          p.x += p.vx;
+          p.y += p.vy;
+          p.rotation += p.vr;
+          ctx.save();
+          ctx.globalAlpha = Math.max(0, 1 - elapsed / durationMs);
+          ctx.translate(p.x, p.y);
+          ctx.rotate((p.rotation * Math.PI) / 180);
+          ctx.fillStyle = p.color;
+          ctx.fillRect(-p.size / 2, -p.size / 2, p.size, p.size);
+          ctx.restore();
+        });
+        if (elapsed < durationMs) {
+          requestAnimationFrame(tick);
+        } else {
+          canvas.remove();
+        }
+      }
+      tick();
+    }
+
+    var TIERS = [
+      { max: 10000, tierClass: 'tier-gold', message: "Speedrun any% world record. You're built different.", colors: ['#FFD700', '#FFA500', '#FF69B4', '#00CFFF', '#7CFC00'], count: 160 },
+      { max: 20000, tierClass: 'tier-silver', message: "Okay that's actually kind of iconic.", colors: ['#C0C0C0', '#87CEEB', '#DDA0DD', '#FFFFFF'], count: 90 },
+      { max: 30000, tierClass: 'tier-bronze', message: 'Not bad. Solid mid-tier vibes.', colors: ['#CD7F32', '#DEB887', '#FFDAB9'], count: 45 }
+    ];
+
+    function isMobile() {
+      return window.matchMedia('(max-width: 460px)').matches;
+    }
+
+    function gapFor(grid) {
+      if (grid <= 6) return 5;
+      if (grid <= 9) return 3;
+      return 2;
+    }
+
+    function shuffle(arr) {
+      for (var i = arr.length - 1; i > 0; i--) {
+        var j = Math.floor(Math.random() * (i + 1));
+        var t = arr[i]; arr[i] = arr[j]; arr[j] = t;
+      }
+      var solved = arr.every(function (v, idx) { return v === idx; });
+      return solved ? shuffle(arr) : arr;
+    }
+
+    var roundIndex = 0;
+    var GRID = ROUND_SIZES[roundIndex];
+    var cells = [];
+    var order = [];
+    var selected = null;
+    var startTime = null;
+    var timerInterval = null;
+    var finalElapsedMs = null;
+    var advancing = false;
+
+    function isEnded() {
+      return container.classList.contains('completed') || container.classList.contains('game-over');
+    }
+
+    function layoutContainer() {
+      var total = isMobile() ? MOBILE_TOTAL : DESKTOP_TOTAL;
+      var gap = gapFor(GRID);
+      var tile = Math.floor((total - (GRID - 1) * gap) / GRID);
+      var size = tile * GRID + (GRID - 1) * gap;
+      container.style.gridTemplateColumns = 'repeat(' + GRID + ', ' + tile + 'px)';
+      container.style.width = size + 'px';
+      container.style.height = size + 'px';
+      container.style.gap = gap + 'px';
+      cells.forEach(function (cell) {
+        cell.style.width = tile + 'px';
+        cell.style.height = tile + 'px';
+      });
+      return tile;
+    }
+
+    function buildCells() {
+      container.innerHTML = '';
+      cells = [];
+      order = [];
+      for (var i = 0; i < GRID * GRID; i++) order.push(i);
+      order = shuffle(order);
+      for (var c = 0; c < GRID * GRID; c++) {
+        var cell = document.createElement('div');
+        cell.setAttribute('role', 'button');
+        cell.setAttribute('tabindex', '0');
+        cell.setAttribute('aria-label', 'Puzzle tile ' + (c + 1));
+        var piece = document.createElement('div');
+        piece.className = 'puzzle-piece';
+        piece.style.backgroundImage = 'url(' + IMG_URL + ')';
+        cell.appendChild(piece);
+        container.appendChild(cell);
+        cells.push(cell);
+        (function (idx) {
+          cell.addEventListener('click', function () { select(idx); });
+          cell.addEventListener('keydown', function (e) {
+            if (e.key === 'Enter' || e.key === ' ') {
+              e.preventDefault();
+              select(idx);
+            }
+          });
+        })(c);
+      }
+    }
+
+    function paint() {
+      var tile = layoutContainer();
+      var square = tile * GRID;
+      var bgW = square * ASPECT;
+      var bgH = square;
+      var baseX = -(bgW - square) / 2;
+      for (var i = 0; i < order.length; i++) {
+        var pieceIndex = order[i];
+        var row = Math.floor(pieceIndex / GRID);
+        var col = pieceIndex % GRID;
+        var piece = cells[i].firstChild;
+        piece.style.backgroundSize = bgW + 'px ' + bgH + 'px';
+        piece.style.backgroundPosition = (baseX - col * tile) + 'px ' + (0 - row * tile) + 'px';
+      }
+    }
+
+    function updateRoundLabel() {
+      roundEl.textContent = 'Round ' + (roundIndex + 1) + ' of ' + ROUND_SIZES.length + ' — ' + GRID + '×' + GRID;
+    }
+
+    function startTimer() {
+      if (startTime !== null) return;
+      startTime = Date.now();
+      timerInterval = setInterval(function () {
+        var elapsed = Date.now() - startTime;
+        timerEl.textContent = formatTime(elapsed);
+        if (elapsed >= TIME_LIMIT_MS) {
+          clearInterval(timerInterval);
+          gameOver();
+        }
+      }, 31);
+    }
+
+    function stopTimer() {
+      if (timerInterval) clearInterval(timerInterval);
+      finalElapsedMs = Date.now() - startTime;
+      timerEl.textContent = formatTime(finalElapsedMs);
+    }
+
+    function gameOver() {
+      container.classList.add('game-over');
+      container.dataset.message = "Time's up. Big skill issue energy. Run it back?";
+    }
+
+    function resetRoundState() {
+      if (timerInterval) clearInterval(timerInterval);
+      startTime = null;
+      finalElapsedMs = null;
+      selected = null;
+      advancing = false;
+      container.classList.remove('completed', 'game-over', 'tier-gold', 'tier-silver', 'tier-bronze');
+      container.removeAttribute('data-message');
+      timerEl.textContent = '00:00.000';
+      buildCells();
+      paint();
+      updateRoundLabel();
+    }
+
+    function nextRound() {
+      roundIndex += 1;
+      GRID = ROUND_SIZES[roundIndex];
+      resetRoundState();
+    }
+
+    var ADVANCE_THRESHOLD_MS = 20000;
+
+    function celebrate(elapsedMs) {
+      var tier = null;
+      for (var i = 0; i < TIERS.length; i++) {
+        if (elapsedMs < TIERS[i].max) { tier = TIERS[i]; break; }
+      }
+      var isFinalRound = roundIndex === ROUND_SIZES.length - 1;
+      var qualifies = elapsedMs < ADVANCE_THRESHOLD_MS;
+      var fxCount = tier ? tier.count : 90;
+      var fxColors = tier ? tier.colors : TIERS[1].colors;
+
+      if (qualifies && !isFinalRound) {
+        var nextSize = ROUND_SIZES[roundIndex + 1];
+        container.dataset.message = 'Round cleared! Advancing to ' + nextSize + '×' + nextSize + '...';
+        if (tier) container.classList.add(tier.tierClass);
+        confettiBurst(fxCount, fxColors, 1800);
+        advancing = true;
+        setTimeout(nextRound, 1800);
+        return;
+      }
+
+      if (qualifies && isFinalRound) {
+        container.dataset.message = 'ALL 10 ROUNDS CLEARED. Absolute legend status unlocked.';
+        if (tier) container.classList.add(tier.tierClass);
+        confettiBurst(220, fxColors, 3000);
+        return;
+      }
+
+      container.dataset.message = tier ? tier.message : 'Puzzle complete. Took the scenic route but hey, you did it.';
+      if (tier) {
+        container.classList.add(tier.tierClass);
+        confettiBurst(tier.count, tier.colors, 2200);
+      }
+    }
+
+    function select(idx) {
+      if (isEnded() || advancing) return;
+      startTimer();
+      if (selected === null) {
+        selected = idx;
+        cells[idx].classList.add('selected');
+        return;
+      }
+      if (selected === idx) {
+        cells[idx].classList.remove('selected');
+        selected = null;
+        return;
+      }
+      var tmp = order[selected];
+      order[selected] = order[idx];
+      order[idx] = tmp;
+      cells[selected].classList.remove('selected');
+      selected = null;
+      paint();
+      var solved = order.every(function (v, i) { return v === i; });
+      if (solved) {
+        container.classList.add('completed');
+        stopTimer();
+        celebrate(finalElapsedMs);
+      }
+    }
+
+    window.addEventListener('resize', function () {
+      if (!advancing) paint();
+    });
+
+    retryBtn.addEventListener('click', function () {
+      roundIndex = 0;
+      GRID = ROUND_SIZES[roundIndex];
+      resetRoundState();
+    });
+
+    buildCells();
+    paint();
+    updateRoundLabel();
+  })();
+</script>
+
+</body>
+</html>
