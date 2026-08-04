@@ -138,6 +138,11 @@ function pollApifyRuns() {
           // and before dailyJob() ever ran. Mark this run DONE anyway so the cycle
           // completes; leave it un-materialized so repairLatestRun() can retry it.
           Logger.log(`  [${run.sheetPrefix}] createResultSheet_ failed, giving up for this run: ${e.message}`);
+          // RUN_STATE_KEY (and this runId) gets deleted once every product reports
+          // DONE, so without this the failed run becomes unreachable except via
+          // manual repairLatestRun(). Persist it so tomorrow's masterDailyJob()
+          // retries it automatically before starting new scraping.
+          _savePendingMaterialization_(run.runId, run.sheetPrefix, json.data.defaultDatasetId, startedAt);
         }
       }
       run.status = 'DONE';
@@ -457,3 +462,55 @@ function repairLatestRun(taskKey) {
 // (which takes a taskKey) can't be invoked directly from there — use this instead.
 function repairGlxZ8Sheet() { repairLatestRun('GlxZ8'); }
 function repair유지훈PSheet() { repairLatestRun('유지훈P'); }
+
+/*************************************************
+ * PENDING MATERIALIZATION RETRY
+ * A run whose sheet write failed in pollApifyRuns (e.g. a large dataset
+ * blowing the write budget) still gets marked DONE so the poll cycle can
+ * finish — see the catch block above. That means its runId/datasetId would
+ * otherwise be lost the moment RUN_STATE_KEY is cleared. These persist that
+ * info across days so masterDailyJob() can retry it automatically instead of
+ * requiring a manual repairLatestRun() call.
+ *************************************************/
+
+const PENDING_MATERIALIZE_KEY = 'APIFY_PENDING_MATERIALIZE';
+const PENDING_MATERIALIZE_MAX_ATTEMPTS = 3;
+
+function _savePendingMaterialization_(runId, sheetPrefix, datasetId, startedAt) {
+  const props = PropertiesService.getScriptProperties();
+  const raw = props.getProperty(PENDING_MATERIALIZE_KEY);
+  const pending = raw ? JSON.parse(raw) : [];
+  if (pending.some(p => p.runId === runId)) return;
+  pending.push({ runId, sheetPrefix, datasetId, startedAt: startedAt.toISOString(), attempts: 0 });
+  props.setProperty(PENDING_MATERIALIZE_KEY, JSON.stringify(pending));
+}
+
+function retryPendingMaterializations_() {
+  const props = PropertiesService.getScriptProperties();
+  const raw = props.getProperty(PENDING_MATERIALIZE_KEY);
+  if (!raw) return;
+
+  const pending = JSON.parse(raw);
+  const stillPending = [];
+
+  pending.forEach(p => {
+    try {
+      createResultSheet_(p.sheetPrefix, p.datasetId, new Date(p.startedAt));
+      Logger.log(`  [${p.sheetPrefix}] Recovered pending materialization for run ${p.runId}`);
+    } catch (e) {
+      p.attempts = (p.attempts || 0) + 1;
+      Logger.log(`  [${p.sheetPrefix}] Pending materialization retry ${p.attempts}/${PENDING_MATERIALIZE_MAX_ATTEMPTS} failed: ${e.message}`);
+      if (p.attempts < PENDING_MATERIALIZE_MAX_ATTEMPTS) {
+        stillPending.push(p);
+      } else {
+        Logger.log(`  [${p.sheetPrefix}] Giving up on run ${p.runId} after ${PENDING_MATERIALIZE_MAX_ATTEMPTS} attempts`);
+      }
+    }
+  });
+
+  if (stillPending.length) {
+    props.setProperty(PENDING_MATERIALIZE_KEY, JSON.stringify(stillPending));
+  } else {
+    props.deleteProperty(PENDING_MATERIALIZE_KEY);
+  }
+}

@@ -179,6 +179,7 @@ function masterDailyJob() {
       Utilities.formatDate(new Date(), 'Asia/Seoul', 'yyyy-MM-dd (EEE)'));
     return;
   }
+  retryPendingMaterializations_();
   runAllScrapers();
   sendAllTriggerStatus();
 }
