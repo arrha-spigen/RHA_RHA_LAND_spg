@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         GChat Reply Suggest
 // @namespace    https://spigen.com/gcx
-// @version      3.0.1
+// @version      3.1.0
 // @description  Alt+G offers a deterministic ticket-forward template (no AI) sourced from recently-visited Zendesk tickets, in every Google Chat room by default; only in designated rooms does it suggest AI-generated reply sentences instead
 // @author       Spigen GCX
 // @updateURL    https://raw.githubusercontent.com/codingintheusa0402/spigen-gcx-automation/main/Browser_Extensions/tampermonkey_scripts/GChat%20Reply%20Suggest.user.js
@@ -168,7 +168,6 @@
     #${BAR_ID} .grs-chip:hover { background: #1558b3; }
     #${BAR_ID} .grs-chip.grs-loading { background: #5f6368; cursor: default; }
     #${BAR_ID} .grs-chip.grs-error { background: #d93025; cursor: default; white-space: normal; }
-    #${BAR_ID} .grs-chip.grs-hint { background: #1e8e3e; cursor: pointer; white-space: normal; }
     #${BAR_ID} .grs-panel {
       pointer-events: auto;
       background: #fff;
@@ -271,16 +270,6 @@
     document.execCommand("insertText", false, text);
   }
 
-  function moveCursorToStart(box) {
-    box.focus();
-    const sel = window.getSelection();
-    sel.removeAllRanges();
-    const range = document.createRange();
-    range.selectNodeContents(box);
-    range.collapse(true); // cursor at start
-    sel.addRange(range);
-  }
-
   // Chat's compose box enforces a Trusted Types CSP, so execCommand("insertHTML", ...)
   // throws. Instead: find the plain text we just inserted and wrap it with real
   // DOM nodes (createElement + appendChild — no HTML-string parsing involved,
@@ -347,7 +336,6 @@
     const chip = document.createElement("div");
     chip.className = `grs-chip ${cls}`;
     chip.textContent = text;
-    if (cls === "grs-hint") chip.addEventListener("click", removeBar);
     row.appendChild(chip);
     bar.appendChild(row);
     document.body.appendChild(bar);
@@ -410,23 +398,28 @@
 
   // No mentionName parameter here — a real, notification-triggering @mention
   // can only come from Chat's own People autocomplete, which requires a
-  // genuinely user-trusted keydown (verified: dispatching a full synthetic
+  // genuinely user-trusted keydown — verified two ways: (1) a synthetic JS
   // keydown/beforeinput/keyup "@" sequence produced zero DOM changes
-  // anywhere on the page — Chat isn't reacting to it at all, almost
-  // certainly gated on event.isTrusted, which script-dispatched events can
-  // never set). So the mention is never embedded as plain text; instead the
-  // caller leaves the cursor at the very start of the message for the user
-  // to type the real "@" themselves (see moveCursorToStart / the "Type @ to
-  // mention ..." hint in insertForwardWithMention / showConfirmSuggestion).
-  function buildForwardText(t, index) {
+  // anywhere on the page, and (2) even a genuinely trusted CDP-level
+  // keystroke (the mechanism Playwright/Puppeteer use, isTrusted: true,
+  // indistinguishable from real hardware at the browser's own trust layer)
+  // still didn't trigger Chat's popup — so this isn't just an isTrusted
+  // check, it's a hard wall with no scriptable path around it. Given that,
+  // mentionName is embedded as plain text: it won't actually notify the
+  // person, but it's the least-friction option and was chosen deliberately
+  // over the alternative (place cursor + require the user to type the real
+  // "@" themselves) after weighing both.
+  function buildForwardText(t, index, mentionName) {
     // Zendesk's own option labels sometimes already carry parens (e.g.
     // "(Urgent)_리스팅오류") — strip a wrapping pair so we don't double up.
     const reason = (t.inquiryReason || "문의").trim().replace(/^\((.*)\)$/, "$1");
-    return `안녕하세요 프로님, 담당하시는 제품 관련 (${reason}) 문의가 들어와 전달드립니다. 확인 후 회신해 주시면 감사하겠습니다!\n\n${referenceBlock(t, index)}`;
+    const prefix = mentionName ? `@${mentionName} ` : "";
+    return `${prefix}안녕하세요 프로님, 담당하시는 제품 관련 (${reason}) 문의가 들어와 전달드립니다. 확인 후 회신해 주시면 감사하겠습니다!\n\n${referenceBlock(t, index)}`;
   }
 
-  function buildConfirmText(pending) {
-    return `확인 감사합니다 프로님. 주신 답변 확인 후 처리하도록 하겠습니다!\n\n${referenceBlock(pending, pending.index)}`;
+  function buildConfirmText(pending, mentionName) {
+    const prefix = mentionName ? `@${mentionName} ` : "";
+    return `${prefix}확인 감사합니다 프로님. 주신 답변 확인 후 처리하도록 하겠습니다!\n\n${referenceBlock(pending, pending.index)}`;
   }
 
   // Index numbers are shared across everyone posting in the room (not just
@@ -566,13 +559,13 @@
     const spaceId = getSpaceId();
     const index = nextIndexForToday(spaceId);
     const refLineText = referenceLineText(t, index);
-    insertIntoCompose(box, buildForwardText(t, index));
+    insertIntoCompose(box, buildForwardText(t, index, mentionName));
     applyReferenceLineFormatting(box, refLineText, t.url);
     // stage: "drafted" — NOT yet awaiting a reply. The watcher below only
     // starts watching once this text actually shows up as a sent message
     // in the room (see setupPendingConfirmWatcher), otherwise an unrelated
-    // message arriving while you're still typing/mentioning gets mistaken
-    // for someone replying to a message you haven't even sent yet.
+    // message arriving while you're still editing the draft gets mistaken
+    // for someone replying to a message you haven't sent yet.
     GM_setValue(PENDING_CONFIRM_PREFIX + spaceId, {
       index,
       country: t.country,
@@ -584,10 +577,6 @@
       stage: "drafted",
       setAt: Date.now(),
     });
-    if (mentionName) {
-      moveCursorToStart(box);
-      renderStatus(box, `Type @ to mention ${mentionName}, then continue typing`, "grs-hint");
-    }
   }
 
   function showMentionPicker(title, defaultSender, onPicked) {
@@ -646,15 +635,11 @@
     showMentionPicker("Reply as confirm to whom? (↑↓, Enter to pick)", defaultSender, (mentionName) => {
       const box = getComposeBox();
       if (!box) return;
-      insertIntoCompose(box, buildConfirmText(pending));
+      insertIntoCompose(box, buildConfirmText(pending, mentionName));
       applyReferenceLineFormatting(box, referenceLineText(pending, pending.index), pending.url);
       // Done watching this forward — clear it so the watcher stops here
       // instead of re-triggering on the next unrelated message too.
       GM_setValue(PENDING_CONFIRM_PREFIX + getSpaceId(), null);
-      if (mentionName) {
-        moveCursorToStart(box);
-        renderStatus(box, `Type @ to mention ${mentionName}, then continue typing`, "grs-hint");
-      }
     });
   }
 
