@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         GChat Reply Suggest
 // @namespace    https://spigen.com/gcx
-// @version      3.1.0
+// @version      3.1.1
 // @description  Alt+G offers a deterministic ticket-forward template (no AI) sourced from recently-visited Zendesk tickets, in every Google Chat room by default; only in designated rooms does it suggest AI-generated reply sentences instead
 // @author       Spigen GCX
 // @updateURL    https://raw.githubusercontent.com/codingintheusa0402/spigen-gcx-automation/main/Browser_Extensions/tampermonkey_scripts/GChat%20Reply%20Suggest.user.js
@@ -477,14 +477,27 @@
     return max;
   }
 
-  function nextIndexForToday(spaceId) {
+  // Read-only: what the next index WOULD be, based on the room's actual
+  // sent messages (+ the committed fallback, see commitIndexUsed). Does
+  // NOT persist anything — safe to call on every draft/re-draft. Persisting
+  // here (as an earlier version did) meant re-opening the picker and
+  // picking a different ticket, or aborting and redrafting, silently
+  // burned index numbers that were never actually sent, so a room's real
+  // sent messages could show 1, 2, 5 with 3 and 4 never having existed.
+  function peekNextIndexForToday(spaceId) {
     const main = document.querySelector('[role="main"]');
     const maxSeen = main ? findMaxIndexInMain(main) : 0;
     const key = DAILY_INDEX_PREFIX + spaceId + "_" + todayKST();
     const localMax = GM_getValue(key, 0);
-    const next = Math.max(maxSeen, localMax) + 1;
-    GM_setValue(key, next);
-    return next;
+    return Math.max(maxSeen, localMax) + 1;
+  }
+
+  // Only call once a draft is CONFIRMED actually sent (see the "drafted" ->
+  // "sent" transition in setupPendingConfirmWatcher) — this is the only
+  // place the fallback counter should advance.
+  function commitIndexUsed(spaceId, index) {
+    const key = DAILY_INDEX_PREFIX + spaceId + "_" + todayKST();
+    if (index > GM_getValue(key, 0)) GM_setValue(key, index);
   }
 
   function relativeTime(ts) {
@@ -557,7 +570,7 @@
     const box = getComposeBox();
     if (!box) return;
     const spaceId = getSpaceId();
-    const index = nextIndexForToday(spaceId);
+    const index = peekNextIndexForToday(spaceId);
     const refLineText = referenceLineText(t, index);
     insertIntoCompose(box, buildForwardText(t, index, mentionName));
     applyReferenceLineFormatting(box, refLineText, t.url);
@@ -668,6 +681,8 @@
         const text = getMessageOnlyText(main);
         if (pending.refLineText && text.includes(pending.refLineText)) {
           GM_setValue(PENDING_CONFIRM_PREFIX + spaceId, { ...pending, stage: "sent", sentAt: Date.now() });
+          // Only now, confirmed actually sent, does this index count as used.
+          commitIndexUsed(spaceId, pending.index);
         }
         return;
       }
