@@ -1,5 +1,5 @@
 /*************************************************
- * CONFIG — Galaxy Z8 Case+CP (Monday → Sheet, append-new-only)
+ * CONFIG — Galaxy Z8 Case+CP (Monday → Sheet, full refresh)
  *************************************************/
 const BOARD_ID = 18421346787;
 const SHEET_NAME = 'Sheet1';
@@ -25,7 +25,7 @@ const COLUMN_MAP = [
   { header: '고객 대응',       colId: 'color_mm0fjzar' },
   { header: 'Review Link',    colId: 'link_mm0fkspz' },
   { header: 'Zendesk Ticket', colId: 'integration_mm0fzmv0' },
-  { header: '데이터 출처',     colId: 'text_mm5gms5r' }
+  { header: '데이터 출처',     colId: 'formula_mm5hrmzb' }
 ];
 
 const FORMULA_COL_IDS = COLUMN_MAP
@@ -34,53 +34,213 @@ const FORMULA_COL_IDS = COLUMN_MAP
 
 const HEADER = ['item_id'].concat(COLUMN_MAP.map(function(c){ return c.header; }));
 
+/** CacheService keys used to pass progress from the running sync to the popup dialog. */
+const SYNC_LOG_CACHE_KEY = 'MONDAY_SYNC_LOG';
+const SYNC_DONE_CACHE_KEY = 'MONDAY_SYNC_DONE';
+const SYNC_CACHE_TTL_SEC = 21600; // 6h (CacheService max)
+
 /*************************************************
- * MENU (manual test run / one-time trigger setup)
+ * MENU
  *************************************************/
 function onOpen(){
   SpreadsheetApp.getUi()
     .createMenu('Monday.com')
-    .addItem('지금 동기화 (신규 항목만)', 'appendNewMondayItems')
+    .addItem('지금 동기화 (전체 새로고침)', 'openSyncDialogAndRun')
     .addItem('일일 자동 실행 설정 (최초 1회)', 'setupDailyTrigger')
+    .addItem('보드 컬럼 ID 목록 보기 (진단용)', 'listBoardColumns')
+    .addItem('항목 1개 전체 컬럼 덤프 (진단용)', 'dumpItemColumns')
     .addToUi();
 }
 
 /*************************************************
- * MAIN — append only items not already in the sheet
+ * DIAGNOSTIC — dump board's actual column ids/titles/types
  *************************************************/
-function appendNewMondayItems(){
+function listBoardColumns(){
+  const apiKey = _getMondayApiKey_();
+  const query = 'query ($boardId: [ID!]) { boards(ids: $boardId) { columns { id title type } } }';
+  const resp = _mondayFetch_(apiKey, query, { boardId: BOARD_ID });
+  const cols = (resp.data && resp.data.boards && resp.data.boards[0] && resp.data.boards[0].columns) || [];
+  const rows = [['id', 'title', 'type']].concat(cols.map(function(c){ return [c.id, c.title, c.type]; }));
+  _writeDiagSheet_('_diag_columns', rows);
+  SpreadsheetApp.getUi().alert('완료! "_diag_columns" 탭을 확인하세요. (총 ' + cols.length + '개 컬럼)');
+}
+
+/*************************************************
+ * DIAGNOSTIC — dump one item's ALL column_values (id/title/type/text/value)
+ * Use this to spot duplicate-named columns (e.g. two "데이터 출처" columns).
+ *************************************************/
+function dumpItemColumns(){
+  const ui = SpreadsheetApp.getUi();
+  const resp1 = ui.prompt('진단할 Monday item_id 입력 (시트 A열 값)', ui.ButtonSet.OK_CANCEL);
+  if (resp1.getSelectedButton() !== ui.Button.OK) return;
+  const itemId = resp1.getResponseText().trim();
+  if (!itemId) return;
+
+  const apiKey = _getMondayApiKey_();
+  const query = 'query ($itemIds: [ID!]) { items(ids: $itemIds) { id name column_values { id type text value column { title } } } }';
+  const resp = _mondayFetch_(apiKey, query, { itemIds: [itemId] });
+  const it = resp.data && resp.data.items && resp.data.items[0];
+  if (!it) { ui.alert('Item not found: ' + itemId); return; }
+  const rows = [['id', 'title', 'type', 'text', 'value']].concat(
+    (it.column_values || []).map(function(cv){
+      return [cv.id, cv.column && cv.column.title, cv.type, cv.text, cv.value];
+    })
+  );
+  _writeDiagSheet_('_diag_item_' + it.id, rows);
+  ui.alert('완료! "_diag_item_' + it.id + '" 탭을 확인하세요. (항목: ' + it.name + ')');
+}
+
+function _writeDiagSheet_(name, rows){
+  const ss = SpreadsheetApp.getActive();
+  var sh = ss.getSheetByName(name);
+  if (sh) sh.clear(); else sh = ss.insertSheet(name);
+  if (rows.length) sh.getRange(1, 1, rows.length, rows[0].length).setValues(rows);
+  ss.setActiveSheet(sh);
+}
+
+/*************************************************
+ * MANUAL RUN — show progress dialog, then run the sync
+ *************************************************/
+function openSyncDialogAndRun(){
+  _resetSyncLog_();
+  const html = HtmlService.createHtmlOutput(_syncDialogHtml_())
+    .setWidth(560)
+    .setHeight(440);
+  SpreadsheetApp.getUi().showModalDialog(html, 'Monday.com 동기화');
+  syncMondayToSheet();
+}
+
+/** Polled by the dialog's client-side JS. */
+function getSyncLog(){
+  const cache = CacheService.getScriptCache();
+  const logRaw = cache.get(SYNC_LOG_CACHE_KEY);
+  const doneRaw = cache.get(SYNC_DONE_CACHE_KEY);
+  return {
+    lines: logRaw ? JSON.parse(logRaw) : [],
+    done: !!doneRaw,
+    result: doneRaw ? JSON.parse(doneRaw) : null
+  };
+}
+
+function _resetSyncLog_(){
+  const cache = CacheService.getScriptCache();
+  cache.remove(SYNC_LOG_CACHE_KEY);
+  cache.remove(SYNC_DONE_CACHE_KEY);
+}
+
+function _logAppend_(msg){
+  const cache = CacheService.getScriptCache();
+  const ts = Utilities.formatDate(new Date(), 'Asia/Seoul', 'HH:mm:ss');
+  const line = '[' + ts + '] ' + msg;
+  const existing = cache.get(SYNC_LOG_CACHE_KEY);
+  const arr = existing ? JSON.parse(existing) : [];
+  arr.push(line);
+  cache.put(SYNC_LOG_CACHE_KEY, JSON.stringify(arr), SYNC_CACHE_TTL_SEC);
+  Logger.log(line);
+}
+
+function _markSyncDone_(result){
+  const cache = CacheService.getScriptCache();
+  cache.put(SYNC_DONE_CACHE_KEY, JSON.stringify(result), SYNC_CACHE_TTL_SEC);
+}
+
+function _syncDialogHtml_(){
+  return '<!DOCTYPE html><html><head><base target="_top">' +
+    '<style>' +
+    '  body{font-family:Arial,Helvetica,sans-serif;font-size:13px;margin:0;padding:16px;color:#202124;}' +
+    '  #status{font-weight:bold;margin-bottom:8px;}' +
+    '  #status.running{color:#1a73e8;}' +
+    '  #status.ok{color:#188038;}' +
+    '  #status.error{color:#d93025;}' +
+    '  #log{background:#f1f3f4;border:1px solid #dadce0;border-radius:6px;padding:10px;' +
+    '       height:280px;overflow-y:auto;white-space:pre-wrap;font-family:Consolas,Menlo,monospace;font-size:12px;}' +
+    '  #closeBtn{margin-top:12px;padding:6px 16px;cursor:pointer;}' +
+    '</style></head><body>' +
+    '  <div id="status" class="running">⏳ 동기화 진행 중...</div>' +
+    '  <div id="log"></div>' +
+    '  <button id="closeBtn" onclick="google.script.host.close()">닫기</button>' +
+    '  <script>' +
+    '    var timer = null;' +
+    '    function poll(){' +
+    '      google.script.run.withSuccessHandler(render).withFailureHandler(onFail).getSyncLog();' +
+    '    }' +
+    '    function render(data){' +
+    '      var logEl = document.getElementById("log");' +
+    '      logEl.textContent = data.lines.join("\\n");' +
+    '      logEl.scrollTop = logEl.scrollHeight;' +
+    '      if (data.done){' +
+    '        clearInterval(timer);' +
+    '        var statusEl = document.getElementById("status");' +
+    '        if (data.result && data.result.ok){' +
+    '          statusEl.className = "ok";' +
+    '          statusEl.textContent = "✅ 완료: " + data.result.total + "행 동기화됨 (" + data.result.elapsed + "초)";' +
+    '        } else {' +
+    '          statusEl.className = "error";' +
+    '          statusEl.textContent = "❌ 오류: " + (data.result && data.result.message ? data.result.message : "알 수 없는 오류");' +
+    '        }' +
+    '      }' +
+    '    }' +
+    '    function onFail(err){' +
+    '      clearInterval(timer);' +
+    '      var statusEl = document.getElementById("status");' +
+    '      statusEl.className = "error";' +
+    '      statusEl.textContent = "❌ 로그 조회 실패: " + err.message;' +
+    '    }' +
+    '    poll();' +
+    '    timer = setInterval(poll, 800);' +
+    '  </script>' +
+    '</body></html>';
+}
+
+/*************************************************
+ * MAIN — full refresh: fetch ALL Monday items, replace sheet contents
+ * (no UI calls here — this also runs unattended via the daily trigger)
+ *************************************************/
+function syncMondayToSheet(){
   const lock = LockService.getScriptLock();
-  if (!lock.tryLock(5000)) { Logger.log('Another sync is already running. Skipped.'); return; }
+  if (!lock.tryLock(5000)) {
+    Logger.log('Another sync is already running. Skipped.');
+    _logAppend_('⚠️ 이미 다른 동기화가 실행 중입니다. 건너뜁니다.');
+    _markSyncDone_({ ok: false, message: '다른 동기화가 이미 실행 중입니다.' });
+    return;
+  }
+  const startTime = new Date();
   try {
+    _logAppend_('동기화 시작...');
     const apiKey = _getMondayApiKey_();
     const sheet = _getSheet_();
-    _ensureHeader_(sheet);
 
-    const existingIds = _getExistingItemIds_(sheet);
-    Logger.log('Existing item_id count: ' + existingIds.size);
-
+    _logAppend_('Monday 보드에서 전체 항목 조회 중...');
     const colIds = COLUMN_MAP.filter(function(c){ return c.colId; }).map(function(c){ return c.colId; });
     const items = _fetchAllItems_(apiKey, colIds);
-    Logger.log('Fetched from Monday: ' + items.length);
-
-    const newItems = items.filter(function(it){ return !existingIds.has(String(it.id)); });
-    Logger.log('New items to append: ' + newItems.length);
-    if (!newItems.length) return;
+    _logAppend_('Monday에서 총 ' + items.length + '개 항목 조회 완료.');
 
     var formulaOverrides = {};
     if (FORMULA_COL_IDS.length){
-      const missingIds = newItems
+      const missingIds = items
         .filter(function(it){ return _needsFormulaRetry_(it); })
         .map(function(it){ return it.id; });
-      if (missingIds.length) formulaOverrides = _fetchColumnsForItems_(apiKey, missingIds, FORMULA_COL_IDS);
+      if (missingIds.length) {
+        _logAppend_('formula 컬럼(인입사유/국가 등) 재조회 중... (' + missingIds.length + '건)');
+        formulaOverrides = _fetchColumnsForItems_(apiKey, missingIds, FORMULA_COL_IDS);
+      }
     }
 
-    const rows = newItems.map(function(it){ return _buildRow_(it, formulaOverrides[it.id]); });
-    const lastRow = sheet.getLastRow();
-    sheet.getRange(lastRow + 1, 1, rows.length, HEADER.length).setValues(rows);
-    Logger.log('Appended ' + rows.length + ' new row(s).');
+    _logAppend_('시트에 기록할 행 생성 중...');
+    const rows = items.map(function(it){ return _buildRow_(it, formulaOverrides[it.id]); });
+
+    _logAppend_('기존 시트 데이터를 새 데이터로 교체 중... (Monday에서 삭제된 항목은 함께 제거됩니다)');
+    _replaceSheetData_(sheet, rows);
+
+    const elapsed = ((new Date() - startTime) / 1000).toFixed(1);
+    Logger.log('Sync complete: ' + rows.length + ' row(s) written.');
+    _logAppend_('✅ 완료: ' + rows.length + '행 기록됨. (' + elapsed + '초 소요)');
+    _markSyncDone_({ ok: true, total: rows.length, elapsed: elapsed });
   } catch (e) {
-    Logger.log('ERROR: ' + (e && e.message ? e.message : e));
+    const msg = e && e.message ? e.message : String(e);
+    Logger.log('ERROR: ' + msg);
+    _logAppend_('❌ 오류 발생: ' + msg);
+    _markSyncDone_({ ok: false, message: msg });
     throw e;
   } finally {
     lock.releaseLock();
@@ -91,10 +251,12 @@ function appendNewMondayItems(){
  * DAILY TRIGGER SETUP (run once manually)
  *************************************************/
 function setupDailyTrigger(){
-  ScriptApp.getProjectTriggers().forEach(function(t){
-    if (t.getHandlerFunction() === 'appendNewMondayItems') ScriptApp.deleteTrigger(t);
+  ['syncMondayToSheet', 'appendNewMondayItems'].forEach(function(handlerName){
+    ScriptApp.getProjectTriggers().forEach(function(t){
+      if (t.getHandlerFunction() === handlerName) ScriptApp.deleteTrigger(t);
+    });
   });
-  ScriptApp.newTrigger('appendNewMondayItems')
+  ScriptApp.newTrigger('syncMondayToSheet')
     .timeBased()
     .atHour(RUN_TRIGGER_HOUR)
     .everyDays(1)
@@ -111,18 +273,13 @@ function _getSheet_(){
   return ss.getSheetByName(SHEET_NAME) || ss.getActiveSheet();
 }
 
-function _ensureHeader_(sheet){
-  const firstCell = sheet.getRange(1, 1).getValue();
-  if (!firstCell) sheet.getRange(1, 1, 1, HEADER.length).setValues([HEADER]);
-}
-
-function _getExistingItemIds_(sheet){
+/** Overwrites the header and replaces all data rows below it in one shot. */
+function _replaceSheetData_(sheet, rows){
   const lastRow = sheet.getLastRow();
-  const ids = new Set();
-  if (lastRow < 2) return ids;
-  const values = sheet.getRange(2, 1, lastRow - 1, 1).getValues();
-  values.forEach(function(r){ if (r[0]) ids.add(String(r[0])); });
-  return ids;
+  const lastCol = Math.max(sheet.getLastColumn(), HEADER.length);
+  if (lastRow > 1) sheet.getRange(2, 1, lastRow - 1, lastCol).clearContent();
+  sheet.getRange(1, 1, 1, HEADER.length).setValues([HEADER]);
+  if (rows.length) sheet.getRange(2, 1, rows.length, HEADER.length).setValues(rows);
 }
 
 /*************************************************
@@ -131,6 +288,7 @@ function _getExistingItemIds_(sheet){
 function _cvFragments_(){
   return 'id type text value ' +
     '... on MirrorValue { display_value } ' +
+    '... on FormulaValue { display_value } ' +
     '... on StatusValue { label } ' +
     '... on LinkValue { url text } ' +
     '... on NumbersValue { number } ' +
@@ -239,7 +397,7 @@ function _cleanZendeskUrl_(u){
   try {
     const id = (u.match(/\/tickets\/(\d+)/) || [])[1];
     const m = u.match(/^https?:\/\/([^\/]+)/);
-    if (id && m) return 'https://' + m[1] + '/api/v2/tickets/' + id;
+    if (id && m) return 'https://' + m[1] + '/tickets/' + id;
   } catch (e) {}
   return String(u || '').replace(/\.json$/i, '');
 }
