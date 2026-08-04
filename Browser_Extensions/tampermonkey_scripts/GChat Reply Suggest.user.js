@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         GChat Reply Suggest
 // @namespace    https://spigen.com/gcx
-// @version      3.1.1
+// @version      3.2.0
 // @description  Alt+G offers a deterministic ticket-forward template (no AI) sourced from recently-visited Zendesk tickets, in every Google Chat room by default; only in designated rooms does it suggest AI-generated reply sentences instead
 // @author       Spigen GCX
 // @updateURL    https://raw.githubusercontent.com/codingintheusa0402/spigen-gcx-automation/main/Browser_Extensions/tampermonkey_scripts/GChat%20Reply%20Suggest.user.js
@@ -409,17 +409,22 @@
   // person, but it's the least-friction option and was chosen deliberately
   // over the alternative (place cursor + require the user to type the real
   // "@" themselves) after weighing both.
-  function buildForwardText(t, index, mentionName) {
+  const HONORIFIC_TITLES = ["리더", "파트장", "프로"];
+  const DEFAULT_HONORIFIC = "프로";
+
+  function buildForwardText(t, index, mentionName, title) {
     // Zendesk's own option labels sometimes already carry parens (e.g.
     // "(Urgent)_리스팅오류") — strip a wrapping pair so we don't double up.
     const reason = (t.inquiryReason || "문의").trim().replace(/^\((.*)\)$/, "$1");
     const prefix = mentionName ? `@${mentionName} ` : "";
-    return `${prefix}안녕하세요 프로님, 담당하시는 제품 관련 (${reason}) 문의가 들어와 전달드립니다. 확인 후 회신해 주시면 감사하겠습니다!\n\n${referenceBlock(t, index)}`;
+    const honorific = title || DEFAULT_HONORIFIC;
+    return `${prefix}안녕하세요 ${honorific}님, 담당하시는 제품 관련 (${reason}) 문의가 들어와 전달드립니다. 확인 후 회신해 주시면 감사하겠습니다!\n\n${referenceBlock(t, index)}`;
   }
 
-  function buildConfirmText(pending, mentionName) {
+  function buildConfirmText(pending, mentionName, title) {
     const prefix = mentionName ? `@${mentionName} ` : "";
-    return `${prefix}확인 감사합니다 프로님. 주신 답변 확인 후 처리하도록 하겠습니다!\n\n${referenceBlock(pending, pending.index)}`;
+    const honorific = title || DEFAULT_HONORIFIC;
+    return `${prefix}확인 감사합니다 ${honorific}님. 주신 답변 확인 후 처리하도록 하겠습니다!\n\n${referenceBlock(pending, pending.index)}`;
   }
 
   // Index numbers are shared across everyone posting in the room (not just
@@ -566,13 +571,13 @@
 
   const NO_MENTION = "(no mention)";
 
-  function insertForwardWithMention(t, mentionName) {
+  function insertForwardWithMention(t, mentionName, honorific) {
     const box = getComposeBox();
     if (!box) return;
     const spaceId = getSpaceId();
     const index = peekNextIndexForToday(spaceId);
     const refLineText = referenceLineText(t, index);
-    insertIntoCompose(box, buildForwardText(t, index, mentionName));
+    insertIntoCompose(box, buildForwardText(t, index, mentionName, honorific));
     applyReferenceLineFormatting(box, refLineText, t.url);
     // stage: "drafted" — NOT yet awaiting a reply. The watcher below only
     // starts watching once this text actually shows up as a sent message
@@ -610,6 +615,22 @@
     );
   }
 
+  function showHonorificPicker(onPicked) {
+    const box = getComposeBox();
+    if (!box) return;
+    const defaultIndex = Math.max(0, HONORIFIC_TITLES.indexOf(DEFAULT_HONORIFIC));
+    openPicker(
+      box,
+      "Which honorific? (↑↓, Enter to pick)",
+      HONORIFIC_TITLES,
+      defaultIndex,
+      (el, honorific) => {
+        el.textContent = `${honorific}님`;
+      },
+      onPicked
+    );
+  }
+
   function showTicketPicker() {
     const box = getComposeBox();
     if (!box) return;
@@ -638,7 +659,9 @@
       },
       (t) => {
         showMentionPicker("Mention who? (↑↓, Enter to pick)", null, (mentionName) => {
-          insertForwardWithMention(t, mentionName);
+          showHonorificPicker((honorific) => {
+            insertForwardWithMention(t, mentionName, honorific);
+          });
         });
       }
     );
@@ -646,13 +669,15 @@
 
   function showConfirmSuggestion(pending, defaultSender) {
     showMentionPicker("Reply as confirm to whom? (↑↓, Enter to pick)", defaultSender, (mentionName) => {
-      const box = getComposeBox();
-      if (!box) return;
-      insertIntoCompose(box, buildConfirmText(pending, mentionName));
-      applyReferenceLineFormatting(box, referenceLineText(pending, pending.index), pending.url);
-      // Done watching this forward — clear it so the watcher stops here
-      // instead of re-triggering on the next unrelated message too.
-      GM_setValue(PENDING_CONFIRM_PREFIX + getSpaceId(), null);
+      showHonorificPicker((honorific) => {
+        const box = getComposeBox();
+        if (!box) return;
+        insertIntoCompose(box, buildConfirmText(pending, mentionName, honorific));
+        applyReferenceLineFormatting(box, referenceLineText(pending, pending.index), pending.url);
+        // Done watching this forward — clear it so the watcher stops here
+        // instead of re-triggering on the next unrelated message too.
+        GM_setValue(PENDING_CONFIRM_PREFIX + getSpaceId(), null);
+      });
     });
   }
 
