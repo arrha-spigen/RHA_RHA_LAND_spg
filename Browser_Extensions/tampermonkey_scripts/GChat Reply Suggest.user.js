@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         GChat Reply Suggest
 // @namespace    https://spigen.com/gcx
-// @version      3.2.0
-// @description  Alt+G offers a deterministic ticket-forward template (no AI) sourced from recently-visited Zendesk tickets, in every Google Chat room by default; only in designated rooms does it suggest AI-generated reply sentences instead
+// @version      3.3.0
+// @description  Alt+G offers T3 Esc (deterministic ticket-forward, no AI) / Gratitude / Reminder templates in every Google Chat room by default; only in designated rooms does it suggest AI-generated reply sentences instead
 // @author       Spigen GCX
 // @updateURL    https://raw.githubusercontent.com/codingintheusa0402/spigen-gcx-automation/main/Browser_Extensions/tampermonkey_scripts/GChat%20Reply%20Suggest.user.js
 // @downloadURL  https://raw.githubusercontent.com/codingintheusa0402/spigen-gcx-automation/main/Browser_Extensions/tampermonkey_scripts/GChat%20Reply%20Suggest.user.js
@@ -427,6 +427,68 @@
     return `${prefix}확인 감사합니다 ${honorific}님. 주신 답변 확인 후 처리하도록 하겠습니다!\n\n${referenceBlock(pending, pending.index)}`;
   }
 
+  // ---- Thread-context flows (Gratitude / Reminder) ----
+  // These read the @mention + honorific from the T3 Esc root message the
+  // currently-open thread is attached to, rather than asking again. Finding
+  // "the root message" by DOM container/geometry turned out to be fragile
+  // (the Thread side panel's exact ancestor boundary doesn't stand out
+  // reliably), so instead this searches for our own script's distinctive
+  // bold reference-line signature ("<n> <2-letter country> ... [ASIN]"),
+  // restricted to the right half of the viewport (the thread panel sits to
+  // the right of the main room panel — verified live: main-panel matches
+  // sit at a fixed x, thread-panel matches at a much larger x), and takes
+  // the topmost such match, since the root message is pinned above the
+  // reply list. This only works for threads whose root was actually sent
+  // via this script's T3 Esc flow (has the bold ref line) — verified this
+  // finds and correctly parses real messages from actual usage.
+  function getThreadRootInfo() {
+    const refLineRe = /^\d+\s+[A-Z]{2}\s+.+\[[A-Za-z0-9]{6,12}\]$/;
+    const vw = window.innerWidth;
+    const bolds = Array.from(document.querySelectorAll("b")).filter(
+      (b) => b.offsetParent !== null && refLineRe.test((b.textContent || "").trim())
+    );
+    const rightSide = bolds.filter((b) => b.getBoundingClientRect().left > vw / 2);
+    if (!rightSide.length) return null;
+    const topmost = rightSide.sort((a, b) => a.getBoundingClientRect().top - b.getBoundingClientRect().top)[0];
+
+    let node = topmost;
+    for (let i = 0; i < 6 && node.parentElement; i++) {
+      node = node.parentElement;
+      if ((node.innerText || "").length > 40) break;
+    }
+    const text = node.innerText || "";
+
+    const withMention = text.match(/@\s*([^\n@]+?)\s*\n?\s*안녕하세요\s+(리더|파트장|프로)님/);
+    if (withMention) {
+      return { name: withMention[1].replace(/\s+/g, " ").trim(), honorific: withMention[2] };
+    }
+    const noMention = text.match(/안녕하세요\s+(리더|파트장|프로)님/);
+    return noMention ? { name: null, honorific: noMention[1] } : null;
+  }
+
+  function buildGratitudeText(info) {
+    const namePart = info.name ? `${info.name} ` : "";
+    return `${namePart}${info.honorific}님, 확인 감사합니다. 주신 메모 확인 후 처리하도록 하겠습니다!`;
+  }
+
+  function buildReminderText(info) {
+    const namePart = info.name ? `${info.name} ` : "";
+    return `안녕하세요 ${namePart}${info.honorific}님. 해당 티켓에 대한 답변이 아직 없어서 업무 마감차 리마인드챗드립니다. 시간 되실 때 확인 한 번 부탁드립니다. 감사합니다!`;
+  }
+
+  function insertThreadFollowup(kind) {
+    const box = getComposeBox();
+    if (!box) return;
+    const info = getThreadRootInfo();
+    if (!info) {
+      renderStatus(box, "Couldn't find a T3 Esc message for this thread — open a thread on one first", "grs-error");
+      setTimeout(removeBar, 3500);
+      return;
+    }
+    const text = kind === "gratitude" ? buildGratitudeText(info) : buildReminderText(info);
+    insertIntoCompose(box, text);
+  }
+
   // Index numbers are shared across everyone posting in the room (not just
   // this browser's local counter) — a colleague using this same script, or
   // you on a different day/session, may have already sent index N today.
@@ -728,6 +790,27 @@
     observer.observe(main, { childList: true, subtree: true });
   }
 
+  function showActionPicker() {
+    const box = getComposeBox();
+    if (!box) return;
+    openPicker(
+      box,
+      "Which action? (↑↓, Enter to pick)",
+      ["T3 Esc", "Gratitude", "Reminder"],
+      0,
+      (el, action) => {
+        el.textContent = action;
+      },
+      (action) => {
+        if (action === "T3 Esc") {
+          showTicketPicker();
+        } else {
+          insertThreadFollowup(action === "Gratitude" ? "gratitude" : "reminder");
+        }
+      }
+    );
+  }
+
   function requestSuggestions() {
     // Self-service room-ID discovery: to make a room use AI-suggest instead
     // of the (now default) ticket-forward picker, open it, press Option+G
@@ -736,7 +819,7 @@
     console.log(`[GChat Reply Suggest] space id: ${getSpaceId()} | name: ${getRoomName()} | isTemplateRoom: ${isTemplateRoom()}`);
 
     if (isTemplateRoom()) {
-      showTicketPicker();
+      showActionPicker();
     } else {
       requestAiSuggestions();
     }
