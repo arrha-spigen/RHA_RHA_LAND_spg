@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         GChat Reply Suggest
 // @namespace    https://spigen.com/gcx
-// @version      3.4.0
+// @version      3.4.1
 // @description  Alt+G offers T3 Esc (deterministic ticket-forward, no AI) / Gratitude / Reminder templates in every Google Chat room by default; only in designated rooms does it suggest AI-generated reply sentences instead
 // @author       Spigen GCX
 // @updateURL    https://raw.githubusercontent.com/codingintheusa0402/spigen-gcx-automation/main/Browser_Extensions/tampermonkey_scripts/GChat%20Reply%20Suggest.user.js
@@ -412,10 +412,21 @@
   const HONORIFIC_TITLES = ["리더", "파트장", "프로"];
   const DEFAULT_HONORIFIC = "프로";
 
+  // Zendesk's own option labels are often "{English category}_{Korean detail}"
+  // (e.g. "(Sales Inquiry)_재입고관련문의", "(Urgent)_리스팅오류") — only the
+  // part after the last "_" is wanted in the template; the English/bracketed
+  // category prefix gets dropped. Falls back to the whole string if there's
+  // no underscore, and to "문의" if there's no label at all.
+  function extractReasonLabel(raw) {
+    const s = (raw || "").trim();
+    if (!s) return "문의";
+    const idx = s.lastIndexOf("_");
+    const tail = (idx === -1 ? s : s.slice(idx + 1)).trim();
+    return tail.replace(/^\((.*)\)$/, "$1") || "문의";
+  }
+
   function buildForwardText(t, index, mentionName, title) {
-    // Zendesk's own option labels sometimes already carry parens (e.g.
-    // "(Urgent)_리스팅오류") — strip a wrapping pair so we don't double up.
-    const reason = (t.inquiryReason || "문의").trim().replace(/^\((.*)\)$/, "$1");
+    const reason = extractReasonLabel(t.inquiryReason);
     const prefix = mentionName ? `@${mentionName} ` : "";
     const honorific = title || DEFAULT_HONORIFIC;
     return `${prefix}안녕하세요 ${honorific}님, 담당하시는 제품 관련 (${reason}) 문의가 들어와 전달드립니다. 확인 후 회신해 주시면 감사하겠습니다!\n\n${referenceBlock(t, index)}`;
