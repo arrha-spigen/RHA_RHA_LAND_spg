@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         GChat Reply Suggest
 // @namespace    https://spigen.com/gcx
-// @version      3.0.0
+// @version      3.0.1
 // @description  Alt+G offers a deterministic ticket-forward template (no AI) sourced from recently-visited Zendesk tickets, in every Google Chat room by default; only in designated rooms does it suggest AI-generated reply sentences instead
 // @author       Spigen GCX
 // @updateURL    https://raw.githubusercontent.com/codingintheusa0402/spigen-gcx-automation/main/Browser_Extensions/tampermonkey_scripts/GChat%20Reply%20Suggest.user.js
@@ -436,20 +436,36 @@
   // today's visible messages for the highest reference-line index used,
   // and start from there. The local GM counter is kept only as a fallback
   // for the rare case a past forward has scrolled out of the DOM.
+  // The compose box lives INSIDE [role="main"] (verified: main.contains(box)
+  // is true), so a naive main.innerText/Range scan picks up whatever's
+  // currently drafted but not yet sent — not just actually-posted messages.
+  // This excludes the compose box's subtree so only real message content
+  // is considered. sinceNode, if given, restricts the start boundary (e.g.
+  // the "Today" heading) — otherwise scans from the very start of main.
+  function getMessageOnlyText(main, sinceNode) {
+    const composeBox = getComposeBox();
+    const range = document.createRange();
+    if (sinceNode) {
+      range.setStartBefore(sinceNode);
+    } else {
+      range.selectNodeContents(main);
+      range.collapse(true);
+    }
+    if (composeBox && main.contains(composeBox)) {
+      range.setEndBefore(composeBox);
+    } else {
+      range.setEndAfter(main.lastChild || main);
+    }
+    return range.toString();
+  }
+
   function findMaxIndexInMain(main) {
     const headings = Array.from(main.querySelectorAll('[role="heading"]'));
     const todayHeading = headings.find((h) => (h.textContent || "").trim() === "Today");
-    let text;
-    if (todayHeading) {
-      const range = document.createRange();
-      range.setStartBefore(todayHeading);
-      range.setEndAfter(main.lastChild || main);
-      text = range.toString();
-    } else {
-      // No "Today" separator rendered — either nothing sent today yet, or
-      // every visible message already is today's (small/fresh room).
-      text = main.innerText || "";
-    }
+    // No "Today" separator rendered — either nothing sent today yet, or
+    // every visible message already is today's (small/fresh room); either
+    // way, scanning from the start of main is correct.
+    const text = getMessageOnlyText(main, todayHeading);
 
     // Not anchored to line start/end: Chat's innerText doesn't reliably put a
     // newline between consecutive messages from the same sender (verified —
@@ -549,8 +565,14 @@
     if (!box) return;
     const spaceId = getSpaceId();
     const index = nextIndexForToday(spaceId);
+    const refLineText = referenceLineText(t, index);
     insertIntoCompose(box, buildForwardText(t, index));
-    applyReferenceLineFormatting(box, referenceLineText(t, index), t.url);
+    applyReferenceLineFormatting(box, refLineText, t.url);
+    // stage: "drafted" — NOT yet awaiting a reply. The watcher below only
+    // starts watching once this text actually shows up as a sent message
+    // in the room (see setupPendingConfirmWatcher), otherwise an unrelated
+    // message arriving while you're still typing/mentioning gets mistaken
+    // for someone replying to a message you haven't even sent yet.
     GM_setValue(PENDING_CONFIRM_PREFIX + spaceId, {
       index,
       country: t.country,
@@ -558,7 +580,8 @@
       productName: t.productName,
       asin: t.asin,
       url: t.url,
-      awaiting: true,
+      refLineText,
+      stage: "drafted",
       setAt: Date.now(),
     });
     if (mentionName) {
@@ -625,7 +648,9 @@
       if (!box) return;
       insertIntoCompose(box, buildConfirmText(pending));
       applyReferenceLineFormatting(box, referenceLineText(pending, pending.index), pending.url);
-      GM_setValue(PENDING_CONFIRM_PREFIX + getSpaceId(), { ...pending, awaiting: false });
+      // Done watching this forward — clear it so the watcher stops here
+      // instead of re-triggering on the next unrelated message too.
+      GM_setValue(PENDING_CONFIRM_PREFIX + getSpaceId(), null);
       if (mentionName) {
         moveCursorToStart(box);
         renderStatus(box, `Type @ to mention ${mentionName}, then continue typing`, "grs-hint");
@@ -635,6 +660,11 @@
 
   // Watches for a new incoming message while a forward is pending
   // confirmation in a template room, and offers the confirm-reply chip.
+  // Two-stage: "drafted" → "sent". Only messages that arrive AFTER the
+  // forward is actually visible in the room count as a possible reply —
+  // otherwise something unrelated arriving while you're still drafting (or
+  // typing the real @mention) gets mistaken for a reply to a message you
+  // haven't sent yet, and whatever you click gets appended onto your draft.
   function setupPendingConfirmWatcher() {
     const main = document.querySelector('[role="main"]');
     if (!main) return;
@@ -642,8 +672,26 @@
     let debounceTimer = null;
     const observer = new MutationObserver(() => {
       if (!isTemplateRoom()) return;
-      const pending = GM_getValue(PENDING_CONFIRM_PREFIX + getSpaceId(), null);
-      if (!pending || !pending.awaiting) return;
+      const spaceId = getSpaceId();
+      const pending = GM_getValue(PENDING_CONFIRM_PREFIX + spaceId, null);
+      if (!pending) return;
+
+      if (pending.stage === "drafted") {
+        // getMessageOnlyText, not main.innerText — the compose box lives
+        // inside main, so a plain scan would "detect" the draft itself as
+        // already sent the instant it's typed.
+        const text = getMessageOnlyText(main);
+        if (pending.refLineText && text.includes(pending.refLineText)) {
+          GM_setValue(PENDING_CONFIRM_PREFIX + spaceId, { ...pending, stage: "sent", sentAt: Date.now() });
+        }
+        return;
+      }
+
+      if (pending.stage !== "sent") return;
+      // Give the DOM a moment to fully settle after our own message
+      // renders — the tail end of that same render is still "mutations",
+      // not a genuinely new/different message.
+      if (Date.now() - (pending.sentAt || 0) < 1500) return;
 
       clearTimeout(debounceTimer);
       debounceTimer = setTimeout(() => {
