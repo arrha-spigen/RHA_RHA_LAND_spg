@@ -85,21 +85,21 @@ Adds a "Run Now" button on Amazon.de Seller Central order pages. On click, attem
 
 ---
 
-### GChat Reply Suggest (`v2.3.0`)
+### GChat Reply Suggest (`v3.0.0`)
 **Matches:** `chat.google.com/*` and `spigenhelp.zendesk.com/agent/tickets/*` (works inside the Chrome-PWA "desktop app" install too, since it's the same Chrome origin/extension context)
 
-Alt+G behaves differently depending on the Chat room:
+Alt+G behaves differently depending on the Chat room. **As of v3.0.0 the deterministic ticket-forward picker is the default in every room** — AI-suggested replies are now the exception, opted into per-room, not the other way around (this flipped from v2.x, where AI-suggest was the default and the ticket picker was the opt-in).
 
-**In most rooms** — suggests 3 short candidate reply sentences for the current conversation as clickable chips docked above the compose box (AI-generated). Click a chip to insert it at the cursor; Esc dismisses the bar.
+**In designated AI-suggest rooms** (`AI_SUGGEST_ROOM_IDS` near the top of the script, empty until a room is added) — suggests 3 short candidate reply sentences for the current conversation as clickable chips docked above the compose box (AI-generated). Click a chip to insert it at the cursor; Esc dismisses the bar.
 - Grabs the tail (~2000 chars) of `[role="main"]`'s `innerText` as conversation context — deliberately avoids Google Chat's hashed/obfuscated class names, which rotate on redeploy
 - Picks the last visible `[role="textbox"][contenteditable="true"]` on the page as the active compose box (Google Chat renders more than one; the others are hidden thread/history boxes)
 - Calls a **local** backend (`../gchat_reply_suggest_server.py`, listens on `127.0.0.1:8765`) rather than a cloud API — the backend shells out to the existing `claude` CLI (`~/.local/bin/claude -p`), so it reuses the Claude Code subscription with no separate API key or per-token billing
 - Backend must be running for suggestions to work: `python3 ~/Desktop/GCX/Browser_Extensions/gchat_reply_suggest_server.py` (not yet wired to auto-start on login — run manually, or ask to set up a LaunchAgent)
 
-**In designated "ticket forward" rooms** — Alt+G instead shows a **deterministic, no-AI** ticket-forward picker:
-- Rooms are matched by Chat **space ID** (the `/app/chat/<ID>` segment of the URL), not by display name — `document.title` turned out to be unreliable for this (Chat rewrites it for unread counts, "X messaged you", etc., not just a stable "RoomName - Chat" string). Configured in `TEMPLATE_ROOM_IDS` near the top of the script. Currently `Private` (`AAQAc9NQmJQ`) and `GCX전략 x ADS3` (`AAAAKwBoZPU`) are confirmed; **to add another room**, open it, press Option+G once, then check the browser console — the script logs the current space ID and name every time, ready to copy into the config
+**Everywhere else (the default)** — Alt+G shows a **deterministic, no-AI** ticket-forward picker:
+- Rooms are opted OUT of this (into AI-suggest instead) by Chat **space ID** (the `/app/chat/<ID>` segment of the URL), not by display name — `document.title` turned out to be unreliable for this (Chat rewrites it for unread counts, "X messaged you", etc., not just a stable "RoomName - Chat" string). Configured in `AI_SUGGEST_ROOM_IDS` near the top of the script; **to add a room** (e.g. once the planned "GCX T2 ESC. Ticket 보고" room exists), open it, press Option+G once, then check the browser console — the script logs the current space ID and name every time, ready to copy into the config
 - The Zendesk-side half of this same script (`@match spigenhelp.zendesk.com/agent/tickets/*`) records Country/Device/Product Name/ASIN (same custom-field IDs as GCX Reply's `ZD` constant) for every ticket you visit, into a shared list of the 10 most recent
-- Alt+G in a template room shows that list (most recent pre-highlighted); **↑/↓ arrow keys browse older tickets, Enter confirms** (mouse click also works). Picking one opens a second picker — **who to @mention** (defaults to `(no mention)`, plus every sender seen in the visible conversation) — then inserts:
+- Alt+G shows that list (most recent pre-highlighted); **↑/↓ arrow keys browse older tickets, Enter confirms** (mouse click also works). Picking one opens a second picker — **who to @mention** (defaults to `(no mention)`, plus every sender seen in the visible conversation) — then inserts:
   ```
   안녕하세요 프로님, 담당하시는 제품 관련 (사유) 문의가 들어와 전달드립니다. 확인 후 회신해 주시면 감사하겠습니다!
 

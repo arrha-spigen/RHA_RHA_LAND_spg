@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         GChat Reply Suggest
 // @namespace    https://spigen.com/gcx
-// @version      2.3.0
-// @description  Alt+G suggests AI reply sentences in most Google Chat rooms; in designated "ticket forward" rooms it instead offers a deterministic ticket-forward template (no AI) sourced from recently-visited Zendesk tickets
+// @version      3.0.0
+// @description  Alt+G offers a deterministic ticket-forward template (no AI) sourced from recently-visited Zendesk tickets, in every Google Chat room by default; only in designated rooms does it suggest AI-generated reply sentences instead
 // @author       Spigen GCX
 // @updateURL    https://raw.githubusercontent.com/codingintheusa0402/spigen-gcx-automation/main/Browser_Extensions/tampermonkey_scripts/GChat%20Reply%20Suggest.user.js
 // @downloadURL  https://raw.githubusercontent.com/codingintheusa0402/spigen-gcx-automation/main/Browser_Extensions/tampermonkey_scripts/GChat%20Reply%20Suggest.user.js
@@ -20,17 +20,18 @@
 (function () {
   "use strict";
 
-  // Rooms that get the deterministic ticket-forward template instead of
-  // AI-suggested replies, keyed by Chat "space" ID — the /app/chat/<ID>
-  // segment of the URL. This is NOT the room's display name: document.title
-  // is unreliable (Chat rewrites it for unread counts, "X messaged you",
-  // etc.), so the space ID is the only stable identifier. To add a room:
-  // open it, press Option+G once (even if it falls through to AI-suggest),
-  // and check the browser console — this script logs the current space ID
-  // and name every time so you can copy it in here.
-  const TEMPLATE_ROOM_IDS = {
-    AAQAc9NQmJQ: "Private", // confirmed 2026-08-03
-    AAAAKwBoZPU: "GCX전략 x ADS3", // confirmed 2026-08-03 (note: space around "x", not "GCX전략xADS3")
+  // As of 2026-08-04: the ticket-forward picker is the DEFAULT for every
+  // room. AI-suggested replies are now the exception, only in rooms listed
+  // here — keyed by Chat "space" ID, the /app/chat/<ID> segment of the URL.
+  // This is NOT the room's display name: document.title is unreliable
+  // (Chat rewrites it for unread counts, "X messaged you", etc.), so the
+  // space ID is the only stable identifier. To add a room here (or to a
+  // room that doesn't exist yet, like "GCX T2 ESC. Ticket 보고" below): once
+  // it exists, open it, press Option+G once, then check the browser
+  // console — this script logs the current space ID and name every time,
+  // ready to copy in.
+  const AI_SUGGEST_ROOM_IDS = {
+    // "<space id>": "GCX T2 ESC. Ticket 보고", // TODO: fill in once this room is created
   };
 
   // Same custom-field IDs GCX Reply.user.js already uses (ZD constant there),
@@ -212,7 +213,8 @@
   }
 
   // Best-effort display name, only used for logging/labels — never for the
-  // template-room decision itself (see TEMPLATE_ROOM_IDS comment above).
+  // AI-suggest-vs-ticket-forward decision itself (see AI_SUGGEST_ROOM_IDS
+  // comment above).
   function getRoomName() {
     return (document.title || "")
       .replace(/^\(\d+\)\s*/, "")
@@ -221,7 +223,7 @@
   }
 
   function isTemplateRoom() {
-    return getSpaceId() in TEMPLATE_ROOM_IDS;
+    return !(getSpaceId() in AI_SUGGEST_ROOM_IDS);
   }
 
   function getTranscriptTail() {
@@ -654,9 +656,10 @@
   }
 
   function requestSuggestions() {
-    // Self-service room-ID discovery: to add a new template room, open it,
-    // press Option+G once, then check this log line and copy the id into
-    // TEMPLATE_ROOM_IDS above.
+    // Self-service room-ID discovery: to make a room use AI-suggest instead
+    // of the (now default) ticket-forward picker, open it, press Option+G
+    // once, then check this log line and copy the id into
+    // AI_SUGGEST_ROOM_IDS above.
     console.log(`[GChat Reply Suggest] space id: ${getSpaceId()} | name: ${getRoomName()} | isTemplateRoom: ${isTemplateRoom()}`);
 
     if (isTemplateRoom()) {
