@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         GChat Reply Suggest
 // @namespace    https://spigen.com/gcx
-// @version      3.3.0
+// @version      3.4.0
 // @description  Alt+G offers T3 Esc (deterministic ticket-forward, no AI) / Gratitude / Reminder templates in every Google Chat room by default; only in designated rooms does it suggest AI-generated reply sentences instead
 // @author       Spigen GCX
 // @updateURL    https://raw.githubusercontent.com/codingintheusa0402/spigen-gcx-automation/main/Browser_Extensions/tampermonkey_scripts/GChat%20Reply%20Suggest.user.js
@@ -489,19 +489,14 @@
     insertIntoCompose(box, text);
   }
 
-  // Index numbers are shared across everyone posting in the room (not just
-  // this browser's local counter) — a colleague using this same script, or
-  // you on a different day/session, may have already sent index N today.
-  // So the real source of truth is what's actually in the chat log: scan
-  // today's visible messages for the highest reference-line index used,
-  // and start from there. The local GM counter is kept only as a fallback
-  // for the rare case a past forward has scrolled out of the DOM.
-  // The compose box lives INSIDE [role="main"] (verified: main.contains(box)
-  // is true), so a naive main.innerText/Range scan picks up whatever's
-  // currently drafted but not yet sent — not just actually-posted messages.
-  // This excludes the compose box's subtree so only real message content
-  // is considered. sinceNode, if given, restricts the start boundary (e.g.
-  // the "Today" heading) — otherwise scans from the very start of main.
+  // Used by the "drafted" -> "sent" watcher transition (see
+  // setupPendingConfirmWatcher) to check whether a forward has actually been
+  // posted yet. The compose box lives INSIDE [role="main"] (verified:
+  // main.contains(box) is true), so a naive main.innerText/Range scan picks
+  // up whatever's currently drafted but not yet sent — not just
+  // actually-posted messages. This excludes the compose box's subtree so
+  // only real message content is considered. sinceNode, if given, restricts
+  // the start boundary — otherwise scans from the very start of main.
   function getMessageOnlyText(main, sinceNode) {
     const composeBox = getComposeBox();
     const range = document.createRange();
@@ -519,52 +514,55 @@
     return range.toString();
   }
 
-  function findMaxIndexInMain(main) {
-    const headings = Array.from(main.querySelectorAll('[role="heading"]'));
-    const todayHeading = headings.find((h) => (h.textContent || "").trim() === "Today");
-    // No "Today" separator rendered — either nothing sent today yet, or
-    // every visible message already is today's (small/fresh room); either
-    // way, scanning from the start of main is correct.
-    const text = getMessageOnlyText(main, todayHeading);
+  const MAX_DAILY_INDEX = 15;
 
-    // Not anchored to line start/end: Chat's innerText doesn't reliably put a
-    // newline between consecutive messages from the same sender (verified —
-    // they can run together with zero separator), so a ^...$ line match
-    // silently finds nothing. Instead anchor on the distinctive shape of our
-    // own reference line — "<index> <2-letter country> ... [ASIN]" — which
-    // is specific enough to not false-match other bot/summary messages
-    // (those use "ASIN=XXXX", not "[XXXX]").
-    let max = 0;
-    const re = /(\d+)\s+([A-Z]{2})\s+.{3,80}?\[([A-Za-z0-9]{6,12})\]/g;
-    let m;
-    while ((m = re.exec(text))) {
-      const n = parseInt(m[1], 10);
-      if (!Number.isNaN(n) && n > max) max = n;
-    }
-    return max;
-  }
-
-  // Read-only: what the next index WOULD be, based on the room's actual
-  // sent messages (+ the committed fallback, see commitIndexUsed). Does
-  // NOT persist anything — safe to call on every draft/re-draft. Persisting
-  // here (as an earlier version did) meant re-opening the picker and
-  // picking a different ticket, or aborting and redrafting, silently
-  // burned index numbers that were never actually sent, so a room's real
-  // sent messages could show 1, 2, 5 with 3 and 4 never having existed.
+  // Index is now a user pick, not an auto-scanned guess (the earlier DOM-scan
+  // approach — searching the room's actual messages for the highest
+  // reference-line index used — was replaced per explicit request: the user
+  // picks from a 1..15 dropdown instead, defaulting to "next after whatever
+  // was last confirmed sent today in this room"). This local counter is the
+  // only source of truth now — keyed by room + day (todayKST()), so it
+  // resets naturally at midnight KST with no separate reset logic needed.
+  //
+  // Read-only: what to default-select in the index dropdown. Does NOT
+  // persist anything — safe to call on every draft/re-draft/re-open.
+  // Persisting here would mean re-opening the picker and picking a
+  // different ticket, or aborting and redrafting, silently burns index
+  // numbers that were never actually sent.
   function peekNextIndexForToday(spaceId) {
-    const main = document.querySelector('[role="main"]');
-    const maxSeen = main ? findMaxIndexInMain(main) : 0;
     const key = DAILY_INDEX_PREFIX + spaceId + "_" + todayKST();
     const localMax = GM_getValue(key, 0);
-    return Math.max(maxSeen, localMax) + 1;
+    return Math.min(localMax + 1, MAX_DAILY_INDEX);
   }
 
   // Only call once a draft is CONFIRMED actually sent (see the "drafted" ->
   // "sent" transition in setupPendingConfirmWatcher) — this is the only
-  // place the fallback counter should advance.
+  // place the counter should advance, so a merely-drafted-then-abandoned
+  // pick doesn't push the next default forward.
   function commitIndexUsed(spaceId, index) {
     const key = DAILY_INDEX_PREFIX + spaceId + "_" + todayKST();
     if (index > GM_getValue(key, 0)) GM_setValue(key, index);
+  }
+
+  // items = [1..15], default-highlighted on whatever peekNextIndexForToday()
+  // suggests — e.g. if 1 was already sent today, 2 is pre-highlighted, but
+  // 1 still sits right above it in the list (↑ once reaches it) in case you
+  // need to reuse it (a redo, a correction, etc.).
+  function showIndexPicker(defaultIndex, onPicked) {
+    const box = getComposeBox();
+    if (!box) return;
+    const items = Array.from({ length: MAX_DAILY_INDEX }, (_, i) => i + 1);
+    const clamped = Math.min(Math.max(defaultIndex, 1), MAX_DAILY_INDEX);
+    openPicker(
+      box,
+      "Which index? (↑↓, Enter to pick)",
+      items,
+      clamped - 1,
+      (el, n) => {
+        el.textContent = String(n);
+      },
+      onPicked
+    );
   }
 
   function relativeTime(ts) {
@@ -633,11 +631,10 @@
 
   const NO_MENTION = "(no mention)";
 
-  function insertForwardWithMention(t, mentionName, honorific) {
+  function insertForwardWithMention(t, mentionName, honorific, index) {
     const box = getComposeBox();
     if (!box) return;
     const spaceId = getSpaceId();
-    const index = peekNextIndexForToday(spaceId);
     const refLineText = referenceLineText(t, index);
     insertIntoCompose(box, buildForwardText(t, index, mentionName, honorific));
     applyReferenceLineFormatting(box, refLineText, t.url);
@@ -722,7 +719,10 @@
       (t) => {
         showMentionPicker("Mention who? (↑↓, Enter to pick)", null, (mentionName) => {
           showHonorificPicker((honorific) => {
-            insertForwardWithMention(t, mentionName, honorific);
+            const spaceId = getSpaceId();
+            showIndexPicker(peekNextIndexForToday(spaceId), (index) => {
+              insertForwardWithMention(t, mentionName, honorific, index);
+            });
           });
         });
       }
