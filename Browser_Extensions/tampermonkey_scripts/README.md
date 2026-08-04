@@ -85,7 +85,7 @@ Adds a "Run Now" button on Amazon.de Seller Central order pages. On click, attem
 
 ---
 
-### GChat Reply Suggest (`v3.4.1`)
+### GChat Reply Suggest (`v3.4.2`)
 **Matches:** `chat.google.com/*` and `spigenhelp.zendesk.com/agent/tickets/*` (works inside the Chrome-PWA "desktop app" install too, since it's the same Chrome origin/extension context)
 
 Alt+G behaves differently depending on the Chat room. **The deterministic ticket-forward flow is the default in every room** — AI-suggested replies are now the exception, opted into per-room, not the other way around.
@@ -97,6 +97,8 @@ Alt+G behaves differently depending on the Chat room. **The deterministic ticket
 - Backend must be running for suggestions to work: `python3 ~/Desktop/GCX/Browser_Extensions/gchat_reply_suggest_server.py` (not yet wired to auto-start on login — run manually, or ask to set up a LaunchAgent)
 
 **Everywhere else (the default)** — Alt+G first shows a **T3 Esc / Gratitude / Reminder** picker. Rooms are opted OUT of this (into AI-suggest instead) by Chat **space ID** (the `/app/chat/<ID>` segment of the URL), not by display name — `document.title` turned out to be unreliable for this (Chat rewrites it for unread counts, "X messaged you", etc., not just a stable "RoomName - Chat" string). Configured in `AI_SUGGEST_ROOM_IDS` near the top of the script; **to add a room** (e.g. once the planned "GCX T2 ESC. Ticket 보고" room exists), open it, press Option+G once, then check the browser console — the script logs the current space ID and name every time, ready to copy into the config.
+
+**All pickers** (ticket/mention/honorific/index) listen for ↑/↓/Enter/Escape on the **capture phase** with `stopImmediatePropagation()`, not just `preventDefault()`. This mattered in practice: `preventDefault()` alone only cancels the *browser's* default action for a key — it does nothing to stop *other* JS listeners (Chat's own) from also reacting to the same event. Chat treats ↑ in an empty compose box as "edit my last sent message" (a common chat-app convention), so navigating a picker with ↑ was silently also flipping the previous sent message into inline edit mode underneath it. Capture-phase + `stopImmediatePropagation()` means this script's handler runs and fully consumes the event before Chat's own bubbling-phase listener ever sees it, regardless of registration order (Chat's script loads well before this one, so on the bubbling phase alone it would always win the race).
 
 **T3 Esc** — the deterministic, no-AI ticket-forward flow:
 - The Zendesk-side half of this same script (`@match spigenhelp.zendesk.com/agent/tickets/*`) records Country/Device/Product Name/ASIN (same custom-field IDs as GCX Reply's `ZD` constant) for every ticket you visit, into a shared list of the 10 most recent

@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         GChat Reply Suggest
 // @namespace    https://spigen.com/gcx
-// @version      3.4.1
+// @version      3.4.2
 // @description  Alt+G offers T3 Esc (deterministic ticket-forward, no AI) / Gratitude / Reminder templates in every Google Chat room by default; only in designated rooms does it suggest AI-generated reply sentences instead
 // @author       Spigen GCX
 // @updateURL    https://raw.githubusercontent.com/codingintheusa0402/spigen-gcx-automation/main/Browser_Extensions/tampermonkey_scripts/GChat%20Reply%20Suggest.user.js
@@ -837,40 +837,62 @@
   }
 
   function initChatSide() {
-    document.addEventListener("keydown", (e) => {
-      if (pickerState) {
-        if (e.key === "ArrowDown") {
-          e.preventDefault();
-          pickerState.selectedIndex = Math.min(pickerState.selectedIndex + 1, pickerState.items.length - 1);
-          highlightPickerSelection();
-          return;
+    // Capture phase (the `true` below) + stopImmediatePropagation: while a
+    // picker is open, ArrowUp/ArrowDown/Enter/Escape must never reach Chat's
+    // own keyboard handling. Verified this was a real bug, not theoretical:
+    // preventDefault() alone only cancels the browser's default action for
+    // the key — it does NOT stop other listeners (Chat's own) from also
+    // reacting to the same event. Chat treats ArrowUp with an empty compose
+    // box as "edit my last sent message" (a common chat-app convention), so
+    // navigating the picker with ↑ was silently also flipping the previous
+    // sent message into edit mode underneath it. Listening on the capture
+    // phase means we see the event before Chat's own bubbling-phase
+    // listeners do at all, regardless of registration order (Chat's script
+    // loads long before this one, at document-idle, so on the bubbling
+    // phase alone Chat's listener would win the race).
+    document.addEventListener(
+      "keydown",
+      (e) => {
+        if (pickerState) {
+          if (e.key === "ArrowDown") {
+            e.preventDefault();
+            e.stopImmediatePropagation();
+            pickerState.selectedIndex = Math.min(pickerState.selectedIndex + 1, pickerState.items.length - 1);
+            highlightPickerSelection();
+            return;
+          }
+          if (e.key === "ArrowUp") {
+            e.preventDefault();
+            e.stopImmediatePropagation();
+            pickerState.selectedIndex = Math.max(pickerState.selectedIndex - 1, 0);
+            highlightPickerSelection();
+            return;
+          }
+          if (e.key === "Enter") {
+            e.preventDefault();
+            e.stopImmediatePropagation();
+            confirmPickerSelection();
+            return;
+          }
+          if (e.key === "Escape") {
+            e.preventDefault();
+            e.stopImmediatePropagation();
+            removeBar();
+            return;
+          }
         }
-        if (e.key === "ArrowUp") {
-          e.preventDefault();
-          pickerState.selectedIndex = Math.max(pickerState.selectedIndex - 1, 0);
-          highlightPickerSelection();
-          return;
-        }
-        if (e.key === "Enter") {
-          e.preventDefault();
-          confirmPickerSelection();
-          return;
-        }
-        if (e.key === "Escape") {
-          e.preventDefault();
-          removeBar();
-          return;
-        }
-      }
 
-      // Use e.code (physical key), not e.key: on Mac, Option+G produces "©"
-      // as e.key (dead-key/diacritic composition), not the letter "g".
-      if (e.altKey && !e.ctrlKey && !e.metaKey && !e.shiftKey && e.code === "KeyG") {
-        e.preventDefault();
-        requestSuggestions();
-      }
-      if (e.key === "Escape") removeBar();
-    });
+        // Use e.code (physical key), not e.key: on Mac, Option+G produces "©"
+        // as e.key (dead-key/diacritic composition), not the letter "g".
+        if (e.altKey && !e.ctrlKey && !e.metaKey && !e.shiftKey && e.code === "KeyG") {
+          e.preventDefault();
+          e.stopImmediatePropagation();
+          requestSuggestions();
+        }
+        if (e.key === "Escape") removeBar();
+      },
+      true
+    );
 
     // [role="main"] renders after the conversation loads; retry briefly.
     let tries = 0;
