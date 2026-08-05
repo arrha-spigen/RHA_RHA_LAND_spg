@@ -85,7 +85,7 @@ Adds a "Run Now" button on Amazon.de Seller Central order pages. On click, attem
 
 ---
 
-### GChat Reply Suggest (`v3.4.2`)
+### GChat Reply Suggest (`v3.5.0`)
 **Matches:** `chat.google.com/*` and `spigenhelp.zendesk.com/agent/tickets/*` (works inside the Chrome-PWA "desktop app" install too, since it's the same Chrome origin/extension context)
 
 Alt+G behaves differently depending on the Chat room. **The deterministic ticket-forward flow is the default in every room** — AI-suggested replies are now the exception, opted into per-room, not the other way around.
@@ -102,6 +102,7 @@ Alt+G behaves differently depending on the Chat room. **The deterministic ticket
 
 **T3 Esc** — the deterministic, no-AI ticket-forward flow:
 - The Zendesk-side half of this same script (`@match spigenhelp.zendesk.com/agent/tickets/*`) records Country/Device/Product Name/ASIN (same custom-field IDs as GCX Reply's `ZD` constant) for every ticket you visit, into a shared list of the 10 most recent
+  - **Zendesk is a single-page app** — clicking between tickets (a list, a "next ticket" button, etc.) changes the URL without a full page reload, so recording once when the script loads only ever captured whichever ticket happened to be open at that moment; anything visited afterward via in-app navigation silently never got recorded. Fixed by polling `location.pathname` for the ticket ID to change (every 1.5s) and re-recording each time, instead of a one-shot call. `recordCurrentTicket()` also now logs to the console on both success and failure (`[GChat Reply Suggest] recorded ticket #...`) for easy self-diagnosis if a ticket still doesn't show up in the picker
 - Shows that list (most recent pre-highlighted); **↑/↓ arrow keys browse older tickets, Enter confirms** (mouse click also works). Picking one opens a second picker — **who to @mention** (defaults to `(no mention)`, plus every sender seen in the visible conversation) — then a third picker — **which honorific** (`리더`/`파트장`/`프로`, defaults to `프로` — configured in `HONORIFIC_TITLES`/`DEFAULT_HONORIFIC` near the top of the script) — then a fourth picker — **which index number** (see below) — then inserts:
   ```
   안녕하세요 {리더|파트장|프로}님, 담당하시는 제품 관련 (사유) 문의가 들어와 전달드립니다. 확인 후 회신해 주시면 감사하겠습니다!

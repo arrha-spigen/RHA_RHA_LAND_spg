@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         GChat Reply Suggest
 // @namespace    https://spigen.com/gcx
-// @version      3.4.2
+// @version      3.5.0
 // @description  Alt+G offers T3 Esc (deterministic ticket-forward, no AI) / Gratitude / Reminder templates in every Google Chat room by default; only in designated rooms does it suggest AI-generated reply sentences instead
 // @author       Spigen GCX
 // @updateURL    https://raw.githubusercontent.com/codingintheusa0402/spigen-gcx-automation/main/Browser_Extensions/tampermonkey_scripts/GChat%20Reply%20Suggest.user.js
@@ -121,8 +121,9 @@
       list.unshift(entry);
       list = list.slice(0, MAX_RECENT_TICKETS);
       GM_setValue(RECENT_TICKETS_KEY, list);
+      console.log(`[GChat Reply Suggest] recorded ticket #${ticketId}`, entry);
     } catch (e) {
-      console.error("[GChat Reply Suggest] failed to record ticket", e);
+      console.error(`[GChat Reply Suggest] failed to record ticket #${ticketId}`, e);
     }
   }
 
@@ -913,6 +914,21 @@
   if (location.hostname === "chat.google.com") {
     initChatSide();
   } else if (location.hostname === "spigenhelp.zendesk.com") {
-    recordCurrentTicket();
+    // Zendesk is a single-page app — clicking between tickets (a list, a
+    // "next ticket" button, etc.) changes the URL without a full page
+    // reload, so a one-shot call here only ever records whichever ticket
+    // happened to be open at the moment the script first loaded. Poll for
+    // the ticket ID in the URL to change and re-record each time, instead.
+    let lastTicketId = null;
+    const checkForTicketChange = () => {
+      const m = location.pathname.match(/\/tickets\/(\d+)/);
+      const id = m ? m[1] : null;
+      if (id && id !== lastTicketId) {
+        lastTicketId = id;
+        recordCurrentTicket();
+      }
+    };
+    checkForTicketChange();
+    setInterval(checkForTicketChange, 1500);
   }
 })();
