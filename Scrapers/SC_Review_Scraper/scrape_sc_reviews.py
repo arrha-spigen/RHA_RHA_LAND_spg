@@ -16,7 +16,7 @@ import requests
 # USER CONFIG — edit these before each run
 # ═══════════════════════════════════════════════════════════════════════════════
 
-DOMAINS = ["US"]
+DOMAINS = ["EU"]
 # List of domains to scrape in parallel. Each gets its own CSV file.
 # Single domain example : DOMAINS = ["US"]
 # Supported             : "US" | "EU" | "UK" | "DE" | "FR" | "IT" | "ES" | "JP" | "IN"
@@ -54,18 +54,28 @@ OUT_DIR = os.path.expanduser("~/Desktop")
 # Directory where CSVs are saved.
 # Each domain is saved as <OUT_DIR>/<DOMAIN>_seller_central_reviews.csv
 
-HEADERS_TO_INCLUDE = None
-# Columns to keep in the output CSV. None → all columns (default).
-# Example: ['ASIN', 'Reviewer', 'Review Ratings', 'Review Title', '본문', 'Image URL']
+HEADERS_TO_INCLUDE = [
+    'ASIN', 'Created 날짜', '사진 유무', 'Reviewer', 'Review Ratings',
+    'Review Title', '본문', '국가', 'Review Link', 'Image URL', 'Review ID',
+    'Order ID',
+]
+# Columns to keep in the output CSV. None → all columns.
+# Default (set 2026-08-06): excludes 'Product Rating', 'Ratings Count', 'Domain Code'
+# per standing user preference — set back to None (or re-add those 3 names above)
+# only if explicitly asked to resume them.
 # Full list: ASIN | Created 날짜 | 사진 유무 | Reviewer | Review Ratings | Review Title
 #            본문 | Product Rating | Ratings Count | Domain Code | 국가
-#            Review Link | Image URL | Review ID
+#            Review Link | Image URL | Review ID | Order ID
 
 ASIN_FILTER_FILE = None
 # Path to a .txt file containing one ASIN per line.
 # Only reviews whose ASIN matches an entry in this file will be saved to CSV.
 # None → save all reviews regardless of ASIN (default).
 # Example: ASIN_FILTER_FILE = "/Users/kevinkim/Desktop/target_asins.txt"
+
+MIN_REVIEW_DATE = "2026-07-25"
+# yyyy-mm-dd string, or None to disable. Only reviews with Created 날짜 >= this
+# date are kept (applied after ASIN filtering, before CSV write).
 
 FETCH_IMAGES = True
 # True  — fetch reviewer-attached media URLs after all page scraping is done.
@@ -77,16 +87,16 @@ FETCH_IMAGES_ONLY = False
 #         Use this to recover after a browser crash that interrupted the image fetch.
 #         DOMAINS and OUT_DIR must match the original run so the right CSVs are found.
 
-FETCH_ORDER_ID = False
+FETCH_ORDER_ID = True
 # True  — after scraping each domain, call the Seller Central internal API
 #         (brandcustomerreviews/api/reviews) to retrieve the Amazon Order ID for
 #         each verified-purchase review. Adds an 'Order ID' column to the CSV.
 #         ~84 % of DE reviews have an Order ID; non-verified purchases return "".
-#         Chrome must be open with --remote-debugging-port=9222 (same session used
-#         for scraping). No extra login needed — reuses the existing SC cookies.
+#         Reuses the same browser context as scraping. No extra login needed —
+#         reuses the existing SC cookies.
 # False — skip order ID fetching (default, faster runs).
 
-UPLOAD_TO_SHEETS = False
+UPLOAD_TO_SHEETS = True
 # True  — after scraping, upload each domain CSV as a new sheet to SHEETS_SPREADSHEET_ID.
 #         Sheet names: {DOMAIN}_seller_central_reviews_{yymmdd} (KST date of the run).
 # False — skip upload (default).
@@ -118,9 +128,6 @@ SCRAPER_PROFILE_DIR = os.path.expanduser("~/.chrome-scraper-profile")
 # Dedicated Chrome profile for scraping. SC login sessions are saved here between runs.
 # First run: Chrome opens → log in to all SC accounts → sessions persist automatically.
 # Subsequent runs: Chrome opens with saved sessions → scraping starts after Enter.
-
-CHROME_PATH = "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
-# Path to the Chrome executable. Used only when HEADLESS = False.
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # DOMAIN REGISTRY
@@ -680,32 +687,33 @@ async def _enrich_csv_with_images(csv_path, page, prof):
     return total
 
 
-async def _fetch_order_id_map(ctx, domain, mons_params=""):
+_ORDER_ID_FETCH_JS = """async (url) => {
+    const res = await fetch(url, { credentials: 'include', headers: { 'Accept': 'application/json' } });
+    const text = await res.text();
+    if (!res.ok) return { __error: `HTTP ${res.status}`, __body: text.slice(0, 200) };
+    try { return JSON.parse(text); }
+    catch (e) { return { __error: `parse: ${e.message}`, __body: text.slice(0, 200) }; }
+}"""
+
+
+async def _fetch_order_id_map(page, domain, mons_params=""):
     """Call the SC internal reviews API and return {reviewId: orderId} for all pages.
 
     The API is the same endpoint the brand-customer-reviews UI uses internally.
     It returns orderId directly per review (no SP-API needed).
     ~84 % of EU/US reviews have an orderId; non-verified purchases return "".
+
+    Runs the fetch() as in-page JS on the already-authenticated Playwright tab
+    (same-origin, real browser cookies/headers) rather than a standalone Python
+    requests.Session — a prior version re-extracted cookies via ctx.cookies()
+    filtered by hostname substring, which silently dropped Amazon's root-domain
+    auth cookies (session-id, at-main, etc. are set on .amazon.com, which doesn't
+    contain the sellercentral subdomain as a substring) and caused every call to
+    land on an HTML login redirect instead of JSON.
     """
     dc = _DOMAINS[domain]
     # Derive API base: replace the Playwright brand-reviews UI path with the API path
     api_base = dc["sc_base"].replace("/brand-customer-reviews/", "/brandcustomerreviews/api/reviews")
-    sc_host  = api_base.split("/")[2]   # e.g. sellercentral-europe.amazon.com
-
-    # Extract cookies from the live Playwright context
-    all_cookies = await ctx.cookies()
-    cookie_dict = {c["name"]: c["value"]
-                   for c in all_cookies
-                   if sc_host in c.get("domain", "")}
-
-    sess = requests.Session()
-    sess.cookies.update(cookie_dict)
-    sess.headers.update({
-        "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
-                      "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36",
-        "Referer":    dc["sc_base"],
-        "Accept":     "application/json, text/plain, */*",
-    })
 
     order_map  = {}
     page_id    = 0
@@ -717,14 +725,15 @@ async def _fetch_order_id_map(ctx, domain, mons_params=""):
               f"&sortByType=REVIEW_CREATED_DATE&isAscending=false&includeDone=false")
         if mons_params:
             qs += f"&{mons_params}"
+        url = api_base + qs
         try:
-            r = sess.get(api_base + qs, timeout=30)
-            if not r.ok:
-                print(f"  WARN order ID API: {r.status_code} on page {page_id}")
-                break
-            data = r.json()
+            data = await page.evaluate(_ORDER_ID_FETCH_JS, url)
         except Exception as e:
             print(f"  WARN order ID API error page {page_id}: {e}")
+            break
+
+        if isinstance(data, dict) and data.get("__error"):
+            print(f"  WARN order ID API error page {page_id}: {data['__error']}  body: {data.get('__body','')!r}")
             break
 
         total_pages = data.get("totalPageCount", 1)
@@ -736,7 +745,7 @@ async def _fetch_order_id_map(ctx, domain, mons_params=""):
 
         page_id += 1
         if page_id < total_pages:
-            time.sleep(0.3)
+            await asyncio.sleep(0.3)
 
     return order_map
 
@@ -790,6 +799,11 @@ async def scrape_domain(domain, page, ctx, prof, asin_filter, out_file=None, app
     else:
         _csv_write_header(out_file, ALL_HEADERS)
         all_rows = []
+    # Rows already in the CSV before this call — used below so this domain's order-ID
+    # pass never clobbers Order IDs a *different* country's pass already wrote into the
+    # same shared EU CSV (its order_map only knows its own country's review IDs, so
+    # blindly overwriting every row with "" on no-match wiped out earlier countries).
+    _preexisting_rids = {row[IDX['Review ID']] for row in all_rows if row[IDX['Review ID']]}
 
     p = START_PAGE
     _t_retries = 0  # retry counter for transient Playwright race-condition errors
@@ -824,6 +838,21 @@ async def scrape_domain(domain, page, ctx, prof, asin_filter, out_file=None, app
             p += 1
             continue
         _t_retries = 0
+        # Verify the account-switcher header actually shows the target marketplace
+        # before trusting this page's data. A switch can silently fail (dropdown
+        # UI change, stale fallback params) and leave the tab on the wrong country —
+        # catch that here instead of burning the remaining page budget on it.
+        if p == START_PAGE and "sc_display_name" in dc:
+            try:
+                header_text = await page.evaluate(
+                    "document.querySelector('.dropdown-account-switcher-header')?.textContent?.trim() || ''"
+                )
+            except Exception:
+                header_text = ""
+            if header_text and dc["sc_display_name"].lower() not in header_text.lower():
+                print(f"\n  ✗ MARKETPLACE MISMATCH: expected '{dc['sc_display_name']}' but page shows "
+                      f"'{header_text}' — aborting {domain} rather than scrape the wrong marketplace")
+                break
         await simulate_reading(page, prof)
         # Wait for lazy-rendered card content to finish loading before extracting.
         try:
@@ -898,17 +927,23 @@ async def scrape_domain(domain, page, ctx, prof, asin_filter, out_file=None, app
 
     # ── Step 2.5: order ID enrichment via SC internal API ────────────────────
     if FETCH_ORDER_ID:
-        total_reviews = sum(1 for r in all_rows if r[IDX['Review ID']])
+        # Scope stats to rows scraped *this* pass — rows carried over from earlier
+        # EU sub-countries in the shared CSV were already resolved (or not) in their
+        # own pass and won't appear in this country's order_map.
+        new_rids = {r[IDX['Review ID']] for r in all_rows
+                    if r[IDX['Review ID']] and r[IDX['Review ID']] not in _preexisting_rids}
+        total_reviews = len(new_rids)
         print(f"  Fetching order IDs via SC API ({total_reviews} reviews) …", end=" ", flush=True)
         try:
-            order_map = await _fetch_order_id_map(ctx, domain, mkp_params)
+            order_map = await _fetch_order_id_map(page, domain, mkp_params)
             matched = 0
             for row in all_rows:
                 rid = row[IDX['Review ID']]
                 oid = order_map.get(rid, "")
-                row[IDX['Order ID']] = oid
                 if oid:
-                    matched += 1
+                    row[IDX['Order ID']] = oid   # never clobber a good value with "" on no-match
+                    if rid in new_rids:
+                        matched += 1
             print(f"{matched}/{total_reviews} matched ({100*matched/max(total_reviews,1):.0f}%)")
         except Exception as e:
             print(f"WARN: order ID fetch failed ({e}) — column left empty")
@@ -923,6 +958,12 @@ async def scrape_domain(domain, page, ctx, prof, asin_filter, out_file=None, app
         before   = len(all_rows)
         all_rows = [r for r in all_rows if r[IDX['ASIN']] in asin_filter]
         print(f"  ASIN filter     : kept {len(all_rows)}/{before}")
+
+    # ── Step 4.5: min review date filter ────────────────────────────────
+    if MIN_REVIEW_DATE:
+        before   = len(all_rows)
+        all_rows = [r for r in all_rows if r[IDX['Created 날짜']] >= MIN_REVIEW_DATE]
+        print(f"  Date filter     : kept {len(all_rows)}/{before} (>= {MIN_REVIEW_DATE})")
 
     # ── Step 5: column filter ─────────────────────────────────────────────
     if HEADERS_TO_INCLUDE:
@@ -1060,32 +1101,18 @@ async def main():
                 SCRAPER_PROFILE_DIR, channel="chrome", headless=True)
             browser = None
         else:
-            import subprocess, socket, time as _time
-
-            def _port_open(p):
-                s = socket.socket(); r = s.connect_ex(('127.0.0.1', p)); s.close(); return r == 0
-
-            if not _port_open(9222):
-                print(f"Launching Chrome with scraper profile: {SCRAPER_PROFILE_DIR}")
-                os.makedirs(SCRAPER_PROFILE_DIR, exist_ok=True)
-                subprocess.Popen([CHROME_PATH,
-                    "--remote-debugging-port=9222",
-                    f"--user-data-dir={SCRAPER_PROFILE_DIR}",
-                    "--no-first-run",
-                    "--no-default-browser-check",
-                ], stderr=subprocess.DEVNULL)
-                print("Waiting for Chrome to start …", end=" ", flush=True)
-                for _ in range(30):
-                    if _port_open(9222): break
-                    _time.sleep(1)
-                else:
-                    raise RuntimeError("Chrome did not open on port 9222 within 30 s")
-                print("ready")
-            else:
-                print("Chrome already running on port 9222 — connecting …")
-
-            browser = await pw.chromium.connect_over_cdp("http://localhost:9222")
-            ctx     = browser.contexts[0]
+            # Launched directly by Playwright (Chrome-for-Testing build, channel="chrome")
+            # rather than spawning /Applications/Google Chrome.app and attaching over a
+            # fixed CDP port. Real production Chrome rejects the browser-level
+            # Browser.setDownloadBehavior call Playwright issues on connect_over_cdp
+            # ("Browser context management is not supported"); Chrome-for-Testing builds
+            # don't have that restriction, and this path needs no port at all — nothing
+            # to conflict with other tools (e.g. Playwright MCP) that also use CDP.
+            print(f"Launching Chrome with scraper profile: {SCRAPER_PROFILE_DIR}")
+            os.makedirs(SCRAPER_PROFILE_DIR, exist_ok=True)
+            ctx     = await pw.chromium.launch_persistent_context(
+                SCRAPER_PROFILE_DIR, channel="chrome", headless=False)
+            browser = None
 
         # ── Session check: navigate to each SC URL; only prompt login if needed ──
         _login_endpoints = []
@@ -1211,10 +1238,7 @@ async def main():
 
         results = await asyncio.gather(*[_run(d) for d in DOMAINS])
 
-        if HEADLESS:
-            await ctx.close()
-        else:
-            await browser.close()
+        await ctx.close()
 
     print(f"\n{'═'*60}")
     print("  SUMMARY")
