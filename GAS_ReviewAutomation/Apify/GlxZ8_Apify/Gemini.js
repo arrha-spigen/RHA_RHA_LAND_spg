@@ -22,7 +22,7 @@ function DR(inputText, category) {
     if (!inputText || !category) return '';
 
     const cacheKey =
-      'DR_v22_' +
+      'DR_v25_' +
       Utilities.base64Encode(inputText + '|' + category).slice(0, 100);
 
     const cache = CacheService.getScriptCache();
