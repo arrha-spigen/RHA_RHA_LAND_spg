@@ -1,5 +1,5 @@
 // ── Trigger end date for this project ────────────────────────────────────────
-const MASTER_END_DATE = '2026-08-01';
+const MASTER_END_DATE = '2026-08-16';
 
 // ── Webhooks ──────────────────────────────────────────────────────────────────
 const STATUS_WEBHOOK = 'https://chat.googleapis.com/v1/spaces/AAQAb-u6r7s/messages?key=AIzaSyDdI0hCZtE6vySjMm-WEfRq3CPzqKqqsHI&token=nRV3sEH4PPRJTDUpn9Ppmx2TWj8yuJVgtFkJkFAuqbM';
@@ -8,9 +8,9 @@ const GCX_WEBHOOK    = 'https://chat.googleapis.com/v1/spaces/AAQAb-u6r7s/messag
 // ── All monitored projects ─────────────────────────────────────────────────────
 // endDate: null  →  permanent (bar shows full + "permanent" label, no expiry countdown)
 const TRIGGER_PROJECTS = [
-  { name: 'Apify Master',  endDate: '2026-08-01', time: '04:00 KST (Mon–Fri)' },
-  { name: '오전보고',      endDate: '2026-08-01', time: '09:00 KST (Mon–Fri)' },
-  { name: 'TCT시트 보고',  endDate: '2026-08-01', time: '17:30 KST (Mon–Fri, Thu 15:30)' },
+  { name: 'Apify Master',  endDate: '2026-08-16', time: '04:00 KST (Mon–Fri)' },
+  { name: '오전보고',      endDate: '2026-08-16', time: '09:00 KST (Mon–Fri)' },
+  { name: 'TCT시트 보고',  endDate: '2026-08-16', time: '17:30 KST (Mon–Fri, Thu 15:30)' },
   { name: 'MCF Tracker',   endDate: null,          time: '09:00 KST (Mon–Fri, permanent)' },
   { name: 'ASIN Master',   endDate: null,          time: 'on-demand (permanent)' },
 ];
