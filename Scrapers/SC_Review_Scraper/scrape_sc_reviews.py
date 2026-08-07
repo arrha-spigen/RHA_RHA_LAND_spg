@@ -16,7 +16,7 @@ import requests
 # USER CONFIG — edit these before each run
 # ═══════════════════════════════════════════════════════════════════════════════
 
-DOMAINS = ["EU"]
+DOMAINS = ["EU", "JP", "US", "IN"]
 # List of domains to scrape in parallel. Each gets its own CSV file.
 # Single domain example : DOMAINS = ["US"]
 # Supported             : "US" | "EU" | "UK" | "DE" | "FR" | "IT" | "ES" | "JP" | "IN"
@@ -441,6 +441,27 @@ def _csv_rewrite(path, headers, rows):
         w = csv.writer(f)
         w.writerow(headers)
         w.writerows(rows)
+
+
+def _apply_column_filter(path):
+    """Trim a finished CSV down to HEADERS_TO_INCLUDE, if set.
+
+    Call this only once a domain's file is fully done (all EU sub-countries +
+    image enrichment complete) — scrape_domain always writes the full
+    ALL_HEADERS layout internally so the shared EU CSV stays in a format the
+    next sub-country's read-and-append step can index into.
+    """
+    if not HEADERS_TO_INCLUDE or not os.path.exists(path):
+        return
+    with open(path, encoding='utf-8-sig') as f:
+        reader = csv.reader(f)
+        header = next(reader, None)
+        rows = list(reader)
+    if not header:
+        return
+    idx = {h: i for i, h in enumerate(header)}
+    keep_idx = [idx[h] for h in HEADERS_TO_INCLUDE if h in idx]
+    _csv_rewrite(path, [header[k] for k in keep_idx], [[row[k] for k in keep_idx] for row in rows])
 
 
 async def _switch_sc_marketplace(page, display_name, prof):
@@ -965,19 +986,18 @@ async def scrape_domain(domain, page, ctx, prof, asin_filter, out_file=None, app
         all_rows = [r for r in all_rows if r[IDX['Created 날짜']] >= MIN_REVIEW_DATE]
         print(f"  Date filter     : kept {len(all_rows)}/{before} (>= {MIN_REVIEW_DATE})")
 
-    # ── Step 5: column filter ─────────────────────────────────────────────
-    if HEADERS_TO_INCLUDE:
-        keep_idx    = [IDX[h] for h in HEADERS_TO_INCLUDE if h in IDX]
-        out_headers = [ALL_HEADERS[k] for k in keep_idx]
-        out_rows    = [[row[k] for k in keep_idx] for row in all_rows]
-    else:
-        out_headers = ALL_HEADERS
-        out_rows    = all_rows
-
-    # ── Step 6: final rewrite with image data ─────────────────────────────
-    # out_rows already contains all rows (previous countries loaded at start +
+    # ── Step 5: final rewrite with image data ─────────────────────────────
+    # Always written in the full ALL_HEADERS layout — the shared EU CSV gets
+    # re-read by the *next* sub-country's scrape_domain call (see `append`
+    # above), and that read path indexes rows via IDX, which assumes every
+    # column is present. Trimming columns here would leave the file one
+    # country's pass ahead of what the next country's read expects, causing
+    # a "list index out of range" crash. Column trimming (HEADERS_TO_INCLUDE)
+    # is applied once, after a domain's file is fully finished — see
+    # _apply_column_filter, called from main().
+    # all_rows already contains all rows (previous countries loaded at start +
     # newly scraped), so no read-back needed even in append mode.
-    _csv_rewrite(out_file, out_headers, out_rows)
+    _csv_rewrite(out_file, ALL_HEADERS, all_rows)
     print(f"\n  ✓ {domain} done — {total_with_imgs}/{len(all_rows)} with images → {out_file}")
 
     return len(all_rows), total_with_imgs
@@ -1224,6 +1244,7 @@ async def main():
                         print(f"  EU image fetch phase  ({eu_rows} reviews across {len(EU_COUNTRIES)} countries)")
                         print(f"{'═'*60}")
                         eu_imgs = await _enrich_csv_with_images(eu_file, page, prof)
+                    _apply_column_filter(eu_file)
                     return ("EU", eu_rows, eu_imgs, "OK")
                 else:
                     if FETCH_IMAGES_ONLY:
@@ -1231,6 +1252,7 @@ async def main():
                     eff_pages = PAGES_OVERRIDE.get(domain, PAGES)
                     n_rows, n_imgs = await scrape_domain(
                         domain, page, ctx, prof, asin_filter, pages=eff_pages)
+                    _apply_column_filter(_out_file(domain))
                     return (domain, n_rows, n_imgs, "OK")
             except Exception as e:
                 print(f"\n  ✗ {domain} failed: {e}")
