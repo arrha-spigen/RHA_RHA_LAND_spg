@@ -22,7 +22,7 @@ function DR(inputText, category) {
     if (!inputText || !category) return '';
 
     const cacheKey =
-      'DR_v25_' +
+      'DR_v27_' +
       Utilities.base64Encode(inputText + '|' + category).slice(0, 100);
 
     const cache = CacheService.getScriptCache();
@@ -377,7 +377,7 @@ function clearDRCache() {
   // 이 함수는 알고 있는 키만 정리할 수 있으므로 안내만 남긴다.
   throw new Error(
     'DR 캐시는 키 단위로만 삭제 가능합니다. ' +
-    'Gemini.js의 캐시 키 접두사(현재 DR_v25_)를 올린 뒤 수식을 재계산하세요.'
+    'Gemini.js의 캐시 키 접두사(현재 DR_v27_)를 올린 뒤 수식을 재계산하세요.'
   );
 }
 
