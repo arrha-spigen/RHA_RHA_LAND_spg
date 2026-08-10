@@ -27,6 +27,10 @@ const APIFY_TASKS = {
     taskId: '0imX0G3cKe75WJwXX',
     sheetPrefix: 'GlxZ8'
   },
+  Pixel11: {
+    taskId: '4f5VlWgLnpnmq0nfH',
+    sheetPrefix: 'Pixel11'
+  },
   // Pixel10a: {
   //   taskId: 'I8884GTT3Tgthg9o4',
   //   sheetPrefix: 'Pixel10a'
