@@ -22,7 +22,7 @@ function DR(inputText, category) {
     if (!inputText || !category) return '';
 
     const cacheKey =
-      'DR_v27_' +
+      'DR_v28_' +
       Utilities.base64Encode(inputText + '|' + category).slice(0, 100);
 
     const cache = CacheService.getScriptCache();
@@ -37,16 +37,7 @@ function DR(inputText, category) {
     }
 
     /***********************
-     * 1. KEYWORD FAST PATH
-     ***********************/
-    const fast = keywordFallback_(inputText);
-
-    if (fast && rawList.includes(fast)) {
-      return fast;
-    }
-
-    /***********************
-     * 2. GEMINI FLOW
+     * GEMINI FLOW
      ***********************/
     let output = '';
 
@@ -69,7 +60,7 @@ function DR(inputText, category) {
     output = cleanOutput_(output);
 
     /***********************
-     * 3. STRICT MATCH
+     * STRICT MATCH
      ***********************/
     const normalized = normalizeLoose_(output);
 
@@ -88,7 +79,7 @@ function DR(inputText, category) {
     }
 
     /***********************
-     * 4. LOOSE CONTAINS MATCH
+     * LOOSE CONTAINS MATCH
      ***********************/
     const looseIdx = list.findIndex(v =>
       normalized.includes(v) || v.includes(normalized)
@@ -292,46 +283,6 @@ function loadDefectData_(category) {
 }
 
 
-/**********************************************************
- * KEYWORD FALLBACK
- **********************************************************/
-function keywordFallback_(text) {
-
-  if (
-    text.includes('heavy') ||
-    text.includes('bulky')
-  ) {
-    return '두꺼움';
-  }
-
-  if (
-    text.includes('yellow')
-  ) {
-    return '황변';
-  }
-
-  if (
-    text.includes('button')
-  ) {
-    return '버튼불량';
-  }
-
-  if (
-    text.includes('attach') ||
-    text.includes('difficult')
-  ) {
-    return '부착어려움';
-  }
-
-  if (
-    text.includes('scratch') ||
-    text.includes('scratched')
-  ) {
-    return '스크래치';
-  }
-
-  return '';
-}
 
 
 /**********************************************************
@@ -377,7 +328,7 @@ function clearDRCache() {
   // 이 함수는 알고 있는 키만 정리할 수 있으므로 안내만 남긴다.
   throw new Error(
     'DR 캐시는 키 단위로만 삭제 가능합니다. ' +
-    'Gemini.js의 캐시 키 접두사(현재 DR_v27_)를 올린 뒤 수식을 재계산하세요.'
+    'Gemini.js의 캐시 키 접두사(현재 DR_v28_)를 올린 뒤 수식을 재계산하세요.'
   );
 }
 
