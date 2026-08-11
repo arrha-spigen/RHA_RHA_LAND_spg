@@ -475,3 +475,15 @@ function _exportSheetToExcelAndMakePublic_(spreadsheetId, sheetName, folderName)
   file.setSharing(DriveApp.Access.ANYONE_WITH_LINK, DriveApp.Permission.VIEW);
   return file.getUrl();
 }
+
+function FILTER_WHITE_ROWS() {
+  const sheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName("신제품 라인업");
+  const range = sheet.getRange("A:I");
+
+  const values = range.getValues();
+  const backgrounds = sheet.getRange("A:A").getBackgrounds();
+
+  return values.filter((row, i) => {
+    return backgrounds[i][0].toLowerCase() === "#ffffff";
+  });
+}
