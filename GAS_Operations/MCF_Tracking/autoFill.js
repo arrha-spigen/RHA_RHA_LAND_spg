@@ -14,6 +14,15 @@ var BF_COL_RESULT  = 26;   // Z — NOT a tracking number cache (confirmed 2026-
                             //     from or write to this column expecting tracking data.
 var BF_COL_FEE     = 25;   // Y — Transportation Fee (€, ¥, £) written by backfillMCFFees()
 
+// Cell-note marker for col Y values written by fillPreviewEstimatesForRange() — an ESTIMATE
+// (getFulfillmentPreview quote), not the actual settled fee. backfillMCFFeesRecent() checks for
+// this prefix so it knows to overwrite an estimate once real settlement data arrives, instead of
+// treating any non-blank cell as permanently done.
+var FEE_ESTIMATE_NOTE_PREFIX = 'ESTIMATE (getFulfillmentPreview)';
+function _isFeeEstimateNote(note) {
+  return String(note || '').indexOf(FEE_ESTIMATE_NOTE_PREFIX) === 0;
+}
+
 /**
  * DISABLED 2026-07-31 — do not re-enable without picking a different target column.
  *
@@ -656,6 +665,7 @@ function backfillMCFFeesRecent(days) {
   var sentDates = sheet.getRange(BF_START_ROW, BF_COL_SENT,   numRows, 1).getValues();
   var regions   = sheet.getRange(BF_START_ROW, BF_COL_REGION, numRows, 1).getValues();
   var existing  = sheet.getRange(BF_START_ROW, BF_COL_FEE,    numRows, 1).getValues();
+  var notes     = sheet.getRange(BF_START_ROW, BF_COL_FEE,    numRows, 1).getNotes();
 
   var pending = [];
   var hasJP   = false;
@@ -665,7 +675,11 @@ function backfillMCFFeesRecent(days) {
     if (!orderId) continue;
 
     var curStr = String(existing[i][0] === null || existing[i][0] === undefined ? '' : existing[i][0]).trim();
-    if (curStr !== '' && curStr !== 'RETRY' && !_isErrorValue(curStr)) continue;
+    // A cell holding an estimate placeholder (fillPreviewEstimatesForRange) is NOT "already
+    // filled" for this function's purposes — it should be overwritten as soon as a real
+    // settlement fee is found, same as a blank cell.
+    var isEstimate = _isFeeEstimateNote(notes[i][0]);
+    if (curStr !== '' && curStr !== 'RETRY' && !_isErrorValue(curStr) && !isEstimate) continue;
 
     var sentDateStr = String(sentDates[i][0] || '').trim();
     if (!sentDateStr) continue; // no sentDate — can't confirm it's within the recent window, skip here
@@ -696,7 +710,8 @@ function backfillMCFFeesRecent(days) {
     var fee = map[r.orderId];
 
     if (fee !== undefined) {
-      sheet.getRange(BF_START_ROW + r.i, BF_COL_FEE).setValue(fee);
+      // .setNote('') clears any estimate-placeholder note — this is now the real settled fee.
+      sheet.getRange(BF_START_ROW + r.i, BF_COL_FEE).setValue(fee).setNote('');
       Logger.log('Row %s (%s): fee = %s', BF_START_ROW + r.i, r.orderId, fee);
       written++;
     } else {
@@ -706,6 +721,105 @@ function backfillMCFFeesRecent(days) {
 
   Logger.log('backfillMCFFeesRecent done — written: %s, not settled: %s (older rows outside the %s-day window untouched)',
     written, notSettled, days);
+}
+
+/**
+ * Fills col Y blanks in [startRow, endRow] with a getFulfillmentPreview() ESTIMATE — a fresh
+ * shipping-quote using today's rates, NOT the actual fee Amazon charged for that historical
+ * shipment. Only use this when the real source (settlement reports, via backfillMCFFeesRecent)
+ * has genuinely nothing yet — confirmed live 2026-08-11: for these self-created MCF orders, the
+ * Finances API never carries this fee at all (see README "Col Y fee source" section), and
+ * settlement reports only have it once Amazon closes the relevant settlement period.
+ *
+ * Each written cell gets a note tagged with FEE_ESTIMATE_NOTE_PREFIX so backfillMCFFeesRecent()
+ * knows to overwrite it with the real value once settlement data for that order actually posts —
+ * it is not treated as "already filled" the way a normal written value is.
+ *
+ * Run manually from the Apps Script editor: fillPreviewEstimatesForRange(2782, 2909)
+ */
+function fillPreviewEstimatesForRange(startRow, endRow) {
+  if (!startRow || !endRow || endRow < startRow) throw new Error('Provide a valid startRow/endRow, e.g. fillPreviewEstimatesForRange(2782, 2909)');
+
+  var ss    = SpreadsheetApp.getActiveSpreadsheet();
+  var sheet = ss.getSheetByName(BF_SHEET_NAME);
+  if (!sheet) throw new Error('Sheet not found: ' + BF_SHEET_NAME);
+
+  var numRows  = endRow - startRow + 1;
+  var orderIds = sheet.getRange(startRow, BF_COL_ORDER,  numRows, 1).getValues();
+  var regions  = sheet.getRange(startRow, BF_COL_REGION, numRows, 1).getValues();
+  var existing = sheet.getRange(startRow, BF_COL_FEE,    numRows, 1).getValues();
+
+  var pending = [];
+  for (var i = 0; i < numRows; i++) {
+    var orderId = String(orderIds[i][0] || '').trim();
+    if (!orderId) continue;
+    var curStr = String(existing[i][0] === null || existing[i][0] === undefined ? '' : existing[i][0]).trim();
+    if (curStr !== '' && curStr !== 'RETRY' && !_isErrorValue(curStr)) continue; // already has a value
+    var isJP = String(regions[i][0] || '').trim().toUpperCase() === 'JP';
+    pending.push({ i: i, orderId: orderId, isJP: isJP });
+  }
+
+  if (!pending.length) {
+    Logger.log('fillPreviewEstimatesForRange: nothing blank in %s-%s', startRow, endRow);
+    return;
+  }
+  Logger.log('fillPreviewEstimatesForRange: %s blank row(s) in %s-%s', pending.length, startRow, endRow);
+
+  var startTime    = Date.now();
+  var timeBudgetMs = 4.5 * 60 * 1000;
+  var maxConsec429 = 5;
+  var consec429    = 0;
+  var noteStamp    = FEE_ESTIMATE_NOTE_PREFIX + ' — written ' + new Date().toISOString() +
+    '. NOT the actual charged fee; will be auto-replaced by backfillMCFFeesRecent() once real settlement data arrives.';
+
+  var filled = 0, skipped = 0, errored = 0;
+
+  for (var p = 0; p < pending.length; p++) {
+    if (Date.now() - startTime > timeBudgetMs) {
+      Logger.log('fillPreviewEstimatesForRange: time budget reached — stopped at %s/%s', p, pending.length);
+      break;
+    }
+    if (consec429 >= maxConsec429) {
+      Logger.log('fillPreviewEstimatesForRange: %s consecutive 429s — stopping early (%s/%s attempted)', consec429, p, pending.length);
+      break;
+    }
+
+    var r = pending[p];
+    var endpoints = r.isJP ? ['FE', 'EU'] : ['EU', 'FE'];
+    var fee = '';
+    var lastErr = null;
+
+    for (var e = 0; e < endpoints.length; e++) {
+      try {
+        fee = _fetchMcfFeePreview(r.orderId, endpoints[e]);
+        lastErr = null;
+        consec429 = 0;
+        break;
+      } catch (err) {
+        lastErr = err;
+        if (_isRetryableRegionMismatchError(err) || _isNoOrderInfoError(err)) continue;
+        if (_isRateLimit429(err)) { consec429++; break; }
+        break; // other errors: don't try the fallback endpoint
+      }
+    }
+
+    if (lastErr) {
+      Logger.log('Row %s (%s): error — %s', startRow + r.i, r.orderId, lastErr.message || lastErr);
+      errored++;
+    } else if (fee === '' || fee === null || fee === undefined) {
+      Logger.log('Row %s (%s): no preview available (cancelled / missing items?)', startRow + r.i, r.orderId);
+      skipped++;
+    } else {
+      sheet.getRange(startRow + r.i, BF_COL_FEE).setValue(fee).setNote(noteStamp);
+      Logger.log('Row %s (%s): estimate = %s', startRow + r.i, r.orderId, fee);
+      filled++;
+    }
+
+    Utilities.sleep(500); // pace preview calls (2 SP-API calls per row: getFulfillmentOrderRaw + preview)
+  }
+
+  Logger.log('fillPreviewEstimatesForRange done — filled: %s, no-preview: %s, errored: %s (out of %s pending)',
+    filled, skipped, errored, pending.length);
 }
 
 /**
