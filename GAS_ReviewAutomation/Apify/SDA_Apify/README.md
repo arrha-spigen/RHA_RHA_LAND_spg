@@ -5,6 +5,8 @@ Container-bound Google Apps Script for the SDA review spreadsheet. Triggers an A
 **Script ID:** `1rUwC_XwGUjZvu5ileGo_jAhihoMaio4wfdtjSnqO0VIclG0OByVDyoco`  
 **Linked spreadsheet:** `1sxapIqJgXcJdeqyCf9bAxCNXrVMsVjsZE9QWPwEm0R4` (SDA review sheet)
 
+> ⚠️ `Auto_Acc_Apify`'s local `.clasp.json` also points at this same script ID, which can't be right for two container-bound scripts — one of the two local folders is mistracking the other's live project. This SDA README's script ID is the one that should be authoritative; `Auto_Acc_Apify`'s real script ID needs to be re-identified.
+
 ---
 
 ## Files
@@ -17,6 +19,14 @@ Container-bound Google Apps Script for the SDA review spreadsheet. Triggers an A
 | `Trigger.js` | Time-based trigger setup |
 | `Config.js` | `CONFIG` object — Apify task ID, sheet name, poll delay, webhook |
 | `appsscript.json` | GAS manifest |
+
+---
+
+## Misc utility functions
+
+| Function | Purpose |
+|----------|---------|
+| `FILTER_WHITE_ROWS()` | Returns rows from the "신제품 라인업" sheet (cols A:I) whose column-A cell has a white (`#ffffff`) background |
 
 ---
 

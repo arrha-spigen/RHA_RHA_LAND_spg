@@ -2,6 +2,8 @@
 
 Container-bound Google Apps Script for the Auto Accessories review spreadsheet. Config/Trigger/Product/UI split-file architecture — the standard pattern for this repo's simpler per-product Apify triggers (contrast with [GlxZ8_Apify](../GlxZ8_Apify/) / [iPh17e_Monday](../iPh17e_Monday/), which bundle Monday sync + Gemini helpers into the same project).
 
+> ⚠️ This folder's local `.clasp.json` currently holds script ID `1rUwC_XwGUjZvu5ileGo_jAhihoMaio4wfdtjSnqO0VIclG0OByVDyoco` — but [`SDA_Apify`'s README](../SDA_Apify/README.md) documents that same ID as SDA's own container-bound script. Only one of the two can actually be bound to that ID; this folder is likely mistracking SDA's project, and Auto_Acc's real script ID hasn't been re-identified yet.
+
 ---
 
 ## Files
@@ -14,6 +16,14 @@ Container-bound Google Apps Script for the Auto Accessories review spreadsheet. 
 | `Product.js` | Product-level aggregate data fetch (rating, review count per ASIN) |
 | `UI.js` | `onOpen()` menu wiring |
 | `appsscript.json` | GAS manifest |
+
+---
+
+## Misc utility functions
+
+| Function | Purpose |
+|----------|---------|
+| `FILTER_WHITE_ROWS()` | Returns rows from the "신제품 라인업" sheet (cols A:I) whose column-A cell has a white (`#ffffff`) background |
 
 ---
 

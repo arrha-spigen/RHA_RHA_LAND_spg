@@ -30,6 +30,14 @@ Container-bound Google Apps Script for the iPhone 17e review spreadsheet. Trigge
 
 ---
 
+## Misc utility functions
+
+| Function | Purpose |
+|----------|---------|
+| `FILTER_WHITE_ROWS()` | Returns rows from the "신제품 라인업" sheet (cols A:I) whose column-A cell has a white (`#ffffff`) background |
+
+---
+
 ## Usage
 
 Open the linked spreadsheet → **Apify → Product → Run Product (auto polling)**.
