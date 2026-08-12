@@ -786,9 +786,47 @@ function testNormalizeIdentityOnTicket(ticketId) {
   return result;
 }
 
+// Case-ID-keyed fast dedup — supplements the search below, which can lag
+// several seconds to a minute behind ticket creation (this was a documented
+// "known limitation": "a primary created only seconds earlier may not be
+// indexed yet ... only matters when two messages arrive nearly
+// simultaneously"). Confirmed live 2026-08-10: tickets #1000157138 and
+// #1000157139, same Seller Central case id, created 50s apart — the search
+// found nothing for the second one (its own primary wasn't indexed yet), so
+// both became separate primaries instead of merging. CacheService writes are
+// visible to the very next execution almost immediately, unlike Zendesk's
+// search index, so this closes that gap without changing the search-based
+// path at all when there's no cache hit.
+const CASE_PRIMARY_CACHE_PREFIX_ = 'abm_case_primary_';
+const CASE_PRIMARY_CACHE_TTL_SEC_ = 3600; // 1hr — comfortably over the observed race window (well under a minute)
+function _rememberCasePrimary_(caseId, ticketId) {
+  if (!caseId) return;
+  try { CacheService.getScriptCache().put(CASE_PRIMARY_CACHE_PREFIX_ + caseId, String(ticketId), CASE_PRIMARY_CACHE_TTL_SEC_); }
+  catch (e) { Logger.log('_rememberCasePrimary_: ' + e); }
+}
+function _lookupCasePrimary_(caseId) {
+  if (!caseId) return null;
+  try {
+    const v = CacheService.getScriptCache().get(CASE_PRIMARY_CACHE_PREFIX_ + caseId);
+    return v ? Number(v) : null;
+  } catch (e) { Logger.log('_lookupCasePrimary_: ' + e); return null; }
+}
+
 // Picks the prior ticket to thread the new message into — see the file header
 // for the full selection rationale. Returns the ticket object or null.
 function findPrimaryTicket_(requesterEmail, newTicket) {
+  const newCaseId = caseIdFromTicket_(newTicket);
+
+  // Fast path: this exact case id already has a known primary in cache —
+  // skip the search entirely so this isn't subject to its indexing lag.
+  if (newCaseId) {
+    const cachedId = _lookupCasePrimary_(newCaseId);
+    if (cachedId && cachedId !== newTicket.id) {
+      const cached = getTicket_(cachedId);
+      if (cached && cached.status !== 'closed') return cached;
+    }
+  }
+
   // status<closed keeps new/open/pending/solved (all reusable) and drops only
   // terminal 'closed' tickets, which Zendesk won't let us reopen or comment on.
   const query = encodeURIComponent(
@@ -798,7 +836,6 @@ function findPrimaryTicket_(requesterEmail, newTicket) {
   const candidates = (data.results || []).filter(t => t.id !== newTicket.id);
   if (!candidates.length) return null;
 
-  const newCaseId = caseIdFromTicket_(newTicket);
   if (newCaseId) {
     const sameCase = candidates.find(t => caseIdFromTicket_(t) === newCaseId);
     if (sameCase) return sameCase;
@@ -870,7 +907,50 @@ function mergeNewTicketIntoPrimary_(newTicket, primaryTicket) {
   return { wasReopened, attachmentsTransferred: uploadTokens.length, attachmentsTotal: srcAttachCount, newCommentId };
 }
 
+// Fast claim guard against Zendesk's own retry-on-timeout behavior. This
+// pipeline makes ~10+ sequential Zendesk API calls (identity normalize,
+// primary search, merge, cleanup) — enough that a run can legitimately still
+// be in progress when Zendesk's webhook response window closes. Zendesk then
+// resends the SAME {"ticket_id": N} payload up to 6 times over ~45min. The
+// existing `ticket.status === 'closed'` check below already makes a MERGED
+// ticket's retries cheap and safe, but a ticket that ends up as its own
+// primary (the common case — no prior thread to merge into) never closes, so
+// nothing stopped a retry from re-running the ENTIRE expensive chain from
+// scratch. Confirmed live via this webhook's invocation history
+// (`GET /api/v2/webhooks/{id}/invocations`): total-failure ("terminated")
+// count jumped from ~0-1/day the prior week to 12 on 2026-08-10 and 24 on
+// 2026-08-11, with no code or ticket-volume change to explain it — consistent
+// with retries re-doing the full chain and consuming the very capacity that
+// caused the original timeout, a self-reinforcing retry storm. Confirmed two
+// concrete casualties: ticket #1000157094 (Federico) never got its Primary
+// Email normalized, and #1000157139 never merged into #1000157138 (same
+// Seller Central case, 50s apart) — both tickets' webhook invocations show
+// every attempt as 'terminated' in the log, never 'success'.
+//
+// TTL is deliberately SHORT (a few minutes, not the full ~45min retry
+// window): most retries in the invocation history DO eventually succeed
+// (225/266 recent invocations succeeded, most after 1+ retries) — Zendesk's
+// retry mechanism is a real, working recovery path for genuine one-off
+// failures, not just noise. A long claim would block that recovery for a
+// ticket whose first attempt genuinely died. This TTL only needs to outlast
+// one execution's realistic runtime (GAS hard-caps a single execution at a
+// few minutes regardless), so it absorbs the retries that land WHILE the
+// first attempt is still actually running or has JUST finished, without
+// suppressing the later retries that are this ticket's real safety net.
+// This claim is deliberately a plain get-then-put (not truly atomic) —
+// acceptable here since Zendesk's own retries are spaced 15-45+ seconds
+// apart in the observed data, not concurrent.
+const ABM_CLAIM_CACHE_PREFIX_ = 'abm_claim_';
+const ABM_CLAIM_CACHE_TTL_SEC_ = 300; // 5min
+
 function handleNewAbmTicket_(ticketId) {
+  const claimKey = ABM_CLAIM_CACHE_PREFIX_ + ticketId;
+  const cache = CacheService.getScriptCache();
+  if (cache.get(claimKey)) {
+    return { status: 'already_claimed', ticketId };
+  }
+  cache.put(claimKey, '1', ABM_CLAIM_CACHE_TTL_SEC_);
+
   const ticket = getTicket_(ticketId);
   if (!ticket) return { status: 'not_found', ticketId };
   if ((ticket.tags || []).indexOf(ABM_TAG) === -1) {
@@ -901,6 +981,11 @@ function handleNewAbmTicket_(ticketId) {
     // clean it up here too (see the "ABM inbound cleanup" section above),
     // same as a merged follow-up gets below.
     const cleanup = cleanupExistingAbmTicket_(ticketId);
+    // This ticket IS the primary for its case id now — record it immediately
+    // so a near-simultaneous duplicate (same case, arriving before Zendesk's
+    // search index catches up) finds it via the cache fast-path above instead
+    // of also becoming its own primary.
+    _rememberCasePrimary_(caseIdFromTicket_(ticket), ticket.id);
     return { status: 'left_as_primary', ticketId, identityNormalization, cleanup };
   }
 
@@ -913,10 +998,27 @@ function handleNewAbmTicket_(ticketId) {
   // new ticket as its own primary instead.
   const freshPrimary = getTicket_(primary.id);
   if (!freshPrimary || freshPrimary.status === 'closed') {
-    return { status: 'left_as_primary', ticketId, note: 'primary was closed on re-fetch' };
+    // This ticket ends up as its own primary here too (merge aborted, same
+    // as the !primary branch above) — needs the exact same inbound cleanup.
+    // Found live 2026-07-30 on ticket #1000155576: this branch returned
+    // early with no cleanup call at all, so the ticket permanently kept
+    // showing the raw, uncollapsed Amazon-template email with no text-only
+    // copy ever generated — a real code gap, not the transient network
+    // issue that caused the same symptom on #1000155549 earlier the same
+    // day (see the zdFetch_ retry fix above). Confirmed via the webhook's
+    // own invocation log: it ran and returned 200 with exactly this status/
+    // note, cleanup simply was never invoked.
+    const cleanup = cleanupExistingAbmTicket_(ticketId);
+    _rememberCasePrimary_(caseIdFromTicket_(ticket), ticket.id);
+    return { status: 'left_as_primary', ticketId, note: 'primary was closed on re-fetch', cleanup };
   }
 
   const merge = mergeNewTicketIntoPrimary_(ticket, freshPrimary);
+  // Refresh the cache entry to point at the confirmed live primary — keeps a
+  // third near-simultaneous message for this case merging into the right
+  // ticket even if this run's own cache write (in the branches above) never
+  // happened for it (e.g. this primary predates this fix).
+  _rememberCasePrimary_(caseIdFromTicket_(ticket), freshPrimary.id);
   // The comment mergeNewTicketIntoPrimary_ just posted onto the primary
   // carries the SAME raw Amazon template html_body as the source ticket's
   // own first comment — clean it up on the primary right away, same
