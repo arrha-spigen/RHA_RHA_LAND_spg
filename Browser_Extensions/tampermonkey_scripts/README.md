@@ -85,7 +85,7 @@ Adds a "Run Now" button on Amazon.de Seller Central order pages. On click, attem
 
 ---
 
-### GChat Reply Suggest (`v3.5.0`)
+### GChat Reply Suggest (`v3.5.1`)
 **Matches:** `chat.google.com/*` and `spigenhelp.zendesk.com/agent/tickets/*` (works inside the Chrome-PWA "desktop app" install too, since it's the same Chrome origin/extension context)
 
 Alt+G behaves differently depending on the Chat room. **The deterministic ticket-forward flow is the default in every room** — AI-suggested replies are now the exception, opted into per-room, not the other way around.
@@ -127,6 +127,7 @@ Alt+G behaves differently depending on the Chat room. **The deterministic ticket
   ```
   If no thread is open, or the thread's root wasn't a T3 Esc message from this script, shows an error chip instead of guessing.
   - **Finding "the thread's root message" turned out to be genuinely hard via DOM geometry** — the Thread side panel's exact container boundary doesn't stand out reliably from the main room panel (both live under a shared ancestor). The approach that actually worked (`getThreadRootInfo()`): search the whole page for our own script's distinctive bold reference-line signature, restricted to the **right half of the viewport** (verified live: the thread panel's message copies sit at a consistently larger `x` than the main panel's), and take the **topmost** match, since the root message is pinned above the reply list. Then parse `@{name}\n안녕하세요 {honorific}님` out of that message's text (handles both this script's own plain-text mention format and a real Chat-native mention chip's slightly different whitespace/newline rendering — verified against actual real messages in production use, not synthetic test data). This only works for threads whose root was actually sent via the T3 Esc flow (has the bold ref line) — a thread on an older, pre-formatting message won't be found, hence the error-chip fallback
+    - **The signature match originally required a trailing `[ASIN]` bracket** (6–12 alphanumeric characters) — a ticket with no ASIN on file produces a malformed/empty bracket that silently never matched, so Gratitude/Reminder reported "couldn't find a T3 Esc message" even with the root message plainly visible. Fixed on both ends: `referenceLineText()` now omits the bracket entirely when there's no ASIN (rather than leaving an empty `[]`), and the detection regex no longer depends on the bracket at all — it anchors on the `용` particle (the device-purpose suffix, e.g. "iPhone 15용") that always sits between device and product name in this template, which is present regardless of ASIN
   - `getComposeBox()` (unchanged) already picks the thread's own "Reply" box correctly when a thread panel is open, since it renders after the main panel in DOM order — verified live, no changes needed there
 
 ---

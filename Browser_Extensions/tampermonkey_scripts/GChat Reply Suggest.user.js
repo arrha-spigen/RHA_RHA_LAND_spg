@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         GChat Reply Suggest
 // @namespace    https://spigen.com/gcx
-// @version      3.5.0
+// @version      3.5.1
 // @description  Alt+G offers T3 Esc (deterministic ticket-forward, no AI) / Gratitude / Reminder templates in every Google Chat room by default; only in designated rooms does it suggest AI-generated reply sentences instead
 // @author       Spigen GCX
 // @updateURL    https://raw.githubusercontent.com/codingintheusa0402/spigen-gcx-automation/main/Browser_Extensions/tampermonkey_scripts/GChat%20Reply%20Suggest.user.js
@@ -390,7 +390,12 @@
 
   // ---- Ticket-forward template flow (template rooms) ----
   function referenceLineText(t, index) {
-    return `${index} ${t.country} ${t.device}용 ${t.productName} [${t.asin}]`;
+    // Omit the bracket entirely when there's no ASIN on file, rather than
+    // producing a malformed/empty "[]" — this also matters for
+    // getThreadRootInfo()'s detection below, which no longer depends on the
+    // bracket being present.
+    const asinPart = t.asin ? ` [${t.asin}]` : "";
+    return `${index} ${t.country} ${t.device}용 ${t.productName}${asinPart}`;
   }
 
   function referenceBlock(t, index) {
@@ -454,7 +459,15 @@
   // via this script's T3 Esc flow (has the bold ref line) — verified this
   // finds and correctly parses real messages from actual usage.
   function getThreadRootInfo() {
-    const refLineRe = /^\d+\s+[A-Z]{2}\s+.+\[[A-Za-z0-9]{6,12}\]$/;
+    // Anchored on "<index> <2-letter country> ... 용 ..." — the "용"
+    // particle (device-purpose suffix, e.g. "iPhone 15용") always sits
+    // between device and product name in this template, so it identifies
+    // our own reference line regardless of whether an ASIN bracket is
+    // present. An earlier version required a trailing "[ASIN]" match here,
+    // which silently failed to find threads on tickets with no ASIN on
+    // file — referenceLineText() used to always append the bracket even
+    // when empty, and this regex required 6-12 characters inside it.
+    const refLineRe = /^\d+\s+[A-Z]{2}\s+.+용\s+.+/;
     const vw = window.innerWidth;
     const bolds = Array.from(document.querySelectorAll("b")).filter(
       (b) => b.offsetParent !== null && refLineRe.test((b.textContent || "").trim())
