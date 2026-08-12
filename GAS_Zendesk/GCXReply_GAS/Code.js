@@ -306,6 +306,29 @@ function claimAbmRelay_(relayKey) {
   }
 }
 
+// Guards the INITIAL send (relayAbmReply_ client-side), a gap claimAbmRelay_
+// above never covered — that one only stops two browsers double-sending an
+// ALREADY-QUEUED retry row, but nothing stopped the live send itself from
+// firing twice for one real reply in the first place. Confirmed live via
+// ABM_Relay_Log: 28+ tickets since 2026-07-28 show the identical message
+// successfully relayed twice within seconds to minutes of each other, both
+// from the live-send path — e.g. ticket #1000157277, 3 seconds apart, only
+// one real Zendesk comment ever existed. `key` is ticketId+contentHash
+// (computed client-side), not just ticketId, so a genuinely different
+// second reply on the same ticket is never blocked by this — only an exact
+// repeat within the TTL window is. Plain CacheService get-then-put (not
+// LockService) — this only needs to beat a network race measured in
+// seconds, not serialize a sheet write like claimAbmRelay_ does.
+const ABM_SEND_CLAIM_TTL_SEC_ = 300; // 5min — comfortable margin over the observed few-second-to-~90s double-fire gaps
+function claimAbmSend_(key) {
+  if (!key) return { claimed: false, reason: 'missing_key' };
+  const cache = CacheService.getScriptCache();
+  const cacheKey = 'abm_send_claim_' + key;
+  if (cache.get(cacheKey)) return { claimed: false, reason: 'already_claimed' };
+  cache.put(cacheKey, '1', ABM_SEND_CLAIM_TTL_SEC_);
+  return { claimed: true };
+}
+
 // A ticket can have multiple relay rows (one per reply) — returns ALL of
 // them, not just one, so nothing is hidden the way a single-row-per-ticket
 // lookup previously did.
@@ -418,6 +441,9 @@ function doPost(e) {
     }
     if (body.action === 'claimAbmRelay') {
       return respond(claimAbmRelay_(body.relayKey));
+    }
+    if (body.action === 'claimAbmSend') {
+      return respond(claimAbmSend_(body.key));
     }
     return respond({ error: 'unknown action' });
   } catch (err) {
