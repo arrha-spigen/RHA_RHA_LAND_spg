@@ -376,9 +376,21 @@ function _getMondayApiKey_(){
   if (MONDAY_API_KEY_HARDCODED && MONDAY_API_KEY_HARDCODED.trim()) return MONDAY_API_KEY_HARDCODED.trim();
   throw new Error('Missing Monday API key.');
 }
+// A lock left behind by a run that was killed before reaching syncMondayBoardToSheet's
+// `finally` (GAS hard-kills executions past its ~6min limit, and that kill skips `finally`
+// entirely) never gets released — every future run then throws "Another Monday sync is
+// already running." forever, with no self-healing. That's what happened here: the lock
+// property sat untouched for about a month. RUN_LOCK_STALE_MS treats a lock older than
+// this as orphaned rather than a real concurrent run (normal syncs finish in well under a
+// minute at current board size) and clears it automatically instead of requiring a manual
+// Script Properties edit every time this happens again.
+const RUN_LOCK_STALE_MS = 20 * 60 * 1000; // 20 min
 function _acquireRunLock_(){
   var props = PropertiesService.getScriptProperties();
-  if (props.getProperty(RUN_LOCK_KEY)) throw new Error('Another Monday sync is already running.');
+  var existing = props.getProperty(RUN_LOCK_KEY);
+  if (existing && (Date.now() - Number(existing)) < RUN_LOCK_STALE_MS) {
+    throw new Error('Another Monday sync is already running.');
+  }
   props.setProperty(RUN_LOCK_KEY, String(Date.now()));
 }
 function _releaseRunLock_(){ PropertiesService.getScriptProperties().deleteProperty(RUN_LOCK_KEY); }
