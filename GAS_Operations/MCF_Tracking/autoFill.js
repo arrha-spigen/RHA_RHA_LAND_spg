@@ -666,6 +666,10 @@ function backfillMCFFeesRecent(days) {
   var regions   = sheet.getRange(BF_START_ROW, BF_COL_REGION, numRows, 1).getValues();
   var existing  = sheet.getRange(BF_START_ROW, BF_COL_FEE,    numRows, 1).getValues();
   var notes     = sheet.getRange(BF_START_ROW, BF_COL_FEE,    numRows, 1).getNotes();
+  // Col R (Tracking Number) — a real value here means the order has genuinely shipped (AMZTK
+  // formula resolved), so a getFulfillmentPreview() estimate fallback makes sense. A blank R
+  // means the order hasn't shipped yet — no fallback, nothing to estimate against.
+  var tracking  = sheet.getRange(BF_START_ROW, RETRY_R_COL,   numRows, 1).getDisplayValues();
 
   var pending = [];
   var hasJP   = false;
@@ -689,7 +693,10 @@ function backfillMCFFeesRecent(days) {
     var isJP = String(regions[i][0] || '').trim().toUpperCase() === 'JP';
     if (isJP) hasJP = true;
 
-    pending.push({ i: i, orderId: orderId, sentDate: sentDateStr, isJP: isJP });
+    var rStr = String(tracking[i][0] || '').trim();
+    var hasTracking = rStr !== '' && !_isErrorValue(rStr);
+
+    pending.push({ i: i, orderId: orderId, sentDate: sentDateStr, isJP: isJP, hasTracking: hasTracking });
   }
 
   if (!pending.length) {
@@ -704,6 +711,7 @@ function backfillMCFFeesRecent(days) {
   var feMap = hasJP ? _buildSettlementFeeMap('FE', cutoff) : {};
 
   var written = 0, notSettled = 0;
+  var needsEstimate = [];
 
   pending.forEach(function(r) {
     var map = r.isJP ? feMap : euMap;
@@ -714,13 +722,76 @@ function backfillMCFFeesRecent(days) {
       sheet.getRange(BF_START_ROW + r.i, BF_COL_FEE).setValue(fee).setNote('');
       Logger.log('Row %s (%s): fee = %s', BF_START_ROW + r.i, r.orderId, fee);
       written++;
+    } else if (r.hasTracking) {
+      // Not settled yet, but the order has genuinely shipped (real tracking number in col R) —
+      // queue for a getFulfillmentPreview() estimate fallback below instead of leaving blank.
+      needsEstimate.push(r);
     } else {
-      notSettled++;
+      notSettled++; // hasn't even shipped yet — nothing to estimate against
     }
   });
 
-  Logger.log('backfillMCFFeesRecent done — written: %s, not settled: %s (older rows outside the %s-day window untouched)',
-    written, notSettled, days);
+  // Estimate fallback (added 2026-08-13): for rows that have shipped but haven't settled yet,
+  // write a getFulfillmentPreview() ESTIMATE so col Y is never left blank once a real tracking
+  // number exists — same mechanism fillPreviewEstimatesForRange() used manually, now automatic
+  // every 30 min. Tagged with FEE_ESTIMATE_NOTE_PREFIX so the "already filled" check above treats
+  // it as still-pending and overwrites it with the real fee on a later run once settlement data
+  // actually arrives — no separate cleanup step needed.
+  //
+  // Capped and paced separately from the settlement-report scan above (own time budget + circuit
+  // breaker) so a burst of newly-shipped rows can't blow past GAS's execution limit on top of
+  // whatever the settlement scan already used.
+  var estimated = 0;
+  var maxEstimatesPerRun = 30;
+  var estimateBudgetMs   = 90 * 1000;
+  var estStart  = Date.now();
+  var consec429 = 0;
+  var toEstimate = needsEstimate.slice(0, maxEstimatesPerRun);
+
+  for (var e = 0; e < toEstimate.length; e++) {
+    if (Date.now() - estStart > estimateBudgetMs) {
+      Logger.log('backfillMCFFeesRecent: estimate-fallback time budget reached — %s/%s attempted', e, toEstimate.length);
+      break;
+    }
+    if (consec429 >= 5) {
+      Logger.log('backfillMCFFeesRecent: %s consecutive 429s on estimate fallback — stopping early', consec429);
+      break;
+    }
+
+    var r2 = toEstimate[e];
+    var endpoints = r2.isJP ? ['FE', 'EU'] : ['EU', 'FE'];
+    var fee2 = '', err2 = null;
+
+    for (var k = 0; k < endpoints.length; k++) {
+      try {
+        fee2 = _fetchMcfFeePreview(r2.orderId, endpoints[k]);
+        err2 = null;
+        consec429 = 0;
+        break;
+      } catch (errK) {
+        err2 = errK;
+        if (_isRetryableRegionMismatchError(errK) || _isNoOrderInfoError(errK)) continue;
+        if (_isRateLimit429(errK)) consec429++;
+        break;
+      }
+    }
+
+    if (!err2 && fee2 !== '' && fee2 !== null && fee2 !== undefined) {
+      var noteStamp = FEE_ESTIMATE_NOTE_PREFIX + ' — written ' + new Date().toISOString() +
+        '. NOT the actual charged fee; will be auto-replaced by backfillMCFFeesRecent() once real settlement data arrives.';
+      sheet.getRange(BF_START_ROW + r2.i, BF_COL_FEE).setValue(fee2).setNote(noteStamp);
+      Logger.log('Row %s (%s): estimate fallback = %s', BF_START_ROW + r2.i, r2.orderId, fee2);
+      estimated++;
+    } else {
+      if (err2) Logger.log('Row %s (%s): estimate fallback error — %s', BF_START_ROW + r2.i, r2.orderId, err2.message || err2);
+      notSettled++;
+    }
+    Utilities.sleep(500);
+  }
+  notSettled += (needsEstimate.length - toEstimate.length); // deferred to next run, not lost
+
+  Logger.log('backfillMCFFeesRecent done — written: %s, estimated: %s, not settled: %s (older rows outside the %s-day window untouched)',
+    written, estimated, notSettled, days);
 }
 
 /**

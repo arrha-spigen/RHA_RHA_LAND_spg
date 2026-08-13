@@ -297,6 +297,37 @@ First real run after this fix (2026-07-30): **109 rows written** with real fee v
 - `nextToken` must be sent **alone** on paginated listing calls — combining it with the original
   filter params 400s with `"NextToken cannot be specified with other input parameters"`.
 
+### Estimate fallback for un-settled but shipped orders (added 2026-08-13)
+Confirmed live 2026-08-11: for a genuinely recent order (shipped within the last ~2 weeks),
+**neither** the settlement report **nor** the Finances API has any fee data yet — Amazon simply
+hasn't generated the settlement data at all, regardless of source. Tested directly: 0/103 blank
+rows matched against a live Finances API scan that found 1,590 *other* orders' fees in the same
+window.
+
+So `backfillMCFFeesRecent()` now has a second pass after the settlement-map lookup: for any row
+still unmatched, if **col R (Tracking Number) already holds a real value** (the order has
+genuinely shipped — an `AMZTK`/`AMZTK_JP` formula resolved), it calls `_fetchMcfFeePreview()`
+(`getFulfillmentPreview`, see `MCFFee` docs above) and writes that as an **estimate** — a fresh
+shipping-quote using today's rates, not the actual historical charge. Rows with no tracking number
+yet (order hasn't shipped) are left alone; there's nothing to estimate.
+
+Every estimate-written cell gets a note starting with `FEE_ESTIMATE_NOTE_PREFIX`
+(`'ESTIMATE (getFulfillmentPreview)'`). The "already filled, skip" check at the top of
+`backfillMCFFeesRecent()` treats a cell carrying this note as **still pending**, not done — so on
+a later run, once the settlement report actually covers that order, the real fee overwrites the
+estimate and `.setNote('')` clears the tag. No separate cleanup step or second trigger needed —
+the same 30-min run does both the real lookup and the estimate fallback, and self-corrects once
+real data exists.
+
+Capped to 30 estimate calls per run (2 SP-API calls each: `getFulfillmentOrderRaw` + preview),
+paced 500ms apart, own 90s time budget and 5-consecutive-429 circuit breaker — separate from the
+settlement-scan's own budget above, so a burst of newly-shipped rows can't blow past GAS's
+execution limit on top of whatever the settlement scan already used that run.
+
+There's also a standalone one-off version for backfilling a specific row range manually:
+`fillPreviewEstimatesForRange(startRow, endRow)` — same estimate + note-tagging logic, run once
+from the editor (e.g. `fillPreviewEstimatesForRange(2782, 2909)`).
+
 ### Bug fixed 2026-07-30: `backfillMCFFeesRecent()` crashed on every scheduled run
 Apps Script time-driven triggers call the handler with a trigger event object as the first
 argument (not `undefined`) — `days = days || 90` let that object through as a truthy value, so
