@@ -696,7 +696,7 @@ function backfillMCFFeesRecent(days) {
     var rStr = String(tracking[i][0] || '').trim();
     var hasTracking = rStr !== '' && !_isErrorValue(rStr);
 
-    pending.push({ i: i, orderId: orderId, sentDate: sentDateStr, isJP: isJP, hasTracking: hasTracking });
+    pending.push({ i: i, orderId: orderId, sentDate: sentDateStr, isJP: isJP, hasTracking: hasTracking, isEstimate: isEstimate });
   }
 
   if (!pending.length) {
@@ -746,7 +746,18 @@ function backfillMCFFeesRecent(days) {
   var estimateBudgetMs   = 90 * 1000;
   var estStart  = Date.now();
   var consec429 = 0;
-  var toEstimate = needsEstimate.slice(0, maxEstimatesPerRun);
+
+  // Bug fixed 2026-08-14: rows that already carry an estimate stay in `pending` every run (so a
+  // real fee can overwrite them) and were being re-estimated ahead of rows that had NEVER been
+  // estimated, in plain row order. With more already-estimated rows than the 30/run cap, the same
+  // low-numbered rows consumed the entire budget every single run — confirmed live: 24h after the
+  // first estimate pass, backfillMCFFeesRecent was still only ever re-touching rows 2782-2823,
+  // never advancing to newer orders (Aug 12-14 sends) despite running every 30 min without error.
+  // Fix: never-estimated rows go first; already-estimated rows (a refresh, not a first fill) only
+  // get whatever budget is left over.
+  var neverEstimated = needsEstimate.filter(function(r) { return !r.isEstimate; });
+  var alreadyEstimated = needsEstimate.filter(function(r) { return r.isEstimate; });
+  var toEstimate = neverEstimated.concat(alreadyEstimated).slice(0, maxEstimatesPerRun);
 
   for (var e = 0; e < toEstimate.length; e++) {
     if (Date.now() - estStart > estimateBudgetMs) {
