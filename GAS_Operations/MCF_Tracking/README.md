@@ -328,6 +328,29 @@ There's also a standalone one-off version for backfilling a specific row range m
 `fillPreviewEstimatesForRange(startRow, endRow)` — same estimate + note-tagging logic, run once
 from the editor (e.g. `fillPreviewEstimatesForRange(2782, 2909)`).
 
+### Bug fixed 2026-08-14: estimate fallback stalled on the same old rows forever
+Because an estimate-tagged cell stays "pending" every run (by design — so a real fee can overwrite
+it later), it competes with never-estimated rows for the same 30-row/run cap above. The candidate
+list was built in plain ascending row order with no distinction between "never estimated" and
+"already has a stale estimate, just needs re-checking" — so once there were more stale-estimate
+rows than the 30/run cap, the same low-numbered rows consumed the **entire** budget every single
+cycle, forever. Confirmed live: 24h after the first estimate pass (rows 2782-2823), the trigger was
+still only ever re-touching that same block every 30 min — with a 100% completion rate and zero
+errors — while orders shipped on 2026-08-12 through 2026-08-14 never got a first estimate at all.
+This is the same class of bug as the settlement-report scan's own prioritization fix above (oldest-
+unscanned-first) — a cap without prioritization silently starves whatever's ranked below it.
+
+**Fix:** `needsEstimate` is now split into `neverEstimated` (rows with no `FEE_ESTIMATE_NOTE_PREFIX`
+note yet) and `alreadyEstimated` (a refresh, not a first fill), concatenated in that order before
+slicing to the 30/run cap — so new orders always get their first estimate before any budget is
+spent re-estimating rows that already have one. Verified live: the next run immediately advanced
+past the stale 2782-2823 block, and orders sent 2026-08-12 through 2026-08-14 showed real estimated
+values within one cycle.
+
+**How to apply:** any future cap-and-slice pattern over a "still pending" list needs the same
+prioritization — a row that's `pending` for a "needs refresh" reason should never rank ahead of a
+row that's `pending` because it has never been touched at all.
+
 ### Bug fixed 2026-07-30: `backfillMCFFeesRecent()` crashed on every scheduled run
 Apps Script time-driven triggers call the handler with a trigger event object as the first
 argument (not `undefined`) — `days = days || 90` let that object through as a truthy value, so
