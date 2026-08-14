@@ -99,22 +99,40 @@ function doGet(e) {
 /*******************************************************
  * Email row lookup (robust match)
  *******************************************************/
+// Amazon's ABM buyer-proxy address is unique PER CASE (a "+<uuid>" segment
+// before the @) but the ticket requester's Zendesk profile email gets
+// normalized to the base address without it (see normalizeAbmRequesterIdentity_
+// in ABM_TicketMerge). GCX Reply's MCF autofill reads the requester's profile
+// email (the normalized base form), but this sheet's row got its Email
+// Address column populated with the raw case-specific "+uuid" address instead
+// -- confirmed live on ticket #1000157386 (Jeff Brown): row 2929's column H
+// was "l8y23vrrl9hvpvm+71ac457e-...@marketplace.amazon.co.uk" while the
+// Zendesk user's actual (and GCX Reply-sent) email was the base
+// "l8y23vrrl9hvpvm@marketplace.amazon.co.uk" -- an exact-string match never
+// found the row, so markMcf silently no-opped (no 담당자, no Order ID
+// returned to the SC page). Stripping the "+uuid" segment from BOTH sides
+// before comparing makes the match succeed regardless of which side (if
+// either) still carries it -- a no-op for every non-ABM row, which is the
+// large majority and already matches exactly as before.
+function stripCaseUuid_(email) {
+  return String(email || '').replace(/\+[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}(?=@)/i, '');
+}
 function findRowByEmail_(sh, email, matchMode) {
   const lastRow = sh.getLastRow();
   const startRow = HEADER_ROW + 1;
   const numRows = lastRow - HEADER_ROW;
 
   const values = sh.getRange(startRow, COL_EMAIL, numRows, 1).getValues();
-  const target = email.toLowerCase().replace(/\s+/g, '');
+  const target = stripCaseUuid_(email).toLowerCase().replace(/\s+/g, '');
 
   if (matchMode === 'last') {
     for (let i = values.length - 1; i >= 0; i--) {
-      const cell = (values[i][0] || '').toString().trim().toLowerCase().replace(/\s+/g, '');
+      const cell = stripCaseUuid_((values[i][0] || '').toString()).trim().toLowerCase().replace(/\s+/g, '');
       if (cell === target) return startRow + i;
     }
   } else {
     for (let i = 0; i < values.length; i++) {
-      const cell = (values[i][0] || '').toString().trim().toLowerCase().replace(/\s+/g, '');
+      const cell = stripCaseUuid_((values[i][0] || '').toString()).trim().toLowerCase().replace(/\s+/g, '');
       if (cell === target) return startRow + i;
     }
   }
