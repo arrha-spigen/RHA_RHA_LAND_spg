@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         GCX Reply
 // @namespace    https://spigen.com/gcx
-// @version      3.6.10
+// @version      3.6.11
 // @description  Amazon order data via GAS web app + Spigen product info + Zendesk auto-fill
 // @author       Spigen GCX
 // @updateURL    https://raw.githubusercontent.com/codingintheusa0402/spigen-gcx-automation/main/Browser_Extensions/tampermonkey_scripts/GCX%20Reply.user.js
@@ -97,7 +97,7 @@
   // Keep CURRENT_VERSION in sync with the @version header above, and add a
   // CHANGELOG_ entry, every time the version is bumped. Empty/missing entries
   // are skipped silently (no popup shown).
-  const CURRENT_VERSION = '3.6.10';
+  const CURRENT_VERSION = '3.6.11';
   // Stale per-version entries pruned — CHANGELOG_[CURRENT_VERSION] is the
   // only access pattern, so every past entry becomes dead weight the moment
   // its version is superseded. Add a fresh '<version>': [...] entry here on
@@ -6451,8 +6451,11 @@
           // same saved pick is visible across every sellercentral.amazon.*
           // domain and the Zendesk ⚙ settings drawer alike.
           let mcfPerson = getMcfPerson_();
+          console.log('[GCX-DIAG] getMcfPerson_() returned:', JSON.stringify(mcfPerson));
           if (!mcfPerson) {
+            console.log('[GCX-DIAG] no saved person, calling showMcfPersonPicker_()');
             const picked = await showMcfPersonPicker_();
+            console.log('[GCX-DIAG] showMcfPersonPicker_() resolved:', JSON.stringify(picked));
             if (picked) { mcfPerson = picked; setMcfPerson_(picked); }
           }
           const orderId = await markRowMcf_(d.email, mcfPerson);
@@ -6468,7 +6471,7 @@
 
         // Price warning
         if (d.itemPrice) watchPriceWarning_(parseFloat(d.itemPrice));
-      } catch(e) { /* silent */ }
+      } catch(e) { console.error('[GCX-DIAG] autoFillFromHash_ threw:', e); }
     }
 
     // Run after DOM is ready
