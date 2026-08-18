@@ -175,7 +175,18 @@ function markMcfRow_(sh, rowIndex, person) {
     `Marking row ${rowIndex} => 담당자(U=${COL_U}), 날짜(P=${COL_P}), StatusCol=${statusCol}`
   );
 
-  담당자Cell.setValue(person || '김지우');
+  // 담당자 write is isolated in its own try/catch: this column has a
+  // strict (allowInvalid=false) dropdown validation, and Sheets throws if
+  // the value isn't on the list (confirmed live 2026-08-18 — a name
+  // missing from the sheet's list, even though valid in the client's own
+  // picker, aborted this ENTIRE function before 날짜/Status/Order ID ever
+  // got written). Order ID generation has nothing to do with 담당자
+  // validity and must not be held hostage by it again.
+  try {
+    담당자Cell.setValue(person || '김지우');
+  } catch (e) {
+    Logger.log(`담당자 write rejected for "${person}": ${e} — continuing without it`);
+  }
   날짜Cell.setValue(new Date());   // real Date value so TEXT(P,"YYMMDD") formula works
   statusCell.setValue('MCF');
 
