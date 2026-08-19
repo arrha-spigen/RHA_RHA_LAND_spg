@@ -316,17 +316,40 @@ function claimAbmRelay_(relayKey) {
 // one real Zendesk comment ever existed. `key` is ticketId+contentHash
 // (computed client-side), not just ticketId, so a genuinely different
 // second reply on the same ticket is never blocked by this — only an exact
-// repeat within the TTL window is. Plain CacheService get-then-put (not
-// LockService) — this only needs to beat a network race measured in
-// seconds, not serialize a sheet write like claimAbmRelay_ does.
+// repeat within the TTL window is.
+//
+// CORRECTED 2026-08-19: this used to be a plain CacheService get-then-put
+// with no lock, on the stated assumption that it "only needs to beat a
+// network race measured in seconds." Disproven live — ABM_Relay_Log rows
+// 632/633 (ticket #1000157657) show the identical duplicate-send pattern
+// with RelayKeys 785ms apart, both status=success. A get-then-put has NO
+// atomicity at any gap size: two calls can both pass cache.get() before
+// either has finished cache.put(), and GAS's own scheduling/queuing under
+// load (this account has had plenty this session) can easily produce
+// sub-second overlaps. Wrapped in LockService for a real atomic
+// check-and-set. Preserves the existing fail-OPEN philosophy (a skipped
+// send is worse than a rare duplicate) for the one new failure mode this
+// introduces: if the lock itself can't be acquired in time, still allow
+// the send rather than silently blocking a real reply.
 const ABM_SEND_CLAIM_TTL_SEC_ = 300; // 5min — comfortable margin over the observed few-second-to-~90s double-fire gaps
 function claimAbmSend_(key) {
   if (!key) return { claimed: false, reason: 'missing_key' };
   const cache = CacheService.getScriptCache();
   const cacheKey = 'abm_send_claim_' + key;
-  if (cache.get(cacheKey)) return { claimed: false, reason: 'already_claimed' };
-  cache.put(cacheKey, '1', ABM_SEND_CLAIM_TTL_SEC_);
-  return { claimed: true };
+  const lock = LockService.getScriptLock();
+  try {
+    lock.waitLock(5000);
+  } catch (e) {
+    Logger.log(`claimAbmSend_(${key}): lock timeout, failing open — ${e}`);
+    return { claimed: true, reason: 'lock_timeout_failopen' };
+  }
+  try {
+    if (cache.get(cacheKey)) return { claimed: false, reason: 'already_claimed' };
+    cache.put(cacheKey, '1', ABM_SEND_CLAIM_TTL_SEC_);
+    return { claimed: true };
+  } finally {
+    lock.releaseLock();
+  }
 }
 
 // A ticket can have multiple relay rows (one per reply) — returns ALL of
