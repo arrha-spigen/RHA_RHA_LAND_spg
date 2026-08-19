@@ -1202,7 +1202,15 @@ function doPost(e) {
 
     // Secret-guarded manual reconciliation trigger (for testing/on-demand runs).
     if (body.action === 'reconcile') {
-      const summary = reconcileAbmRelays_(Number(body.lookbackHours) || 6);
+      // Was `|| 6` — inconsistent with the function's own now-1hr default,
+      // so a manual/webhook call with no explicit lookbackHours silently
+      // exercised the OLD expensive 6hr window even after that default was
+      // reduced (confirmed while testing: this line, not the function's
+      // internal fallback, is what a bare {"action":"reconcile"} call with
+      // no lookbackHours actually hits, since Number(undefined) || 6 is
+      // ALWAYS a number and so never reaches reconcileAbmRelays_'s own
+      // typeof-guarded default at all).
+      const summary = reconcileAbmRelays_(Number(body.lookbackHours) || 1);
       return ContentService.createTextOutput(JSON.stringify(summary))
         .setMimeType(ContentService.MimeType.JSON);
     }
@@ -1370,8 +1378,31 @@ function latestAgentPublicComment_(ticketId, requesterId) {
 
 function reconcileAbmRelays_(lookbackHours) {
   // Time-based triggers invoke this with an event object as the first arg, not
-  // a number — only honour a real numeric override (from runReconcileNow).
-  const hours = (typeof lookbackHours === 'number' && lookbackHours > 0) ? lookbackHours : 6;
+  // a number — only honour a real numeric override (from runReconcileNow /
+  // the `reconcile` webhook action's explicit lookbackHours param).
+  //
+  // Default was 6 hours — meaning the UNATTENDED 30-min CLOCK trigger (the
+  // only caller that ever hits this fallback) re-scanned a full 6-HOUR
+  // window of ABM tickets on EVERY run, up to 12x redundant overlap before
+  // a ticket aged out of the window. Confirmed live 2026-08-19 via the Apps
+  // Script executions dashboard: with the real 6hr default, a single run
+  // took 265s (measured directly); the dashboard showed repeated 170-362s
+  // runs and outright failures clustered minutes apart — right at GAS's
+  // 6-minute (360s) execution ceiling, some pushed over it. This redundant
+  // rescanning (same tickets re-checked ~12x before aging out) is a
+  // plausible major contributor to the account-wide UrlFetchApp daily quota
+  // exhaustion this session's other fixes were built around (see
+  // [[abm_ticket_merge]] v31-v34) — not just a latency problem.
+  //
+  // ABM_RECONCILE_MIN_AGE_MS (10min) already gates against acting on a
+  // reply too young for the LIVE relay to have had its own chance first;
+  // 1hr gives ~2x overlap over the 30-min trigger cadence (comfortable
+  // safety margin against timing drift/a single missed run) instead of 12x.
+  // This function is a SAFETY NET for the independent live relay path
+  // (relayAbmReply_, fires instantly on an agent's reply) — a narrower
+  // backup window is an acceptable tradeoff against the redundant-scan cost
+  // it was actually paying for.
+  const hours = (typeof lookbackHours === 'number' && lookbackHours > 0) ? lookbackHours : 1;
   const cutoff = new Date(Date.now() - hours * 3600 * 1000).toISOString().replace(/\.\d+Z$/, 'Z');
   const query = encodeURIComponent(`type:ticket tags:${ABM_TAG} updated>${cutoff}`);
 
