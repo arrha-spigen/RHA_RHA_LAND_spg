@@ -78,6 +78,17 @@ function zdFetch_(path, options) {
     try {
       res = UrlFetchApp.fetch(url, opts);
     } catch (e) {
+      // A Workspace-account-wide daily UrlFetchApp quota exhaustion (seen
+      // live 2026-08-18: "하루에 premium urlfetch 서비스를 너무 많이
+      // 호출했습니다") throws from UrlFetchApp.fetch() exactly like a
+      // transient connection failure, so the retry loop below used to burn
+      // all 3 attempts (with growing sleeps) on every single call anyway —
+      // pointless, since this can't possibly succeed again until the quota
+      // resets, and it eats into GAS's 6-minute execution ceiling for every
+      // subsequent zdFetch_ call in the same run. Fail immediately instead.
+      if (/urlfetch/i.test(e.message) && /하루|quota|exceeded/i.test(e.message)) {
+        throw new Error(`Zendesk API ${opts.method || 'GET'} ${url} -> daily UrlFetchApp quota exhausted (not retrying, won't recover until reset): ${e.message}`);
+      }
       if (attempt < ZD_FETCH_RETRIES) { Utilities.sleep(500 * attempt); continue; }
       throw new Error(`Zendesk API ${opts.method || 'GET'} ${url} -> connection failed after ${ZD_FETCH_RETRIES} attempts: ${e.message}`);
     }
@@ -1451,6 +1462,68 @@ function reconcileAbmRelays_(lookbackHours) {
   }
 
   Logger.log('reconcileAbmRelays_: ' + JSON.stringify(summary));
+
+  // Piggyback on this same 30-min trigger rather than installing a second
+  // one — recovers tickets whose auto-processing threw (doPost's catch
+  // block tags them abm_auto_process_failed; see that comment for the
+  // 2026-08-18/19 UrlFetchApp daily-quota incident this exists for) once
+  // whatever blocked them clears. Best-effort: a failure here must never
+  // prevent the ABM relay reconciliation above from having already run.
+  try {
+    const failedProcessing = reconcileFailedAbmProcessing_();
+    summary.failedProcessing = failedProcessing;
+  } catch (e) {
+    Logger.log('reconcileFailedAbmProcessing_ call from reconcileAbmRelays_ failed: ' + e);
+  }
+
+  return summary;
+}
+
+// Recovers tickets tagged abm_auto_process_failed (see doPost's catch
+// block) by simply retrying handleNewAbmTicket_ once whatever blocked the
+// original attempt has cleared — e.g. the account-wide UrlFetchApp daily
+// quota (resets every 24h) that caused this for real customers Gabor
+// (#1000158113) and Mandeep (#1000158120) on 2026-08-18, silently orphaned
+// with no automatic recovery until this existed. handleNewAbmTicket_'s own
+// 5-min claim-guard cache means calling it again here is always a REAL
+// retry by the time this runs (30-min cadence, well past that window), not
+// a race with the original attempt. On success, removes the tag (Zendesk's
+// tags.json DELETE is additive-safe — only removes the named tag, doesn't
+// touch any others) and leaves a note; on repeat failure, leaves the tag
+// for the next sweep and just logs — no retry cap, since a stuck ticket
+// retried every 30 min indefinitely is cheap and self-evidently visible
+// via the tag either way.
+function reconcileFailedAbmProcessing_() {
+  const summary = { scanned: 0, recovered: 0, stillFailing: 0, recoveredTickets: [], stillFailingTickets: [] };
+  const query = encodeURIComponent('type:ticket tags:abm_auto_process_failed');
+  let url = `/api/v2/search.json?query=${query}&sort_by=created_at&sort_order=asc`;
+  let guard = 0;
+  while (url && guard++ < 10) {
+    const page = zdFetch_(url);
+    (page.results || []).forEach(t => {
+      if (!t || t.id === undefined) return;
+      summary.scanned++;
+      try {
+        handleNewAbmTicket_(t.id);
+        zdFetch_(`/api/v2/tickets/${t.id}/tags.json`, {
+          method: 'delete',
+          payload: JSON.stringify({ tags: ['abm_auto_process_failed'] })
+        });
+        zdFetch_(`/api/v2/tickets/${t.id}.json`, {
+          method: 'put',
+          payload: JSON.stringify({ ticket: { comment: { public: false, body: '자동 병합/정리 재처리 성공 (reconcileFailedAbmProcessing_)' } } })
+        });
+        summary.recovered++;
+        summary.recoveredTickets.push(t.id);
+      } catch (err) {
+        Logger.log(`reconcileFailedAbmProcessing_: ticket ${t.id} still failing: ${err}`);
+        summary.stillFailing++;
+        summary.stillFailingTickets.push(t.id);
+      }
+    });
+    url = page.next_page || null;
+  }
+  if (summary.scanned) Logger.log('reconcileFailedAbmProcessing_: ' + JSON.stringify(summary));
   return summary;
 }
 
