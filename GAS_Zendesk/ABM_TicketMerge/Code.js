@@ -1402,6 +1402,34 @@ function reconcileAbmRelays_(lookbackHours) {
   // (relayAbmReply_, fires instantly on an agent's reply) — a narrower
   // backup window is an acceptable tradeoff against the redundant-scan cost
   // it was actually paying for.
+  // Concurrency guard: confirmed live 2026-08-19 that this trigger is
+  // firing far more often than its intended 30-min cadence (cause still
+  // unresolved — only one trigger is registered, ruling out duplicates),
+  // and each run takes 30-150s+. That means multiple invocations were
+  // genuinely OVERLAPPING in wall-clock time, all hammering GCXReply_GAS
+  // concurrently via gcxGet_/gcxPost_ below — confirmed as the direct
+  // cause of repeated failures in the executions dashboard: `SyntaxError:
+  // Unexpected token '<', "<!DOCTYPE "... is not valid JSON at gcxGet_`,
+  // i.e. GCXReply_GAS returning Google's own platform error page (almost
+  // certainly its concurrent-execution limit) instead of a real response.
+  // A non-blocking script lock means an overlapping second invocation
+  // bails out immediately instead of piling on more concurrent load — the
+  // next firing (whenever that is) picks up the same recent-tickets
+  // window anyway, so skipping one redundant overlapping run costs
+  // nothing real.
+  const lock = LockService.getScriptLock();
+  if (!lock.tryLock(0)) {
+    Logger.log('reconcileAbmRelays_: skipped, another invocation is already running');
+    return { skipped: 'already_running' };
+  }
+  try {
+    return reconcileAbmRelays__locked_(lookbackHours);
+  } finally {
+    lock.releaseLock();
+  }
+}
+
+function reconcileAbmRelays__locked_(lookbackHours) {
   const hours = (typeof lookbackHours === 'number' && lookbackHours > 0) ? lookbackHours : 1;
   const cutoff = new Date(Date.now() - hours * 3600 * 1000).toISOString().replace(/\.\d+Z$/, 'Z');
   const query = encodeURIComponent(`type:ticket tags:${ABM_TAG} updated>${cutoff}`);
