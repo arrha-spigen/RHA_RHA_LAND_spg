@@ -786,6 +786,97 @@ function testNormalizeIdentityOnTicket(ticketId) {
   return result;
 }
 
+// Amazon's own ABM notification email occasionally ships with a broken
+// Subject header for certain inquiry types. Confirmed live 2026-08-18: a
+// single real JP buyer (藤廣我仁, via.source.from.name correct on every one)
+// sent 5 "商品の詳細情報に関するお問い合わせ" messages within about an hour,
+// each a genuinely different Seller Central case (different SPC-JPAmazon-…
+// id in the body). The FIRST ticket's subject was correct —
+// "Amazonのカスタマー 藤廣我仁 様から…に関するお問い合わせ(注文: …)" — every
+// later one from the identical sender instead read "…Spigen Japan 様から…"
+// (our OWN seller account name, standing in for the buyer's) with the
+// "(注文: …)" order suffix dropped entirely. `raw_subject` (Zendesk's copy
+// of the unprocessed original header) already showed the broken text, so
+// this is Amazon's own template misfiring, not anything in this pipeline —
+// but the buyer's real name (from-header) and the order number (always
+// present in the body: "# 250-XXXXXXX-XXXXXXX:") are both still reliably
+// available elsewhere on the ticket, so there's no reason to leave a
+// misleading subject live when it's this cheap to repair.
+//
+// Originally written narrow (hardcoded 'Spigen Japan' only, JP order-suffix
+// phrasing only) — broadened 2026-08-19 after finding a second live instance
+// on ticket #1000158113 (Gabor, DE): same bug, but the placeholder was
+// "Spigen EU" and the subject's own template was the ENGLISH one ("Product
+// details enquiry from Amazon customer …"), so the original hardcoded
+// checks silently no-opped on it (`nothing_to_fix`) even though the
+// placeholder was unmistakably still one of our own seller account names,
+// not a real buyer's. Detecting the placeholder by SHAPE ("Spigen" + at
+// most one more word) instead of an exact string covers every marketplace
+// variant without needing to enumerate them.
+//
+// Order-suffix reconstruction is still deliberately narrow — only the JP
+// and English templates observed live so far ("…に関するお問い合わせ" +
+// "(注文: …)" / "…enquiry from Amazon customer …" + " (Order: …)"). Other
+// locales ("Factuuraanvraag van Amazon-klant … (Bestelling: …)", etc.)
+// aren't safe to guess the exact phrasing for from here; a subject that
+// doesn't match a known template is left untouched rather than risk
+// producing a wrong-looking one.
+const ABM_SELLER_PLACEHOLDER_RE_ = /^Spigen(\s+\S+)?$/i; // tests a standalone name (e.g. via.source.from.name)
+const ABM_SELLER_PLACEHOLDER_SEARCH_RE_ = /Spigen(?:\s+\S+)?/; // finds the same shape sitting inside a subject string
+const ABM_SUBJECT_ORDER_TEMPLATES_ = [
+  { endsWith: /に関するお問い合わせ$/, hasOrder: /注文[:：]/, build: order => `(注文: ${order})` },
+  { endsWith: /\benquiry from Amazon customer\s+\S+.*$/i, hasOrder: /\(Order:/i, build: order => ` (Order: ${order})` },
+];
+function fixAbmSubjectPlaceholder_(ticket) {
+  try {
+    const realName = ticket.via && ticket.via.source && ticket.via.source.from && ticket.via.source.from.name;
+    if (!realName || ABM_SELLER_PLACEHOLDER_RE_.test(realName)) return { status: 'no_real_name' };
+
+    let subject = ticket.subject || '';
+    let changed = false;
+
+    // Find the placeholder token actually sitting in the subject — search
+    // for a "Spigen" or "Spigen {word}" run rather than assuming realName's
+    // own shape tells us what the BROKEN subject looks like.
+    const placeholderMatch = subject.match(ABM_SELLER_PLACEHOLDER_SEARCH_RE_);
+    if (placeholderMatch) {
+      subject = subject.slice(0, placeholderMatch.index) + realName + subject.slice(placeholderMatch.index + placeholderMatch[0].length);
+      changed = true;
+    }
+
+    const orderMatch = (ticket.description || '').match(/#\s*(\d{3}-\d{7}-\d{7})/);
+    if (orderMatch) {
+      const trimmed = subject.trim();
+      const template = ABM_SUBJECT_ORDER_TEMPLATES_.find(t => t.endsWith.test(trimmed) && !t.hasOrder.test(trimmed));
+      if (template) {
+        subject = trimmed + template.build(orderMatch[1]);
+        changed = true;
+      }
+    }
+
+    if (!changed) return { status: 'nothing_to_fix' };
+
+    zdFetch_(`/api/v2/tickets/${ticket.id}.json`, {
+      method: 'put',
+      payload: JSON.stringify({ ticket: { subject } })
+    });
+    ticket.subject = subject; // keep in-memory ticket consistent for the rest of this run
+    return { status: 'fixed', subject };
+  } catch (err) {
+    Logger.log(`fixAbmSubjectPlaceholder_: ${err}`);
+    return { status: 'error', error: String(err) };
+  }
+}
+
+// Manual runner/backfill — run from the Apps Script editor.
+function testFixAbmSubjectOnTicket(ticketId) {
+  const ticket = getTicket_(ticketId);
+  if (!ticket) { Logger.log('ticket not found'); return { status: 'not_found', ticketId }; }
+  const result = fixAbmSubjectPlaceholder_(ticket);
+  Logger.log(JSON.stringify(result, null, 2));
+  return result;
+}
+
 // Case-ID-keyed fast dedup — supplements the search below, which can lag
 // several seconds to a minute behind ticket creation (this was a documented
 // "known limitation": "a primary created only seconds earlier may not be
@@ -963,6 +1054,13 @@ function handleNewAbmTicket_(ticketId) {
     return { status: 'already_processed', ticketId };
   }
 
+  // Amazon's own ABM notification email occasionally ships with a broken
+  // Subject header for certain inquiry types — see fixAbmSubjectPlaceholder_.
+  // Independent of the merge decision below; runs regardless of whether this
+  // ticket ends up primary or gets merged away.
+  const subjectFix = fixAbmSubjectPlaceholder_(ticket);
+  if (subjectFix.status !== 'nothing_to_fix') Logger.log(`fixAbmSubjectPlaceholder_(${ticketId}): ${JSON.stringify(subjectFix)}`);
+
   // Normalize this buyer's Zendesk end-user identity BEFORE any requester
   // email is read below — see normalizeAbmRequesterIdentity_ for why (Primary
   // Email otherwise carries the case-specific "+uuid" proxy address, which
@@ -1077,6 +1175,20 @@ function doPost(e) {
         .setMimeType(ContentService.MimeType.JSON);
     }
 
+    // Secret-guarded on-demand backfill trigger — repairs a ticket whose
+    // subject Amazon's own ABM email shipped broken (seller-name placeholder
+    // in place of the buyer's name, missing order suffix). See
+    // fixAbmSubjectPlaceholder_ for the full story. For fixing tickets
+    // created before this feature existed.
+    if (body.action === 'fixSubject') {
+      const ticket = getTicket_(body.ticketId);
+      const result = ticket
+        ? fixAbmSubjectPlaceholder_(ticket)
+        : { status: 'not_found', ticketId: body.ticketId };
+      return ContentService.createTextOutput(JSON.stringify(result))
+        .setMimeType(ContentService.MimeType.JSON);
+    }
+
     // Secret-guarded manual reconciliation trigger (for testing/on-demand runs).
     if (body.action === 'reconcile') {
       const summary = reconcileAbmRelays_(Number(body.lookbackHours) || 6);
@@ -1103,6 +1215,40 @@ function doPost(e) {
       .setMimeType(ContentService.MimeType.JSON);
   } catch (err) {
     Logger.log(err);
+    // Zendesk's Notify-target webhook only sees this function's HTTP 200
+    // response — it has no way to know handleNewAbmTicket_ actually threw,
+    // so it never retries and the ticket is silently orphaned (never
+    // merged/reopened into its primary, subject never corrected). Confirmed
+    // live 2026-08-18/19: a same-day Google Workspace UrlFetchApp daily
+    // quota exhaustion ("premium urlfetch 서비스를 너무 많이 호출") caused
+    // exactly this for at least 2 real customers (Gabor #1000158113, Mandeep
+    // #1000158120) — agents only found out by noticing the broken subject/
+    // missing merge and fixing it by hand. Logger.log alone isn't visible to
+    // anyone without digging through the Apps Script Executions dashboard —
+    // tag the actual ticket instead so it's findable via a saved view and
+    // re-processable once the underlying issue (e.g. quota reset) clears.
+    // Best-effort: if THIS also fails (plausible for the same reason), we're
+    // no worse off than before — never let it mask the original error.
+    try {
+      const failedTicketId = (JSON.parse(e.postData.contents || '{}')).ticket_id;
+      if (failedTicketId) {
+        // POST .../tags.json is additive (unlike PUT .../tickets/{id}.json,
+        // which would REPLACE the ticket's whole tag set) — safe to fire
+        // without first reading back the ticket's current tags.
+        zdFetch_(`/api/v2/tickets/${failedTicketId}/tags.json`, {
+          method: 'post',
+          payload: JSON.stringify({ tags: ['abm_auto_process_failed'] })
+        });
+        zdFetch_(`/api/v2/tickets/${failedTicketId}.json`, {
+          method: 'put',
+          payload: JSON.stringify({
+            ticket: { comment: { public: false, body: `자동 병합/정리 처리 실패 (재시도 필요): ${String(err)}` } }
+          })
+        });
+      }
+    } catch (tagErr) {
+      Logger.log(`doPost failure-tagging also failed: ${tagErr}`);
+    }
     return ContentService.createTextOutput(JSON.stringify({ error: String(err) }))
       .setMimeType(ContentService.MimeType.JSON);
   }
