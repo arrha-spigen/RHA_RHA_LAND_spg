@@ -1344,19 +1344,43 @@ function normalizeForDedup_(s) {
     .toLowerCase();
 }
 
+// Retries on a non-JSON (HTML) response — confirmed live 2026-08-19 that
+// GCXReply_GAS (a separate, independently heavily-loaded project — every
+// open agent browser tab hits it every 5min, plus live panel usage)
+// intermittently returns Google's own platform error page instead of its
+// real JSON output, almost certainly its own concurrent-execution limit,
+// not anything wrong with the request itself. A concurrency LOCK on the
+// ABM_TicketMerge caller side (tried first) did NOT fix this — confirmed
+// by watching a run fail with the identical error while running the
+// locked code, proving the overlap (if any) isn't on this side. Since
+// Zendesk's own retry mechanism for analogous transient failures succeeds
+// the vast majority of the time (see reconcileFailedAbmProcessing_'s doc
+// comment / [[abm_ticket_merge]] v29/30), a short retry here is the
+// correctly-targeted fix — give GCXReply_GAS's concurrent slot a moment
+// to free up rather than crashing the whole reconcile run on the first
+// hiccup.
+const GCX_FETCH_RETRIES = 3;
+function gcxFetch_(url, options) {
+  for (let attempt = 1; attempt <= GCX_FETCH_RETRIES; attempt++) {
+    const res = UrlFetchApp.fetch(url, Object.assign({ muteHttpExceptions: true, followRedirects: true }, options || {}));
+    const body = res.getContentText();
+    try {
+      return JSON.parse(body);
+    } catch (e) {
+      if (attempt < GCX_FETCH_RETRIES) { Utilities.sleep(1000 * attempt); continue; }
+      throw new Error(`gcxFetch_ ${url} -> non-JSON response after ${GCX_FETCH_RETRIES} attempts: ${body.slice(0, 200)}`);
+    }
+  }
+}
+
 function gcxGet_(action, params) {
   let url = `${GCX_GAS_URL}?action=${encodeURIComponent(action)}`;
   Object.keys(params || {}).forEach(k => { url += `&${k}=${encodeURIComponent(params[k])}`; });
-  const res = UrlFetchApp.fetch(url, { muteHttpExceptions: true, followRedirects: true });
-  return JSON.parse(res.getContentText());
+  return gcxFetch_(url);
 }
 
 function gcxPost_(payload) {
-  const res = UrlFetchApp.fetch(GCX_GAS_URL, {
-    method: 'post', contentType: 'application/json',
-    payload: JSON.stringify(payload), muteHttpExceptions: true, followRedirects: true
-  });
-  return JSON.parse(res.getContentText());
+  return gcxFetch_(GCX_GAS_URL, { method: 'post', contentType: 'application/json', payload: JSON.stringify(payload) });
 }
 
 // Latest PUBLIC agent reply on a ticket — i.e. an outbound message that should
