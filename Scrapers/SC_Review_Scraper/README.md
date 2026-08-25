@@ -33,6 +33,23 @@ On first run Chrome opens automatically → log in to all SC accounts → press 
 
 ---
 
+## Unattended deployment (EC2)
+
+For running daily without a local machine, set the `SC_SCRAPER_CREDENTIALS_FILE` env var to a local file (not committed anywhere) with one `DOMAIN|EMAIL|PASSWORD` line per top-level domain group (`US`, `EU`, `JP`, `IN` — EU covers all 5 sub-countries via the shared SC Europe login):
+
+```
+US|au@spigen.com|<password>
+EU|spigende-az@spigen.com|<password>
+JP|sgd.sales4@spigen.com|<password>
+IN|spigenin-az@spigen.com|<password>
+```
+
+When set, `sc_auth.py` automatically fills email + password on any login/re-login prompt. It deliberately does **not** auto-generate the OTP from a stored TOTP secret — that would give a compromised server permanent, silent MFA bypass. Instead, whenever Amazon asks for a one-time code, it opens a `cloudflared` quick tunnel, posts a link to a private Google Chat webhook, and waits for a human to submit the live code from Google Authenticator via a small one-time web form. On the Mac, this env var is never set, so login stays fully manual as described above.
+
+Other env vars honored on the unattended deployment: `SC_SCRAPER_OUT_DIR` (CSV output dir, no `~/Desktop` on a server), `SC_SCRAPER_SCREENSHOT_DIR` (login-failure screenshots), `SC_SCRAPER_CHAT_WEBHOOK` (OTP-request + failure-alert messages — use a private space, not a shared team room).
+
+---
+
 ## User Config
 
 Edit the **USER CONFIG** section at the top of `scrape_sc_reviews.py`.
