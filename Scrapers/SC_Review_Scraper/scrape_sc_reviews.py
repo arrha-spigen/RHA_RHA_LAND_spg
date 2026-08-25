@@ -11,6 +11,14 @@ from datetime import datetime, timezone, timedelta
 sys.stdout.reconfigure(line_buffering=True)  # flush every print immediately when running in background
 from playwright.async_api import async_playwright
 import requests
+from sc_auth import load_credentials, ensure_logged_in
+
+# Unattended-login support (EC2/server deployment only). Unset on the Mac —
+# _creds stays empty there, so ensure_logged_in() is never called and the
+# original manual input()/sleep-loop login flow is completely unchanged.
+CREDENTIALS_FILE = os.environ.get("SC_SCRAPER_CREDENTIALS_FILE")
+_creds = load_credentials(CREDENTIALS_FILE) if CREDENTIALS_FILE else {}
+SCREENSHOT_DIR = os.environ.get("SC_SCRAPER_SCREENSHOT_DIR", os.path.expanduser("~/sc_scraper_screenshots"))
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # USER CONFIG — edit these before each run
@@ -50,19 +58,22 @@ STAR_FILTER = "1,2,3,4,5"
 # Comma-separated star ratings to include.
 # Critical reviews only: "1,2,3"   All reviews: "1,2,3,4,5"
 
-OUT_DIR = os.path.expanduser("~/Desktop")
+OUT_DIR = os.environ.get("SC_SCRAPER_OUT_DIR", os.path.expanduser("~/Desktop"))
 # Directory where CSVs are saved.
 # Each domain is saved as <OUT_DIR>/<DOMAIN>_seller_central_reviews.csv
+# Overridable via SC_SCRAPER_OUT_DIR env var (used on the EC2 deployment,
+# which has no ~/Desktop) — defaults to ~/Desktop unchanged on the Mac.
 
 HEADERS_TO_INCLUDE = [
     'ASIN', 'Created 날짜', '사진 유무', 'Reviewer', 'Review Ratings',
     'Review Title', '본문', '국가', 'Review Link', 'Image URL', 'Review ID',
-    'Order ID',
+    'Order ID', 'Product Rating', 'Ratings Count',
 ]
-# Columns to keep in the output CSV. None → all columns.
-# Default (set 2026-08-06): excludes 'Product Rating', 'Ratings Count', 'Domain Code'
-# per standing user preference — set back to None (or re-add those 3 names above)
-# only if explicitly asked to resume them.
+# Columns to keep in the output CSV, and in this exact order. None → all columns.
+# Default (set 2026-08-18): 'Product Rating'/'Ratings Count' (the ASIN's overall
+# rating + total rating count, shown as "Rating"/"Review Count" in the sheet)
+# placed after 'Order ID' (cols M/N) per standing user preference.
+# 'Domain Code' remains excluded per the earlier 2026-08-06 preference.
 # Full list: ASIN | Created 날짜 | 사진 유무 | Reviewer | Review Ratings | Review Title
 #            본문 | Product Rating | Ratings Count | Domain Code | 국가
 #            Review Link | Image URL | Review ID | Order ID
@@ -97,9 +108,12 @@ FETCH_ORDER_ID = True
 # False — skip order ID fetching (default, faster runs).
 
 UPLOAD_TO_SHEETS = True
-# True  — after scraping, upload each domain CSV as a new sheet to SHEETS_SPREADSHEET_ID.
-#         Sheet names: {DOMAIN}_seller_central_reviews_{yymmdd} (KST date of the run).
-# False — skip upload (default).
+# True  (default) — after scraping, combine all domain CSVs (EU+JP+US+IN, in that
+#         scrape order) into ONE new worksheet on SHEETS_SPREADSHEET_ID, named
+#         SC_{yymmdd} (KST date of the run). If a sheet with that name already
+#         exists (scraper ran more than once today), the next free name is used:
+#         SC_{yymmdd}_1, then _2, etc. Never overwrites an existing dated sheet.
+# False — skip upload.
 
 SHEETS_SPREADSHEET_ID = "1tMbA_msRfCRY0KK40GnyZ_h1uNCldlnk9Cg-_MTcbsw"
 # Target Google Spreadsheet for UPLOAD_TO_SHEETS. Credentials: ~/.config/gws_shim/token.json.
@@ -113,7 +127,7 @@ MID_RUN_LOGIN_WAIT_SECONDS = 120
 # The script pauses, lets you complete OTP, then retries the same page.
 # In interactive mode it waits for Enter instead.
 
-DETECTION_AVOIDANCE = "MEDIUM"
+DETECTION_AVOIDANCE = "LOW"
 # LOW    — short delays, fastest runs, higher detection risk
 # MEDIUM — randomized delays + scroll simulation (recommended for daily use)
 # HIGH   — aggressive randomization + long delays (safest for large/frequent scrapes)
@@ -488,14 +502,17 @@ async def _switch_sc_marketplace(page, display_name, prof):
             if not any(x in page.url for x in ["/ap/", "signin", "mfa"]):
                 break
             print(f"\n  ⚠  SC Europe session expired before switching to {display_name}.")
-            print(f"  Complete login + OTP in Chrome — scraper will retry automatically.")
-            if sys.stdin.isatty():
-                input(f"  Press Enter after logging in... ")
+            if _creds and await ensure_logged_in(page, "EU", _creds, screenshot_dir=SCREENSHOT_DIR):
+                pass  # automated login succeeded — fall through to retry the goto below
             else:
-                for _s in range(MID_RUN_LOGIN_WAIT_SECONDS, 0, -1):
-                    print(f"  {_s}s remaining …  ", end="\r", flush=True)
-                    await asyncio.sleep(1)
-                print()
+                print(f"  Complete login + OTP in Chrome — scraper will retry automatically.")
+                if sys.stdin.isatty():
+                    input(f"  Press Enter after logging in... ")
+                else:
+                    for _s in range(MID_RUN_LOGIN_WAIT_SECONDS, 0, -1):
+                        print(f"  {_s}s remaining …  ", end="\r", flush=True)
+                        await asyncio.sleep(1)
+                    print()
             await page.goto("https://sellercentral-europe.amazon.com/home",
                             wait_until="domcontentloaded", timeout=30000)
 
@@ -828,6 +845,7 @@ async def scrape_domain(domain, page, ctx, prof, asin_filter, out_file=None, app
 
     p = START_PAGE
     _t_retries = 0  # retry counter for transient Playwright race-condition errors
+    _consecutive_empty = 0  # counts genuinely-zero-review pages in a row
     while p <= pages:
         url = dc["sc_base"] + params + (f"&pageNumber={p}" if p > 1 else "")
         print(f"  Page {p}/{pages} …", end=" ", flush=True)
@@ -845,6 +863,8 @@ async def scrape_domain(domain, page, ctx, prof, asin_filter, out_file=None, app
             cur_url = page.url
             if any(x in cur_url for x in ["/ap/", "signin", "mfa"]):
                 print(f"LOGIN REDIRECT detected — session expired on page {p}")
+                if _creds and await ensure_logged_in(page, domain, _creds, screenshot_dir=SCREENSHOT_DIR):
+                    continue  # automated login succeeded — retry same page
                 print(f"  ⚠  Complete login + OTP in Chrome now.")
                 if sys.stdin.isatty():
                     input(f"  Press Enter after logging in to retry page {p}... ")
@@ -855,10 +875,31 @@ async def scrape_domain(domain, page, ctx, prof, asin_filter, out_file=None, app
                         await asyncio.sleep(1)
                     print()
                 continue  # retry same page — do NOT increment p
+            # wait_for_selector timing out (not a login redirect, not a browser
+            # crash) almost always means this page has zero review cards, i.e.
+            # we've run past the last real page of results. Confirm with a
+            # direct DOM check, and only treat it as "end of pagination" after
+            # two such pages in a row — guards against one-off network blips
+            # burning through the rest of a large PAGES budget page-by-page.
+            try:
+                card_count = await page.evaluate(
+                    "document.querySelectorAll('.reviewContainer[data-testid]').length"
+                )
+            except Exception:
+                card_count = -1  # couldn't check — don't treat as confirmed-empty
+            if card_count == 0:
+                _consecutive_empty += 1
+                print(f"SKIP (0 reviews — page {p} likely past end of results, {_consecutive_empty}/2)")
+                if _consecutive_empty >= 2:
+                    print(f"  ↳ 2 consecutive empty pages — stopping {domain} at page {p} (reached end of available reviews)")
+                    break
+                p += 1
+                continue
             print(f"SKIP (timeout/error: {e})")
             p += 1
             continue
         _t_retries = 0
+        _consecutive_empty = 0
         # Verify the account-switcher header actually shows the target marketplace
         # before trusting this page's data. A switch can silently fail (dropdown
         # UI change, stale fallback params) and leave the tab on the wrong country —
@@ -1004,7 +1045,8 @@ async def scrape_domain(domain, page, ctx, prof, asin_filter, out_file=None, app
 
 
 def _upload_to_sheets(results, run_date):
-    """Upload each domain's CSV as a new worksheet to SHEETS_SPREADSHEET_ID."""
+    """Combine all domain CSVs into one new worksheet named SC_{yymmdd}
+    (SC_{yymmdd}_1, _2, ... if the scraper already ran today) on SHEETS_SPREADSHEET_ID."""
     try:
         from google.oauth2.credentials import Credentials
         from google.auth.transport.requests import Request
@@ -1048,6 +1090,7 @@ def _upload_to_sheets(results, run_date):
     print(f"  Google Sheets upload  (run date: {run_date})")
     print(f"{'═'*60}")
 
+    combined_rows = []
     for domain, n_rows, n_imgs, status in results:
         if status != "OK" or n_rows == 0:
             print(f"  SKIP [{domain}] — {status}")
@@ -1057,8 +1100,6 @@ def _upload_to_sheets(results, run_date):
             print(f"  SKIP [{domain}] — CSV not found at {csv_path}")
             continue
 
-        sheet_name = f"{domain}_seller_central_reviews_{run_date}"
-
         with open(csv_path, encoding='utf-8-sig') as _f:
             data = list(csv.reader(_f))
 
@@ -1066,23 +1107,34 @@ def _upload_to_sheets(results, run_date):
             print(f"  SKIP [{domain}] — CSV is empty")
             continue
 
-        try:
-            existing = spreadsheet.worksheet(sheet_name)
-            spreadsheet.del_worksheet(existing)
-            print(f"  [{domain}] replaced existing sheet '{sheet_name}'")
-        except gspread.WorksheetNotFound:
-            pass
+        if not combined_rows:
+            combined_rows.append(data[0])  # header, once
+        combined_rows.extend(data[1:])
+        print(f"  [{domain}] +{len(data) - 1} rows")
 
-        try:
-            ws = spreadsheet.add_worksheet(
-                title=sheet_name,
-                rows=max(len(data) + 1, 2),
-                cols=max(len(data[0]), 1) if data else 20,
-            )
-            ws.update(range_name='A1', values=data, value_input_option='RAW')
-            print(f"  ✓ [{domain}] → '{sheet_name}'  ({len(data) - 1} rows)")
-        except Exception as e:
-            print(f"  ✗ [{domain}] upload failed: {e}")
+    if not combined_rows:
+        print("  SKIP sheets upload — no data collected from any domain")
+        return
+
+    # Find the next free SC_{yymmdd}[_n] sheet name so same-day re-runs don't collide.
+    existing_titles = {ws.title for ws in spreadsheet.worksheets()}
+    base_name = f"SC_{run_date}"
+    sheet_name = base_name
+    n = 1
+    while sheet_name in existing_titles:
+        sheet_name = f"{base_name}_{n}"
+        n += 1
+
+    try:
+        ws = spreadsheet.add_worksheet(
+            title=sheet_name,
+            rows=max(len(combined_rows) + 1, 2),
+            cols=max(len(combined_rows[0]), 1),
+        )
+        ws.update(range_name='A1', values=combined_rows, value_input_option='RAW')
+        print(f"  ✓ combined → '{sheet_name}'  ({len(combined_rows) - 1} rows)")
+    except Exception as e:
+        print(f"  ✗ upload failed: {e}")
 
 
 async def main():
@@ -1156,6 +1208,9 @@ async def main():
                 _logged_in = not any(x in _p.url for x in ["/ap/", "signin", "mfa"])
             except Exception:
                 _logged_in = False
+
+            if not _logged_in and _creds:
+                _logged_in = await ensure_logged_in(_p, _label, _creds, screenshot_dir=SCREENSHOT_DIR)
 
             # Always bring every tab to front so the user can verify the correct
             # marketplace is selected — even valid sessions may be on the wrong one.
@@ -1271,6 +1326,9 @@ async def main():
 
     if UPLOAD_TO_SHEETS:
         _upload_to_sheets(results, run_date)
+
+    if any(status.startswith("FAILED") for _, _, _, status in results):
+        sys.exit(1)
 
 
 if __name__ == '__main__':
