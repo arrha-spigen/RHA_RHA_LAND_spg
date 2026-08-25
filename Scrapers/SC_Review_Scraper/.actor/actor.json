@@ -1,0 +1,10 @@
+{
+    "actorSpecification": 1,
+    "name": "sc-review-scraper",
+    "title": "SC Review Scraper",
+    "description": "Scrapes Amazon Seller Central reviews for US/EU/JP/IN and uploads to Google Sheets. Automated login (email+password), OTP relayed live via Google Chat.",
+    "version": "0.1",
+    "buildTag": "latest",
+    "input": "./input_schema.json",
+    "dockerfile": "./Dockerfile"
+}

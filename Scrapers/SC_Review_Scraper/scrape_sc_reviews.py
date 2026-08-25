@@ -132,10 +132,12 @@ DETECTION_AVOIDANCE = "LOW"
 # MEDIUM — randomized delays + scroll simulation (recommended for daily use)
 # HIGH   — aggressive randomization + long delays (safest for large/frequent scrapes)
 
-HEADLESS = False
+HEADLESS = os.environ.get("SC_SCRAPER_HEADLESS", "0") == "1"
 # False (default) — auto-launches Chrome with SCRAPER_PROFILE_DIR; sessions persist
 #                   between runs so you only need to log in once. Browser is visible.
 # True            — launches headless Chromium using SCRAPER_PROFILE_DIR.
+# Overridable via SC_SCRAPER_HEADLESS=1 env var (set on unattended cloud
+# deployments, which have no display) — defaults to visible/False on the Mac.
 #                   Chrome must be fully closed before running in headless mode.
 
 SCRAPER_PROFILE_DIR = os.path.expanduser("~/.chrome-scraper-profile")

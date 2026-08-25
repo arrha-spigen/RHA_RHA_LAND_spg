@@ -1,0 +1,88 @@
+{
+    "title": "SC Review Scraper Input",
+    "type": "object",
+    "schemaVersion": 1,
+    "properties": {
+        "US_EMAIL": {
+            "title": "US Seller Central email",
+            "type": "string",
+            "editor": "textfield",
+            "description": "Login email for the US Seller Central account."
+        },
+        "US_PASSWORD": {
+            "title": "US Seller Central password",
+            "type": "string",
+            "editor": "textfield",
+            "isSecret": true,
+            "description": "Login password for the US Seller Central account."
+        },
+        "EU_EMAIL": {
+            "title": "EU Seller Central email",
+            "type": "string",
+            "editor": "textfield",
+            "description": "Login email for the EU Seller Central account (covers UK/DE/FR/IT/ES via the shared SC Europe login)."
+        },
+        "EU_PASSWORD": {
+            "title": "EU Seller Central password",
+            "type": "string",
+            "editor": "textfield",
+            "isSecret": true,
+            "description": "Login password for the EU Seller Central account."
+        },
+        "JP_EMAIL": {
+            "title": "JP Seller Central email",
+            "type": "string",
+            "editor": "textfield",
+            "description": "Login email for the JP Seller Central account."
+        },
+        "JP_PASSWORD": {
+            "title": "JP Seller Central password",
+            "type": "string",
+            "editor": "textfield",
+            "isSecret": true,
+            "description": "Login password for the JP Seller Central account."
+        },
+        "IN_EMAIL": {
+            "title": "IN Seller Central email",
+            "type": "string",
+            "editor": "textfield",
+            "description": "Login email for the IN Seller Central account."
+        },
+        "IN_PASSWORD": {
+            "title": "IN Seller Central password",
+            "type": "string",
+            "editor": "textfield",
+            "isSecret": true,
+            "description": "Login password for the IN Seller Central account."
+        },
+        "CHAT_WEBHOOK_URL": {
+            "title": "Private Google Chat webhook",
+            "type": "string",
+            "editor": "textfield",
+            "isSecret": true,
+            "description": "Used for OTP requests and failure alerts. Use a NEW private Chat space/webhook, not the shared GCX team room webhook."
+        },
+        "GWS_TOKEN_JSON": {
+            "title": "Google OAuth token JSON",
+            "type": "string",
+            "editor": "textarea",
+            "isSecret": true,
+            "description": "Full contents of ~/.config/gws_shim/token.json, used for the Google Sheets upload."
+        },
+        "HEADLESS": {
+            "title": "Run headless",
+            "type": "boolean",
+            "editor": "checkbox",
+            "default": true,
+            "description": "Leave OFF for the first validation run so you can watch the login happen live via Apify's Live View. Turn ON for the daily scheduled run."
+        }
+    },
+    "required": [
+        "US_EMAIL", "US_PASSWORD",
+        "EU_EMAIL", "EU_PASSWORD",
+        "JP_EMAIL", "JP_PASSWORD",
+        "IN_EMAIL", "IN_PASSWORD",
+        "CHAT_WEBHOOK_URL",
+        "GWS_TOKEN_JSON"
+    ]
+}
