@@ -1211,6 +1211,25 @@ async def main():
             except Exception:
                 _logged_in = False
 
+            if _logged_in and SCREENSHOT_DIR:
+                # Diagnostic checkpoint: capture what the "already logged in"
+                # landing page actually looks like, after giving any
+                # client-side rendering (account/marketplace selector, etc.)
+                # extra time to finish — a blank-but-authenticated shell here
+                # was the root cause of an earlier 403 "selection_required"
+                # failure on every domain in a from-scratch container.
+                try:
+                    await _p.wait_for_load_state("networkidle", timeout=8000)
+                except Exception:
+                    pass
+                await asyncio.sleep(3)
+                try:
+                    os.makedirs(SCREENSHOT_DIR, exist_ok=True)
+                    await _p.screenshot(
+                        path=os.path.join(SCREENSHOT_DIR, f"{int(time.time())}_{_label}_session_check_landing.png"))
+                except Exception:
+                    pass
+
             if not _logged_in and _creds:
                 _logged_in = await ensure_logged_in(_p, _label, _creds, screenshot_dir=SCREENSHOT_DIR)
 
