@@ -95,6 +95,14 @@ async def main():
             Actor.log.info("No saved Chrome profile in Key-Value Store — first run, starting fresh")
 
         # ── 4. Run the existing scraper, completely unmodified ──
+        # scrape_sc_reviews.py decides interactive-vs-background login prompts
+        # via sys.stdin.isatty(). Apify's container attaches something that
+        # makes that return True even though nothing can ever type into it —
+        # the script would call input() and hang forever waiting for an Enter
+        # keypress that never comes. Force stdin to /dev/null so isatty() is
+        # reliably False, matching how this script is meant to run unattended.
+        sys.stdin = open(os.devnull, "r")
+
         sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
         import scrape_sc_reviews  # noqa: E402  (import after env vars are set)
 
