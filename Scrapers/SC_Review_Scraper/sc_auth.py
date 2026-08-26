@@ -148,15 +148,36 @@ async def _request_otp_via_chat(domain: str, timeout: int = 300):
         await runner.cleanup()
 
 
-async def _drive_amazon_signin(page, email: str, password: str, domain: str):
+async def _checkpoint(page, screenshot_dir, domain, step):
+    """Save a numbered screenshot at each stage of the login flow, regardless
+    of success/failure. There is no display/Live View available in a headless
+    cloud container (Apify's containers have no X server at all), so this is
+    how a run gets visually inspected after the fact — via the Key-Value
+    Store instead of watching live."""
+    if not screenshot_dir:
+        return
+    try:
+        os.makedirs(screenshot_dir, exist_ok=True)
+        fname = os.path.join(screenshot_dir, f"{int(time.time())}_{domain}_{step}.png")
+        await page.screenshot(path=fname)
+    except Exception as e:
+        print(f"  [{domain}] checkpoint screenshot '{step}' failed: {e}")
+
+
+async def _drive_amazon_signin(page, email: str, password: str, domain: str,
+                                screenshot_dir: str = None):
     """Best-effort pass through Amazon's multi-stage signin form. Selectors
-    are Amazon's long-standing standard IDs — CONFIRM them against the real
-    DOM during the first supervised VNC run before relying on this
+    are Amazon's long-standing standard IDs — CONFIRM them against the
+    checkpoint screenshots from the first run before relying on this
     unattended; Amazon changes markup occasionally."""
+    await _checkpoint(page, screenshot_dir, domain, "0_arrived")
+
     if await page.locator("#ap_email").count():
         await page.fill("#ap_email", email)
+        await _checkpoint(page, screenshot_dir, domain, "1_email_filled")
         await page.click("#continue")
         await page.wait_for_load_state("domcontentloaded")
+        await _checkpoint(page, screenshot_dir, domain, "2_after_continue")
 
     if await page.locator("#ap_password").count():
         await page.fill("#ap_password", password)
@@ -164,12 +185,15 @@ async def _drive_amazon_signin(page, email: str, password: str, domain: str):
             if await page.locator(sel).count():
                 await page.check(sel)
                 break
+        await _checkpoint(page, screenshot_dir, domain, "3_password_filled")
         await page.click("#signInSubmit")
         await page.wait_for_load_state("domcontentloaded")
+        await _checkpoint(page, screenshot_dir, domain, "4_after_signin_submit")
 
     otp_sel = "#auth-mfa-otpcode, input[name='otpCode']"
     try:
         await page.wait_for_selector(otp_sel, timeout=15000)
+        await _checkpoint(page, screenshot_dir, domain, "5_otp_prompt")
         code = await _request_otp_via_chat(domain)
         if not code:
             return  # timed out — caller's URL-check will fail and retry/report
@@ -183,6 +207,7 @@ async def _drive_amazon_signin(page, email: str, password: str, domain: str):
                 await page.click(sel)
                 break
         await page.wait_for_load_state("domcontentloaded")
+        await _checkpoint(page, screenshot_dir, domain, "6_after_otp_submit")
     except Exception:
         pass  # OTP step skipped — already-verified device, or not required
 
@@ -201,7 +226,8 @@ async def ensure_logged_in(page, label: str, creds: dict, *, max_attempts: int =
 
     for attempt in range(1, max_attempts + 1):
         try:
-            await _drive_amazon_signin(page, account["email"], account["password"], label)
+            await _drive_amazon_signin(page, account["email"], account["password"], label,
+                                        screenshot_dir=screenshot_dir)
         except Exception as e:
             print(f"  [{label}] login automation error (attempt {attempt}): {e}")
 
@@ -211,16 +237,7 @@ async def ensure_logged_in(page, label: str, creds: dict, *, max_attempts: int =
 
         print(f"  [{label}] not logged in yet (attempt {attempt}/{max_attempts})")
 
-    if screenshot_dir:
-        os.makedirs(screenshot_dir, exist_ok=True)
-        fname = os.path.join(screenshot_dir, f"login_fail_{label}_{int(time.time())}.png")
-        try:
-            await page.screenshot(path=fname, full_page=True)
-            print(f"  [{label}] login FAILED — screenshot saved to {fname}")
-            _notify_chat(
-                f"❌ {label} login FAILED after {max_attempts} attempts — "
-                f"screenshot saved on server at {fname}."
-            )
-        except Exception:
-            pass
+    await _checkpoint(page, screenshot_dir, label, "9_final_failure")
+    print(f"  [{label}] login FAILED after {max_attempts} attempts")
+    _notify_chat(f"❌ {label} login FAILED after {max_attempts} attempts — checkpoint screenshots saved.")
     return False

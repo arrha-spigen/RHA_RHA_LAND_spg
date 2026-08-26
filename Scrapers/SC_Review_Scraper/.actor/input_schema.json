@@ -70,11 +70,11 @@
             "description": "Full contents of ~/.config/gws_shim/token.json, used for the Google Sheets upload."
         },
         "HEADLESS": {
-            "title": "Run headless",
+            "title": "Run headless (always enforced)",
             "type": "boolean",
             "editor": "checkbox",
             "default": true,
-            "description": "Leave OFF for the first validation run so you can watch the login happen live via Apify's Live View. Turn ON for the daily scheduled run."
+            "description": "Apify containers have no display, so headless is always forced on regardless of this value. Use the per-step checkpoint screenshots saved to the Key-Value Store to inspect what happened during a run."
         }
     },
     "required": [

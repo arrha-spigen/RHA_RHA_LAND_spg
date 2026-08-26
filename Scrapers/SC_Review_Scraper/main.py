@@ -60,7 +60,11 @@ async def main():
         os.environ["SC_SCRAPER_CHAT_WEBHOOK"] = actor_input.get("CHAT_WEBHOOK_URL", "")
         os.environ["SC_SCRAPER_OUT_DIR"] = "/tmp/sc_scraper_output"
         os.environ["SC_SCRAPER_SCREENSHOT_DIR"] = "/tmp/sc_scraper_screenshots"
-        os.environ["SC_SCRAPER_HEADLESS"] = "1" if actor_input.get("HEADLESS", True) else "0"
+        # Apify containers have no X server / display — headed Chrome cannot
+        # run here under any circumstances, so this is always forced on
+        # regardless of the input toggle (kept only for schema/documentation
+        # clarity; a Mac/VPS deployment with a real display could honor it).
+        os.environ["SC_SCRAPER_HEADLESS"] = "1"
         os.makedirs(os.environ["SC_SCRAPER_OUT_DIR"], exist_ok=True)
         os.makedirs(os.environ["SC_SCRAPER_SCREENSHOT_DIR"], exist_ok=True)
 
@@ -103,16 +107,19 @@ async def main():
             Actor.log.exception("scrape_sc_reviews.main() raised: %s", e)
             run_failed = True
 
-        # Surface any login-failure screenshots to the default Key-Value Store —
-        # the container filesystem is gone once this run ends, so this is the
-        # only way to see what Amazon actually showed without Live View.
+        # Surface every login checkpoint screenshot to the default Key-Value
+        # Store — the container filesystem is gone once this run ends, and
+        # there is no display/Live View available in this container at all,
+        # so this is the only way to see what Amazon actually showed at each
+        # step of the login flow.
         screenshot_dir = os.environ["SC_SCRAPER_SCREENSHOT_DIR"]
         if os.path.isdir(screenshot_dir):
-            for fn in os.listdir(screenshot_dir):
+            for fn in sorted(os.listdir(screenshot_dir)):
                 if fn.endswith(".png"):
                     with open(os.path.join(screenshot_dir, fn), "rb") as f:
                         await Actor.set_value(fn, f.read(), content_type="image/png")
-                    Actor.log.info("Saved failure screenshot to Key-Value Store: %s", fn)
+            Actor.log.info("Saved %d checkpoint screenshot(s) to Key-Value Store",
+                            len([f for f in os.listdir(screenshot_dir) if f.endswith(".png")]))
 
         # ── 5. Save the (possibly updated) profile back, trimming disposable caches ──
         save_zip = "/tmp/profile_save.zip"
@@ -123,7 +130,15 @@ async def main():
                     fp = os.path.join(root, fn)
                     if _should_skip(fp):
                         continue
-                    zf.write(fp, os.path.relpath(fp, profile_dir))
+                    try:
+                        zf.write(fp, os.path.relpath(fp, profile_dir))
+                    except FileNotFoundError:
+                        # Chrome deletes lock/temp files (e.g. SingletonLock) as
+                        # part of its own shutdown/crash cleanup — a file that
+                        # existed when os.walk() listed it can vanish by the
+                        # time we get to writing it. Not worth failing the whole
+                        # profile save over.
+                        pass
         with open(save_zip, "rb") as f:
             zip_data = f.read()
         await store.set_value(PROFILE_ZIP_KEY, zip_data, content_type="application/zip")
