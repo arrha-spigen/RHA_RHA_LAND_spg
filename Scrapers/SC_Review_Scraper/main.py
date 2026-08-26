@@ -66,6 +66,7 @@ async def main():
         # clarity; a Mac/VPS deployment with a real display could honor it).
         os.environ["SC_SCRAPER_HEADLESS"] = "1"
         os.environ["SC_SCRAPER_DIAGNOSE_ACCOUNTS"] = "1" if actor_input.get("DIAGNOSE_ACCOUNTS") else "0"
+        os.environ["SC_SCRAPER_ISOLATED_TEST_DOMAIN"] = actor_input.get("ISOLATED_TEST_DOMAIN", "")
         os.makedirs(os.environ["SC_SCRAPER_OUT_DIR"], exist_ok=True)
         os.makedirs(os.environ["SC_SCRAPER_SCREENSHOT_DIR"], exist_ok=True)
 

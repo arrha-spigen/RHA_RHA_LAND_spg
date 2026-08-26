@@ -20,6 +20,13 @@ CREDENTIALS_FILE = os.environ.get("SC_SCRAPER_CREDENTIALS_FILE")
 _creds = load_credentials(CREDENTIALS_FILE) if CREDENTIALS_FILE else {}
 SCREENSHOT_DIR = os.environ.get("SC_SCRAPER_SCREENSHOT_DIR", os.path.expanduser("~/sc_scraper_screenshots"))
 DIAGNOSE_ACCOUNTS = os.environ.get("SC_SCRAPER_DIAGNOSE_ACCOUNTS", "0") == "1"
+ISOLATED_TEST_DOMAIN = os.environ.get("SC_SCRAPER_ISOLATED_TEST_DOMAIN", "")
+# When set to a domain code (US/EU/JP/IN), forces a completely fresh,
+# throwaway Chrome profile (never the shared persistent one) and attempts a
+# genuine login using only that domain's credentials — used to test whether
+# a domain's session-check "already logged in" result on the shared profile
+# is a real login or just inherited cross-domain session cookies from a
+# different account. Never set on the Mac.
 # Diagnostic-only mode: dump full page HTML (and any "Switch Accounts"-style
 # dropdown, expanded) for each domain's landing page immediately after
 # login/session-check, then exit — skips the entire scrape/upload pipeline.
@@ -1170,6 +1177,46 @@ async def main():
     print(f"Headless    : {HEADLESS}")
 
     async with async_playwright() as pw:
+        if ISOLATED_TEST_DOMAIN:
+            # Diagnostic: test whether ISOLATED_TEST_DOMAIN's credentials
+            # reach a genuinely different Amazon account than the shared
+            # SCRAPER_PROFILE_DIR profile shows. A prior diagnostic pass
+            # found that account-picker only ever listed EU's own delegated
+            # accounts (PowerArc/Spigen Direct/Spigen EU/Spigen Inc) even
+            # when navigating from JP's or IN's tab — suggesting Amazon's
+            # cross-domain session cookies made those tabs LOOK logged in
+            # without ever actually authenticating with their own distinct
+            # credentials. This uses a brand-new, throwaway profile dir
+            # (never the shared one) so there's no possibility of inheriting
+            # another domain's session — forces a genuine fresh login.
+            import shutil as _shutil
+            iso_dir = "/tmp/sc_scraper_isolated_test_profile"
+            _shutil.rmtree(iso_dir, ignore_errors=True)
+            os.makedirs(iso_dir, exist_ok=True)
+            print(f"ISOLATED_TEST_DOMAIN={ISOLATED_TEST_DOMAIN} — using throwaway profile {iso_dir}")
+            ctx = await pw.chromium.launch_persistent_context(iso_dir, channel="chrome", headless=HEADLESS)
+            page = ctx.pages[0] if ctx.pages else await ctx.new_page()
+            url = (_DOMAINS[ISOLATED_TEST_DOMAIN]["sc_base"] if ISOLATED_TEST_DOMAIN != "EU"
+                   else "https://sellercentral-europe.amazon.com/brand-customer-reviews/")
+            await page.goto(url, wait_until="domcontentloaded", timeout=30000)
+            logged_in = not any(x in page.url for x in ["/ap/", "signin", "mfa"])
+            print(f"  Pre-login check: {'already logged in (unexpected in a fresh profile!)' if logged_in else 'not logged in, proceeding to real login'}")
+            if not logged_in and _creds:
+                logged_in = await ensure_logged_in(page, ISOLATED_TEST_DOMAIN, _creds, screenshot_dir=SCREENSHOT_DIR)
+            os.makedirs(SCREENSHOT_DIR, exist_ok=True)
+            try:
+                await page.wait_for_load_state("networkidle", timeout=8000)
+            except Exception:
+                pass
+            await asyncio.sleep(3)
+            html = await page.content()
+            with open(os.path.join(SCREENSHOT_DIR, f"ISOLATED_{ISOLATED_TEST_DOMAIN}_accountpicker.html"), "w", encoding="utf-8") as f:
+                f.write(html)
+            await page.screenshot(path=os.path.join(SCREENSHOT_DIR, f"ISOLATED_{ISOLATED_TEST_DOMAIN}_landing.png"))
+            print(f"  logged_in={logged_in} — HTML + screenshot captured")
+            await ctx.close()
+            sys.exit(0)
+
         if HEADLESS:
             import shutil
             if shutil.which("pgrep") and __import__("subprocess").run(

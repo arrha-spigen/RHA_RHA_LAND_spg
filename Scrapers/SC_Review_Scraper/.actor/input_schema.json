@@ -82,6 +82,12 @@
             "editor": "checkbox",
             "default": false,
             "description": "When ON, dumps full page HTML (and any account-switcher dropdown, clicked open) for each domain's landing page to the Key-Value Store, then exits immediately — no scraping, no Sheets upload. Used to inspect Amazon's account-selection UI structure."
+        },
+        "ISOLATED_TEST_DOMAIN": {
+            "title": "Diagnostic mode: isolated fresh-login test for one domain",
+            "type": "string",
+            "editor": "textfield",
+            "description": "Set to US/EU/JP/IN to force a completely fresh, throwaway Chrome profile and test whether that domain's own credentials reach a genuinely different account than the shared profile shows. Leave empty for normal runs."
         }
     },
     "required": [
