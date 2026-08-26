@@ -1247,24 +1247,50 @@ async def main():
                         f.write(html)
                 except Exception as e:
                     print(f"  [{_label}] diagnose: content() failed: {e}")
-                # Look for any account/marketplace-switcher-style trigger and,
-                # if found, click it open and capture the expanded dropdown too.
-                switcher_sel = (
-                    ".dropdown-account-switcher-header, "
-                    "[class*='account-switcher'], "
-                    "[class*='AccountSwitcher'], "
-                    "button:has-text('Switch Accounts')"
-                )
-                try:
-                    trigger = _p.locator(switcher_sel).first
-                    if await trigger.count():
-                        await trigger.click()
-                        await asyncio.sleep(1.5)
-                        html2 = await _p.content()
-                        with open(os.path.join(SCREENSHOT_DIR, f"{_label}_switcher_expanded.html"), "w", encoding="utf-8") as f:
-                            f.write(html2)
-                except Exception as e:
-                    print(f"  [{_label}] diagnose: switcher capture failed: {e}")
+                # Confirmed page structure (from a prior diagnostic pass): this
+                # is a Vue "full-page-account-switcher" tree, not a flat
+                # dropdown. Each top-level account row has its own expander;
+                # PowerArc (unrelated business, DOM-first) was accidentally
+                # expanded before by a generic "first switcher-like element"
+                # selector. This time, expand each named top-level account
+                # explicitly, by label text, only once (on the JP tab — the
+                # tree is identical across all 4 domains, same underlying
+                # Amazon identity/CID, confirmed via the earlier landing
+                # screenshots all sharing CID A1VXTSRX565TLZ).
+                if _label == "JP":
+                    label_sel = ".full-page-account-switcher-account-label"
+                    for top_name in ["Spigen Direct", "Spigen EU", "Spigen Inc"]:
+                        try:
+                            row_label = _p.locator(f"{label_sel}:text-is('{top_name}')").first
+                            if not await row_label.count():
+                                print(f"  [JP] diagnose: top-level row '{top_name}' not found")
+                                continue
+                            await row_label.click()
+                            await asyncio.sleep(1.5)
+                            html2 = await _p.content()
+                            safe_name = top_name.replace(" ", "_")
+                            with open(os.path.join(SCREENSHOT_DIR, f"JP_expand_{safe_name}.html"), "w", encoding="utf-8") as f:
+                                f.write(html2)
+                            print(f"  [JP] diagnose: expanded '{top_name}'")
+                            # If a Japan-named child row appeared (only expected
+                            # under Spigen Direct), expand it too for the
+                            # third nesting level the user's screenshot showed.
+                            jp_child = _p.locator(f"{label_sel}:text-is('Spigen 公式直営店')").first
+                            if await jp_child.count():
+                                await jp_child.click()
+                                await asyncio.sleep(1.5)
+                                html3 = await _p.content()
+                                with open(os.path.join(SCREENSHOT_DIR, f"JP_expand_{safe_name}_then_SpigenJP.html"), "w", encoding="utf-8") as f:
+                                    f.write(html3)
+                                print(f"  [JP] diagnose: expanded 'Spigen 公式直営店' under '{top_name}'")
+                            # Reload fresh before trying the next top-level
+                            # account, so each expansion starts from the same
+                            # clean state (Vue may collapse siblings or not —
+                            # don't rely on it).
+                            await _p.goto(_url, wait_until="domcontentloaded", timeout=30000)
+                            await asyncio.sleep(2)
+                        except Exception as e:
+                            print(f"  [JP] diagnose: expand '{top_name}' failed: {e}")
                 print(f"  [{_label}] diagnose: HTML captured")
 
             # Always bring every tab to front so the user can verify the correct
