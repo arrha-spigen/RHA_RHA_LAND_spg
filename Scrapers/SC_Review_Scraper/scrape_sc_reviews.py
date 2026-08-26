@@ -19,6 +19,12 @@ from sc_auth import load_credentials, ensure_logged_in
 CREDENTIALS_FILE = os.environ.get("SC_SCRAPER_CREDENTIALS_FILE")
 _creds = load_credentials(CREDENTIALS_FILE) if CREDENTIALS_FILE else {}
 SCREENSHOT_DIR = os.environ.get("SC_SCRAPER_SCREENSHOT_DIR", os.path.expanduser("~/sc_scraper_screenshots"))
+DIAGNOSE_ACCOUNTS = os.environ.get("SC_SCRAPER_DIAGNOSE_ACCOUNTS", "0") == "1"
+# Diagnostic-only mode: dump full page HTML (and any "Switch Accounts"-style
+# dropdown, expanded) for each domain's landing page immediately after
+# login/session-check, then exit — skips the entire scrape/upload pipeline.
+# Used to inspect Amazon's account-picker structure without burning API
+# calls or scrape time against real accounts. Never set on the Mac.
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # USER CONFIG — edit these before each run
@@ -1233,6 +1239,34 @@ async def main():
             if not _logged_in and _creds:
                 _logged_in = await ensure_logged_in(_p, _label, _creds, screenshot_dir=SCREENSHOT_DIR)
 
+            if _logged_in and DIAGNOSE_ACCOUNTS:
+                os.makedirs(SCREENSHOT_DIR, exist_ok=True)
+                try:
+                    html = await _p.content()
+                    with open(os.path.join(SCREENSHOT_DIR, f"{_label}_accountpicker.html"), "w", encoding="utf-8") as f:
+                        f.write(html)
+                except Exception as e:
+                    print(f"  [{_label}] diagnose: content() failed: {e}")
+                # Look for any account/marketplace-switcher-style trigger and,
+                # if found, click it open and capture the expanded dropdown too.
+                switcher_sel = (
+                    ".dropdown-account-switcher-header, "
+                    "[class*='account-switcher'], "
+                    "[class*='AccountSwitcher'], "
+                    "button:has-text('Switch Accounts')"
+                )
+                try:
+                    trigger = _p.locator(switcher_sel).first
+                    if await trigger.count():
+                        await trigger.click()
+                        await asyncio.sleep(1.5)
+                        html2 = await _p.content()
+                        with open(os.path.join(SCREENSHOT_DIR, f"{_label}_switcher_expanded.html"), "w", encoding="utf-8") as f:
+                            f.write(html2)
+                except Exception as e:
+                    print(f"  [{_label}] diagnose: switcher capture failed: {e}")
+                print(f"  [{_label}] diagnose: HTML captured")
+
             # Always bring every tab to front so the user can verify the correct
             # marketplace is selected — even valid sessions may be on the wrong one.
             try:
@@ -1244,6 +1278,10 @@ async def main():
             else:
                 needs_login.append(_label)
                 print(f"  [{_label}] Not logged in — log in now")
+
+        if DIAGNOSE_ACCOUNTS:
+            print("\n  DIAGNOSE_ACCOUNTS mode — HTML captured for all domains, exiting without scraping.")
+            sys.exit(0)
 
         login_notice = f"Login required for: {needs_login}\n  " if needs_login else ""
         print(f"\n  {login_notice}→ Log in if needed, then navigate each tab to the correct marketplace.")

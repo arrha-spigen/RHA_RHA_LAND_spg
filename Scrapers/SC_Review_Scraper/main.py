@@ -115,19 +115,23 @@ async def main():
             Actor.log.exception("scrape_sc_reviews.main() raised: %s", e)
             run_failed = True
 
-        # Surface every login checkpoint screenshot to the default Key-Value
-        # Store — the container filesystem is gone once this run ends, and
-        # there is no display/Live View available in this container at all,
-        # so this is the only way to see what Amazon actually showed at each
-        # step of the login flow.
+        # Surface every login checkpoint screenshot (and, when
+        # SC_SCRAPER_DIAGNOSE_ACCOUNTS is set, diagnostic account-picker HTML
+        # dumps) to the default Key-Value Store — the container filesystem is
+        # gone once this run ends, and there is no display/Live View
+        # available in this container at all, so this is the only way to see
+        # what Amazon actually showed at each step.
         screenshot_dir = os.environ["SC_SCRAPER_SCREENSHOT_DIR"]
+        _artifact_types = {".png": "image/png", ".html": "text/html"}
         if os.path.isdir(screenshot_dir):
+            saved = 0
             for fn in sorted(os.listdir(screenshot_dir)):
-                if fn.endswith(".png"):
+                ext = os.path.splitext(fn)[1]
+                if ext in _artifact_types:
                     with open(os.path.join(screenshot_dir, fn), "rb") as f:
-                        await Actor.set_value(fn, f.read(), content_type="image/png")
-            Actor.log.info("Saved %d checkpoint screenshot(s) to Key-Value Store",
-                            len([f for f in os.listdir(screenshot_dir) if f.endswith(".png")]))
+                        await Actor.set_value(fn, f.read(), content_type=_artifact_types[ext])
+                    saved += 1
+            Actor.log.info("Saved %d diagnostic artifact(s) to Key-Value Store", saved)
 
         # ── 5. Save the (possibly updated) profile back, trimming disposable caches ──
         save_zip = "/tmp/profile_save.zip"
