@@ -75,6 +75,13 @@
             "editor": "checkbox",
             "default": true,
             "description": "Apify containers have no display, so headless is always forced on regardless of this value. Use the per-step checkpoint screenshots saved to the Key-Value Store to inspect what happened during a run."
+        },
+        "DIAGNOSE_ACCOUNTS": {
+            "title": "Diagnostic mode: capture account-picker HTML only",
+            "type": "boolean",
+            "editor": "checkbox",
+            "default": false,
+            "description": "When ON, dumps full page HTML (and any account-switcher dropdown, clicked open) for each domain's landing page to the Key-Value Store, then exits immediately — no scraping, no Sheets upload. Used to inspect Amazon's account-selection UI structure."
         }
     },
     "required": [
