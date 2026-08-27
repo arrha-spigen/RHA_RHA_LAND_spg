@@ -229,21 +229,35 @@ async def ensure_customer_logged_in(page, domain: str, creds: dict, *,
     ever logged into Seller Central is still a guest here. Reuses the same
     Amazon identity/credentials and the same Chat-relayed OTP flow.
 
-    Checks the account-flyout link's href rather than its visible text —
-    "Hello, sign in" is localized per marketplace (DE/JP text differs), but
-    the href contains 'signin'/'sign-in' for a guest session and doesn't
-    once authenticated, regardless of locale. This check is only used to
-    decide whether to retry / how to log — login is always attempted at
-    least once regardless of what it reports, since a wrong "already logged
-    in" read here would otherwise silently skip login for real (this is
-    exactly what happened to DE: the href check reported "logged in" when
-    it wasn't, so no login was ever attempted and images stayed empty).
+    Live investigation (against the Mac's real shared profile, so these are
+    genuine account states, not simulator guesses) found `#nav-link-accountList`
+    is NOT a reliable signal at all:
+      - US is signed in as an Amazon Business account ("Hello, Spigen /
+        Account for Spigen Inc.") — Business' nav uses a different DOM
+        entirely; #nav-link-accountList doesn't exist even though the
+        account is fully authenticated.
+      - JP is signed in as a real customer (has a saved delivery address) —
+        same story, no #nav-link-accountList, fully authenticated anyway.
+      - DE is a genuine guest ("Hello, sign in") — and IS the plain-consumer
+        layout, where #nav-link-accountList does exist.
+      - Text-based ("Hello,") and href-based ("/ap/signin") detection were
+        also tried and rejected: "Hello," doesn't appear at all on JP's real
+        greeting ("{name}さん"), and "/ap/signin" matches even on fully
+        authenticated pages (e.g. a hidden "Switch Account" menu item), so
+        clicking it can hang forever waiting for an invisible element.
+    So: #nav-link-accountList existing is still the right signal for "this
+    is a plain guest that needs the credential form" (true for DE) — but its
+    ABSENCE must NOT be treated as a failure. It just as often means
+    "already authenticated via a different account-type layout" (true for
+    US/JP), which used to make this function retry-loop for 60s+ and then
+    report FAILED even though the session was already fine.
 
     Amazon also sometimes serves a lightweight bot-check interstitial
     ("Click the button below to continue shopping" / localized) to
     fresh/automated sessions before the real homepage loads at all — no nav,
-    just one button. Handled generically (click the lone button) rather than
-    matching localized text.
+    just one button. This reproduces even on the Mac's own real network, so
+    it isn't specific to Apify's datacenter IPs. Handled generically (click
+    the lone button) rather than matching localized text.
     """
     group = credential_group(domain)
     account = creds.get(group)
@@ -251,9 +265,15 @@ async def ensure_customer_logged_in(page, domain: str, creds: dict, *,
         return False
 
     async def _dismiss_continue_shopping_interstitial():
+        # #twotabsearchtextbox (the search box) is present on every real
+        # storefront homepage regardless of locale or account type/layout,
+        # and absent on the bare interstitial — a much more stable "did we
+        # actually land on a real page" signal than nav elements, which vary
+        # by account type, or /ap/signin hrefs, which can match a hidden
+        # "Switch Account" menu item even on an authenticated page.
         try:
-            await page.wait_for_selector("#nav-link-accountList", timeout=5000)
-            return  # real homepage already loaded
+            await page.wait_for_selector("#twotabsearchtextbox", timeout=4000)
+            return  # real page already loaded (guest or authenticated, either layout)
         except Exception:
             pass
         try:
@@ -261,26 +281,32 @@ async def ensure_customer_logged_in(page, domain: str, creds: dict, *,
             if await btn.count():
                 await btn.click()
                 await page.wait_for_load_state("domcontentloaded")
+                await asyncio.sleep(1.5)
         except Exception:
             pass
-
-    async def _is_guest() -> bool:
-        try:
-            href = await page.locator("#nav-link-accountList").get_attribute("href", timeout=8000) or ""
-        except Exception:
-            return True  # couldn't find the nav element — assume not logged in
-        return "signin" in href.lower() or "sign-in" in href.lower() or "/ap/" in href.lower()
 
     await _dismiss_continue_shopping_interstitial()
     await _checkpoint(page, screenshot_dir, domain, "cust_0_arrived")
 
+    try:
+        nav_present = await page.locator("#nav-link-accountList").count() > 0
+    except Exception:
+        nav_present = False
+
+    if not nav_present:
+        # Not the plain-consumer layout — every confirmed real case of this
+        # (US Business, JP real customer) was already fully authenticated,
+        # so proceed straight to image fetching rather than forcing a login
+        # attempt against UI elements that don't exist here.
+        print(f"  [{domain}] no plain-consumer account nav (Business/alternate layout) — assuming already authenticated")
+        return True
+
     for attempt in range(1, max_attempts + 1):
         try:
-            await page.click("#nav-link-accountList")
+            await page.click("#nav-link-accountList", timeout=8000)
             await page.wait_for_load_state("domcontentloaded")
         except Exception as e:
             print(f"  [{domain}] could not reach customer sign-in page (attempt {attempt}): {e}")
-            await _dismiss_continue_shopping_interstitial()
             continue
 
         try:
@@ -289,7 +315,13 @@ async def ensure_customer_logged_in(page, domain: str, creds: dict, *,
         except Exception as e:
             print(f"  [{domain}] customer login automation error (attempt {attempt}): {e}")
 
-        if not await _is_guest():
+        try:
+            still_guest = await page.locator("#nav-link-accountList").get_attribute("href", timeout=5000) or ""
+            still_guest = "signin" in still_guest.lower() or "/ap/" in still_guest.lower()
+        except Exception:
+            still_guest = False  # nav gone entirely — likely redirected to a logged-in layout
+
+        if not still_guest:
             print(f"  [{domain}] customer login succeeded (attempt {attempt})")
             return True
         print(f"  [{domain}] customer login not confirmed yet (attempt {attempt}/{max_attempts})")
