@@ -691,7 +691,7 @@ async def _resolve_account(page, domain, creds, url, *, max_attempts=2):
     return False
 
 
-async def _enrich_rows_with_images(all_rows, dc, page, prof):
+async def _enrich_rows_with_images(all_rows, dc, page, prof, domain=None):
     """Fetch reviewer images for rows from a single domain. Enriches rows in-place."""
     if not all_rows:
         return 0
@@ -703,6 +703,10 @@ async def _enrich_rows_with_images(all_rows, dc, page, prof):
     print(f"  Switching to {dc['amazon_home']} for image fetching …")
     await page.goto(dc["amazon_home"], wait_until="domcontentloaded", timeout=30000)
     await asyncio.sleep(random.uniform(1.5, 3.0))
+
+    if _creds and domain:
+        from sc_auth import ensure_customer_logged_in
+        await ensure_customer_logged_in(page, domain, _creds, screenshot_dir=SCREENSHOT_DIR)
 
     review_ids = [row[IDX['Review ID']] for row in all_rows]
     id_to_row  = {row[IDX['Review ID']]: row for row in all_rows}
@@ -777,7 +781,11 @@ async def _enrich_csv_with_images(csv_path, page, prof):
         if dc_code not in _DOMAINS:
             print(f"  SKIP [{dc_code}] — not in domain registry")
             continue
-        if not _DOMAINS[dc_code].get("image_fetch", True):
+        if not _creds and not _DOMAINS[dc_code].get("image_fetch", True):
+            # On the Mac, image_fetch:False is a hard skip — no automated way
+            # to establish a customer session there, so don't waste time.
+            # On Apify (_creds set), always attempt it — ensure_customer_logged_in
+            # below will actually establish the session this flag assumes exists.
             print(f"  SKIP [{dc_code}] — no customer session for image fetch (amazon.{dc_code.lower()} not logged in)")
             continue
         dc       = _DOMAINS[dc_code]
@@ -786,6 +794,10 @@ async def _enrich_csv_with_images(csv_path, page, prof):
         print(f"\n  Image fetch [{dc_code}] : navigating to {dc['amazon_home']} …")
         await page.goto(dc["amazon_home"], wait_until="domcontentloaded", timeout=30000)
         await asyncio.sleep(random.uniform(1.5, 3.0))
+
+        if _creds:
+            from sc_auth import ensure_customer_logged_in
+            await ensure_customer_logged_in(page, dc_code, _creds, screenshot_dir=SCREENSHOT_DIR)
 
         review_ids = [rows[i][rid_col] for i in row_indices]
         id_to_idx  = {rows[i][rid_col]: i for i in row_indices}
@@ -1114,7 +1126,7 @@ async def scrape_domain(domain, page, ctx, prof, asin_filter, out_file=None, app
     # ── Step 3: image enrichment (skipped for EU — caller runs _enrich_csv_with_images) ──
     total_with_imgs = 0
     if FETCH_IMAGES and not skip_images:
-        total_with_imgs = await _enrich_rows_with_images(all_rows, dc, page, prof)
+        total_with_imgs = await _enrich_rows_with_images(all_rows, dc, page, prof, domain=domain)
 
     # ── Step 4: ASIN filter ───────────────────────────────────────────────
     if asin_filter:

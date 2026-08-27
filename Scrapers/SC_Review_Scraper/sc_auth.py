@@ -212,6 +212,70 @@ async def _drive_amazon_signin(page, email: str, password: str, domain: str,
         pass  # OTP step skipped — already-verified device, or not required
 
 
+async def ensure_customer_logged_in(page, domain: str, creds: dict, *,
+                                     max_attempts: int = 2, screenshot_dir: str = None) -> bool:
+    """Ensure the customer-facing Amazon storefront (amazon.com/de/co.jp/in —
+    NOT Seller Central) that `page` is currently on has an authenticated
+    shopper session.
+
+    Image fetching does a same-origin `fetch(..., credentials:'include')`
+    against each review's page; Amazon serves a stripped response with no
+    `review-image-tile` elements to a guest session, so without this the
+    fetch 'succeeds' (no error) but silently returns zero images every time.
+
+    The Seller Central login flow never establishes this — a Seller Central
+    session cookie lives on a different origin (sellercentral*.amazon.com)
+    than the storefront (amazon.com/de/co.jp/in), so a profile that has only
+    ever logged into Seller Central is still a guest here. Reuses the same
+    Amazon identity/credentials and the same Chat-relayed OTP flow.
+
+    Checks the account-flyout link's href rather than its visible text —
+    "Hello, sign in" is localized per marketplace (DE/JP text differs), but
+    the href always contains 'signin' for a guest session and doesn't once
+    authenticated, regardless of locale.
+    """
+    group = credential_group(domain)
+    account = creds.get(group)
+    if not account:
+        return False
+
+    async def _is_guest() -> bool:
+        try:
+            href = await page.locator("#nav-link-accountList").get_attribute("href", timeout=5000) or ""
+        except Exception:
+            return True  # couldn't find the nav element — assume not logged in
+        return "signin" in href.lower() or "/ap/" in href.lower()
+
+    if not await _is_guest():
+        return True  # already has a customer session
+
+    await _checkpoint(page, screenshot_dir, domain, "cust_0_guest_detected")
+
+    for attempt in range(1, max_attempts + 1):
+        try:
+            await page.click("#nav-link-accountList")
+            await page.wait_for_load_state("domcontentloaded")
+        except Exception as e:
+            print(f"  [{domain}] could not reach customer sign-in page (attempt {attempt}): {e}")
+            continue
+
+        try:
+            await _drive_amazon_signin(page, account["email"], account["password"], domain,
+                                        screenshot_dir=screenshot_dir)
+        except Exception as e:
+            print(f"  [{domain}] customer login automation error (attempt {attempt}): {e}")
+
+        if not await _is_guest():
+            print(f"  [{domain}] customer login succeeded (attempt {attempt})")
+            return True
+        print(f"  [{domain}] customer login not confirmed yet (attempt {attempt}/{max_attempts})")
+
+    await _checkpoint(page, screenshot_dir, domain, "cust_9_final_failure")
+    print(f"  [{domain}] customer login FAILED after {max_attempts} attempts — image fetch will stay empty")
+    _notify_chat(f"⚠️ {domain} customer-storefront login FAILED — Image URL fetch will stay empty this run.")
+    return False
+
+
 async def ensure_logged_in(page, label: str, creds: dict, *, max_attempts: int = 2,
                             screenshot_dir: str = None) -> bool:
     """Drop-in automation for the manual input()/sleep-loop login blocks.
