@@ -231,25 +231,48 @@ async def ensure_customer_logged_in(page, domain: str, creds: dict, *,
 
     Checks the account-flyout link's href rather than its visible text —
     "Hello, sign in" is localized per marketplace (DE/JP text differs), but
-    the href always contains 'signin' for a guest session and doesn't once
-    authenticated, regardless of locale.
+    the href contains 'signin'/'sign-in' for a guest session and doesn't
+    once authenticated, regardless of locale. This check is only used to
+    decide whether to retry / how to log — login is always attempted at
+    least once regardless of what it reports, since a wrong "already logged
+    in" read here would otherwise silently skip login for real (this is
+    exactly what happened to DE: the href check reported "logged in" when
+    it wasn't, so no login was ever attempted and images stayed empty).
+
+    Amazon also sometimes serves a lightweight bot-check interstitial
+    ("Click the button below to continue shopping" / localized) to
+    fresh/automated sessions before the real homepage loads at all — no nav,
+    just one button. Handled generically (click the lone button) rather than
+    matching localized text.
     """
     group = credential_group(domain)
     account = creds.get(group)
     if not account:
         return False
 
+    async def _dismiss_continue_shopping_interstitial():
+        try:
+            await page.wait_for_selector("#nav-link-accountList", timeout=5000)
+            return  # real homepage already loaded
+        except Exception:
+            pass
+        try:
+            btn = page.locator("button").first
+            if await btn.count():
+                await btn.click()
+                await page.wait_for_load_state("domcontentloaded")
+        except Exception:
+            pass
+
     async def _is_guest() -> bool:
         try:
-            href = await page.locator("#nav-link-accountList").get_attribute("href", timeout=5000) or ""
+            href = await page.locator("#nav-link-accountList").get_attribute("href", timeout=8000) or ""
         except Exception:
             return True  # couldn't find the nav element — assume not logged in
-        return "signin" in href.lower() or "/ap/" in href.lower()
+        return "signin" in href.lower() or "sign-in" in href.lower() or "/ap/" in href.lower()
 
-    if not await _is_guest():
-        return True  # already has a customer session
-
-    await _checkpoint(page, screenshot_dir, domain, "cust_0_guest_detected")
+    await _dismiss_continue_shopping_interstitial()
+    await _checkpoint(page, screenshot_dir, domain, "cust_0_arrived")
 
     for attempt in range(1, max_attempts + 1):
         try:
@@ -257,6 +280,7 @@ async def ensure_customer_logged_in(page, domain: str, creds: dict, *,
             await page.wait_for_load_state("domcontentloaded")
         except Exception as e:
             print(f"  [{domain}] could not reach customer sign-in page (attempt {attempt}): {e}")
+            await _dismiss_continue_shopping_interstitial()
             continue
 
         try:

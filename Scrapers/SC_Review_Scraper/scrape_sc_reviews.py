@@ -701,7 +701,13 @@ async def _enrich_rows_with_images(all_rows, dc, page, prof, domain=None):
     batch_max = prof["batch_max"]
 
     print(f"  Switching to {dc['amazon_home']} for image fetching …")
-    await page.goto(dc["amazon_home"], wait_until="domcontentloaded", timeout=30000)
+    try:
+        await page.goto(dc["amazon_home"], wait_until="domcontentloaded", timeout=30000)
+    except Exception as e:
+        # Image fetch is enrichment, not core data — a flaky connection here
+        # shouldn't lose the review rows already scraped for this domain.
+        print(f"  WARN could not reach {dc['amazon_home']} for image fetch ({e}) — skipping images for this domain")
+        return 0
     await asyncio.sleep(random.uniform(1.5, 3.0))
 
     if _creds and domain:
@@ -792,7 +798,14 @@ async def _enrich_csv_with_images(csv_path, page, prof):
         fetch_js = _make_batch_fetch_js(dc["review_url"])
 
         print(f"\n  Image fetch [{dc_code}] : navigating to {dc['amazon_home']} …")
-        await page.goto(dc["amazon_home"], wait_until="domcontentloaded", timeout=30000)
+        try:
+            await page.goto(dc["amazon_home"], wait_until="domcontentloaded", timeout=30000)
+        except Exception as e:
+            # Image fetch is enrichment, not core data — a flaky connection
+            # here (seen: net::ERR_CONNECTION_RESET) shouldn't blow away the
+            # review rows already scraped for every other EU country.
+            print(f"  WARN [{dc_code}] could not reach {dc['amazon_home']} for image fetch ({e}) — skipping this country's images")
+            continue
         await asyncio.sleep(random.uniform(1.5, 3.0))
 
         if _creds:
