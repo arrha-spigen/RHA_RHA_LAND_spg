@@ -126,6 +126,23 @@ async def main():
             Actor.log.exception("scrape_sc_reviews.main() raised: %s", e)
             run_failed = True
 
+        # Push the same rows already written to the Google Sheet into the
+        # Actor's default dataset, so the run is downloadable from the Runs
+        # page (Export button) and visible in the Output tab. Read via
+        # getattr/module lookup (not a top-level import binding) because
+        # scrape_sc_reviews.main() may have exited early via sys.exit() on a
+        # partial-domain failure — the module-level global set right before
+        # that exit still survives, and this runs after the try/except above
+        # catches it either way.
+        combined_rows = getattr(scrape_sc_reviews, "LAST_COMBINED_ROWS", None)
+        if combined_rows and len(combined_rows) > 1:
+            header = combined_rows[0]
+            dataset_items = [dict(zip(header, row)) for row in combined_rows[1:]]
+            await Actor.push_data(dataset_items)
+            Actor.log.info("Pushed %d rows to the Actor's default dataset", len(dataset_items))
+        else:
+            Actor.log.info("No collected rows to push to the dataset (combined_rows empty or unavailable)")
+
         # Surface every login checkpoint screenshot (and, when
         # SC_SCRAPER_DIAGNOSE_ACCOUNTS is set, diagnostic account-picker HTML
         # dumps) to the default Key-Value Store — the container filesystem is

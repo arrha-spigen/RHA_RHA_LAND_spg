@@ -33,6 +33,14 @@ ISOLATED_TEST_DOMAIN = os.environ.get("SC_SCRAPER_ISOLATED_TEST_DOMAIN", "")
 # Used to inspect Amazon's account-picker structure without burning API
 # calls or scrape time against real accounts. Never set on the Mac.
 
+LAST_COMBINED_ROWS = None
+# Set by main() at the end of a run to the same header+rows list uploaded to
+# Google Sheets (or None if UPLOAD_TO_SHEETS is off, or upload never got far
+# enough to build it). main.py (Apify deployment only) reads this after
+# calling main() — including after a caught SystemExit from a partial-domain
+# failure — to push the identical data to the Actor's default dataset, so
+# it's downloadable from the Runs/Output tab too. Unused on the Mac.
+
 # ═══════════════════════════════════════════════════════════════════════════════
 # USER CONFIG — edit these before each run
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -1207,7 +1215,7 @@ def _upload_to_sheets(results, run_date):
 
     if not combined_rows:
         print("  SKIP sheets upload — no data collected from any domain")
-        return
+        return combined_rows
 
     # Find the next free SC_{yymmdd}[_n] sheet name so same-day re-runs don't collide.
     existing_titles = {ws.title for ws in spreadsheet.worksheets()}
@@ -1228,6 +1236,12 @@ def _upload_to_sheets(results, run_date):
         print(f"  ✓ combined → '{sheet_name}'  ({len(combined_rows) - 1} rows)")
     except Exception as e:
         print(f"  ✗ upload failed: {e}")
+
+    # Returned regardless of whether the Sheets write above succeeded — the
+    # scrape itself succeeded either way, and main.py (Apify deployment only)
+    # uses this to push the exact same rows to the Actor's default dataset,
+    # so the data is downloadable from the Runs/Output tab too.
+    return combined_rows
 
 
 async def main():
@@ -1555,9 +1569,15 @@ async def main():
         print(f"  {domain:4s}  {n_rows:>5} reviews  {n_imgs:>4} with images  [{status}]")
     print(f"{'═'*60}")
 
+    global LAST_COMBINED_ROWS
     if UPLOAD_TO_SHEETS:
-        _upload_to_sheets(results, run_date)
+        LAST_COMBINED_ROWS = _upload_to_sheets(results, run_date)
 
+    # Set before the possible sys.exit(1) below so main.py (Apify deployment
+    # only) can still read whatever WAS collected even on a partial failure —
+    # sys.exit raises immediately, so a return value here wouldn't reach a
+    # caller on that path, but a module-level var read after catching
+    # SystemExit does.
     if any(status.startswith("FAILED") for _, _, _, status in results):
         sys.exit(1)
 
