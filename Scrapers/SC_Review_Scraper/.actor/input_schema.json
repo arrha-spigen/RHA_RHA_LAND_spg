@@ -88,6 +88,12 @@
             "type": "string",
             "editor": "textfield",
             "description": "Set to US/EU/JP/IN to force a completely fresh, throwaway Chrome profile and test whether that domain's own credentials reach a genuinely different account than the shared profile shows. Leave empty for normal runs."
+        },
+        "DIAGNOSE_CUSTOMER_LOGIN": {
+            "title": "Diagnostic mode: customer-storefront login test for one domain",
+            "type": "string",
+            "editor": "textfield",
+            "description": "Set to US/DE/JP/IN (a top-level domain, not EU) to test ONLY the customer-storefront login/interstitial flow used for Image URL fetching, against that domain's real persisted profile. Skips Seller Central and the full scrape entirely — fast and cheap. Leave empty for normal runs."
         }
     },
     "required": [

@@ -74,6 +74,7 @@ async def main():
         os.environ["SC_SCRAPER_HEADLESS"] = "1"
         os.environ["SC_SCRAPER_DIAGNOSE_ACCOUNTS"] = "1" if actor_input.get("DIAGNOSE_ACCOUNTS") else "0"
         os.environ["SC_SCRAPER_ISOLATED_TEST_DOMAIN"] = actor_input.get("ISOLATED_TEST_DOMAIN", "")
+        os.environ["SC_SCRAPER_DIAGNOSE_CUSTOMER_LOGIN"] = actor_input.get("DIAGNOSE_CUSTOMER_LOGIN", "")
         os.makedirs(os.environ["SC_SCRAPER_OUT_DIR"], exist_ok=True)
         os.makedirs(os.environ["SC_SCRAPER_SCREENSHOT_DIR"], exist_ok=True)
 

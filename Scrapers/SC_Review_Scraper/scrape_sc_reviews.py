@@ -21,6 +21,15 @@ _creds = load_credentials(CREDENTIALS_FILE) if CREDENTIALS_FILE else {}
 SCREENSHOT_DIR = os.environ.get("SC_SCRAPER_SCREENSHOT_DIR", os.path.expanduser("~/sc_scraper_screenshots"))
 DIAGNOSE_ACCOUNTS = os.environ.get("SC_SCRAPER_DIAGNOSE_ACCOUNTS", "0") == "1"
 ISOLATED_TEST_DOMAIN = os.environ.get("SC_SCRAPER_ISOLATED_TEST_DOMAIN", "")
+DIAGNOSE_CUSTOMER_LOGIN = os.environ.get("SC_SCRAPER_DIAGNOSE_CUSTOMER_LOGIN", "")
+# When set to a domain code (US/DE/JP/IN — a top-level domain, not "EU"),
+# skips Seller Central and the full scrape entirely: opens that domain's
+# REAL persisted per-domain profile (the one production image-fetch runs
+# against, not a throwaway one), navigates straight to the customer
+# storefront, runs ensure_customer_logged_in(), and dumps a screenshot +
+# HTML of wherever it lands, before and after. Used to see exactly what
+# Amazon serves when the storefront login flow fails, without paying for a
+# full scrape run first.
 # When set to a domain code (US/EU/JP/IN), forces a completely fresh,
 # throwaway Chrome profile (never the shared persistent one) and attempts a
 # genuine login using only that domain's credentials — used to test whether
@@ -1331,6 +1340,62 @@ async def main():
                 f.write(html)
             await page.screenshot(path=os.path.join(SCREENSHOT_DIR, f"ISOLATED_{ISOLATED_TEST_DOMAIN}_landing.png"))
             print(f"  logged_in={logged_in} — HTML + screenshot captured")
+            await ctx.close()
+            sys.exit(0)
+
+        if DIAGNOSE_CUSTOMER_LOGIN:
+            # Diagnostic: test ONLY the customer-storefront login/interstitial
+            # flow for one domain, against the REAL persisted per-domain
+            # profile (not a throwaway one) — this is exactly what production
+            # image-fetch runs against. Skips Seller Central and the entire
+            # scrape/upload pipeline so this stays fast and cheap: one page
+            # load, one login attempt, a couple of screenshots, then exit.
+            from sc_auth import ensure_customer_logged_in, credential_group
+            domain = DIAGNOSE_CUSTOMER_LOGIN
+            group = credential_group(domain)
+            profile_dir = f"{SCRAPER_PROFILE_DIR}_{group}" if _creds else SCRAPER_PROFILE_DIR
+            print(f"DIAGNOSE_CUSTOMER_LOGIN={domain} (profile group {group}) — using persisted profile {profile_dir}")
+            os.makedirs(profile_dir, exist_ok=True)
+            ctx = await pw.chromium.launch_persistent_context(profile_dir, channel="chrome", headless=HEADLESS)
+            page = ctx.pages[0] if ctx.pages else await ctx.new_page()
+            dc = _DOMAINS[domain]
+            os.makedirs(SCREENSHOT_DIR, exist_ok=True)
+
+            await page.goto(dc["amazon_home"], wait_until="domcontentloaded", timeout=30000)
+            await asyncio.sleep(1.5)
+            await page.screenshot(path=os.path.join(SCREENSHOT_DIR, f"DIAG_{domain}_0_raw_landing.png"))
+            with open(os.path.join(SCREENSHOT_DIR, f"DIAG_{domain}_0_raw_landing.html"), "w", encoding="utf-8") as f:
+                f.write(await page.content())
+
+            result = False
+            if _creds:
+                result = await ensure_customer_logged_in(page, domain, _creds, screenshot_dir=SCREENSHOT_DIR)
+
+            await page.screenshot(path=os.path.join(SCREENSHOT_DIR, f"DIAG_{domain}_9_final.png"))
+            with open(os.path.join(SCREENSHOT_DIR, f"DIAG_{domain}_9_final.html"), "w", encoding="utf-8") as f:
+                f.write(await page.content())
+
+            # Cheapest possible real signal: try fetching images for just
+            # ONE known review ID already in this domain's last CSV, if one
+            # exists locally — confirms the actual fetch path, not just the
+            # login UI state. Skipped (not an error) if no prior CSV exists.
+            image_result = None
+            csv_path = _out_file(domain if domain != "EU" else "EU")
+            try:
+                if os.path.exists(csv_path):
+                    with open(csv_path, encoding='utf-8-sig') as f:
+                        reader = csv.reader(f)
+                        header = next(reader, None)
+                        first_row = next(reader, None)
+                    if header and first_row and 'Review ID' in header:
+                        rid = first_row[header.index('Review ID')]
+                        fetch_js = _make_batch_fetch_js(dc["review_url"])
+                        results = await page.evaluate(fetch_js, [[rid], 0, 50])
+                        image_result = results.get(rid, [])
+            except Exception as e:
+                image_result = f"ERROR: {e}"
+
+            print(f"  DIAGNOSE_CUSTOMER_LOGIN result: login={result} sample_image_fetch={image_result}")
             await ctx.close()
             sys.exit(0)
 
