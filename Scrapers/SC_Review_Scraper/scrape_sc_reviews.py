@@ -5,7 +5,7 @@ Edit the USER CONFIG section below, then run:
     python3 scrape_sc_reviews.py
 """
 
-import asyncio, csv, random, os, sys, json, time
+import asyncio, csv, random, os, sys, json, time, shutil
 from collections import defaultdict
 from datetime import datetime, timezone, timedelta
 sys.stdout.reconfigure(line_buffering=True)  # flush every print immediately when running in background
@@ -603,6 +603,84 @@ async def _switch_sc_marketplace(page, display_name, prof):
     except Exception as e:
         print(f"WARN: marketplace switch failed ({e})")
         return f"mons_sel_mkid={target_mkid}" if target_mkid else ""
+
+
+# Each of the 4 login credentials is a genuinely separate Amazon account
+# identity (confirmed via distinct CIDs in diagnostic testing), each with its
+# own delegated "full-page-account-switcher" tree of business entities and,
+# beneath each entity, specific country/marketplace registrations. On a
+# fresh/shared Chrome profile, navigating to one domain's URL while a
+# DIFFERENT domain's identity is the currently-active session still passes
+# the crude "not on a signin page" check — Amazon serves that OTHER identity's
+# account picker instead of prompting a real login. _resolve_account() closes
+# that gap: it verifies the correct identity is active (not just *an*
+# identity) and, if not, forces a logout + genuine re-login with this
+# domain's own credentials before selecting the actual business + country.
+_TARGET_TOP_LEVEL = {"US": "Spigen Inc", "EU": "Spigen EU", "JP": "Spigen 公式直営店", "IN": "Spigen India"}
+_TARGET_SUB_LEVEL = {"US": "United States", "EU": "Germany", "JP": "Japan", "IN": "India"}
+# EU only needs an anchor country here (Germany, matching the script's
+# existing "DE scraped first" assumption) — the pre-existing
+# _switch_sc_marketplace() dropdown mechanism, which only works once already
+# inside a resolved account, handles switching to the other EU sub-countries
+# during the actual scrape loop; unchanged, no other code path is affected.
+
+
+async def _resolve_account(page, domain, creds, url, *, max_attempts=2):
+    """Ensure the correct Amazon business/marketplace identity is active for
+    `domain` on the full-page-account-switcher picker (confirmed via live
+    diagnostic testing — see git history for the captured HTML evidence).
+    Returns True once resolved (or if the picker isn't showing at all —
+    already past it), False if unresolved after retries."""
+    top_name = _TARGET_TOP_LEVEL.get(domain)
+    if not top_name:
+        return True
+    sub_name = _TARGET_SUB_LEVEL.get(domain)
+    label_sel = ".full-page-account-switcher-account-label"
+
+    for attempt in range(1, max_attempts + 1):
+        try:
+            picker_showing = await page.get_by_text("Select an account", exact=False).count() > 0
+        except Exception:
+            picker_showing = False
+        if not picker_showing:
+            return True
+
+        target_present = await page.locator(f"{label_sel}:text-is('{top_name}')").count() > 0
+        if not target_present:
+            print(f"  [{domain}] wrong identity active (expected '{top_name}' not in picker, attempt {attempt}) — logging out and re-authenticating")
+            try:
+                from urllib.parse import urlparse
+                origin = urlparse(page.url)
+                await page.goto(f"{origin.scheme}://{origin.netloc}/sign-out", wait_until="domcontentloaded", timeout=30000)
+            except Exception as e:
+                print(f"  [{domain}] sign-out navigation failed: {e}")
+            if creds.get(domain):
+                await ensure_logged_in(page, domain, creds, screenshot_dir=SCREENSHOT_DIR)
+            try:
+                await page.goto(url, wait_until="domcontentloaded", timeout=30000)
+            except Exception:
+                pass
+            continue
+
+        try:
+            await page.locator(f"{label_sel}:text-is('{top_name}')").first.click()
+            await asyncio.sleep(1.2)
+            if sub_name:
+                sub_loc = page.locator(f"{label_sel}:text-is('{sub_name}')").first
+                if await sub_loc.count():
+                    await sub_loc.click()
+                    await asyncio.sleep(0.8)
+            confirm = page.locator("[data-test='confirm-selection']").first
+            if await confirm.count():
+                await confirm.click()
+                await page.wait_for_load_state("domcontentloaded", timeout=15000)
+                await asyncio.sleep(1.5)
+            print(f"  [{domain}] account resolved: {top_name}" + (f" / {sub_name}" if sub_name else ""))
+            return True
+        except Exception as e:
+            print(f"  [{domain}] account selection failed (attempt {attempt}): {e}")
+
+    return False
 
 
 async def _enrich_rows_with_images(all_rows, dc, page, prof):
@@ -1217,29 +1295,20 @@ async def main():
             await ctx.close()
             sys.exit(0)
 
-        if HEADLESS:
-            import shutil
-            if shutil.which("pgrep") and __import__("subprocess").run(
-                    ["pgrep", "-x", "Google Chrome"], capture_output=True).returncode == 0:
-                print("⚠  Chrome is open — close it first (Cmd+Q), then press Enter.")
-                if sys.stdin.isatty():
-                    await asyncio.get_event_loop().run_in_executor(None, input)
-            ctx     = await pw.chromium.launch_persistent_context(
-                SCRAPER_PROFILE_DIR, channel="chrome", headless=True)
-            browser = None
-        else:
-            # Launched directly by Playwright (Chrome-for-Testing build, channel="chrome")
-            # rather than spawning /Applications/Google Chrome.app and attaching over a
-            # fixed CDP port. Real production Chrome rejects the browser-level
-            # Browser.setDownloadBehavior call Playwright issues on connect_over_cdp
-            # ("Browser context management is not supported"); Chrome-for-Testing builds
-            # don't have that restriction, and this path needs no port at all — nothing
-            # to conflict with other tools (e.g. Playwright MCP) that also use CDP.
-            print(f"Launching Chrome with scraper profile: {SCRAPER_PROFILE_DIR}")
-            os.makedirs(SCRAPER_PROFILE_DIR, exist_ok=True)
-            ctx     = await pw.chromium.launch_persistent_context(
-                SCRAPER_PROFILE_DIR, channel="chrome", headless=False)
-            browser = None
+        # Each of the 4 top-level domains is a genuinely separate Amazon
+        # account identity (confirmed via distinct CIDs in diagnostic
+        # testing — see _resolve_account()'s docstring). A single shared
+        # Chrome profile can only hold ONE of these identities "actively
+        # signed in" at a time; switching between domain tabs in one shared
+        # profile forced a fresh logout+re-login on every domain, every
+        # single run. Each domain group therefore gets its OWN persistent
+        # profile directory — sessions for all 4 then persist independently
+        # across days, matching the original "log in once" design intent.
+        if HEADLESS and shutil.which("pgrep") and __import__("subprocess").run(
+                ["pgrep", "-x", "Google Chrome"], capture_output=True).returncode == 0:
+            print("⚠  Chrome is open — close it first (Cmd+Q), then press Enter.")
+            if sys.stdin.isatty():
+                await asyncio.get_event_loop().run_in_executor(None, input)
 
         # ── Session check: navigate to each SC URL; only prompt login if needed ──
         _login_endpoints = []
@@ -1252,11 +1321,39 @@ async def main():
             else:
                 _login_endpoints.append((_d, _DOMAINS[_d]["sc_base"]))
 
-        print("Opening Seller Central tabs …")
-        existing  = list(ctx.pages)
+        # Per-domain-group profile isolation is only needed (and only ever
+        # tested) for the automated-login deployment (_creds set) — the
+        # Mac's existing manual workflow keeps its original single shared
+        # profile untouched, matching months of prior working behavior
+        # there. Splitting into 4 profiles unconditionally would have
+        # pointed the Mac at brand-new, empty directories instead of its
+        # real login history.
+        _use_per_domain_profiles = bool(_creds)
+        _shared_ctx = None
+        if not _use_per_domain_profiles:
+            os.makedirs(SCRAPER_PROFILE_DIR, exist_ok=True)
+            print(f"Launching Chrome with scraper profile: {SCRAPER_PROFILE_DIR}")
+            _shared_ctx = await pw.chromium.launch_persistent_context(
+                SCRAPER_PROFILE_DIR, channel="chrome", headless=HEADLESS)
+
+        print("Opening Seller Central tabs "
+              + ("(one profile per account) …" if _use_per_domain_profiles else "…"))
+        domain_ctxs = {}
+        domain_pages = {}
         needs_login = []
+        _shared_existing_pages = list(_shared_ctx.pages) if _shared_ctx else []
         for _label, _url in _login_endpoints:
-            _p = existing.pop(0) if existing else await ctx.new_page()
+            if _use_per_domain_profiles:
+                _profile_dir = f"{SCRAPER_PROFILE_DIR}_{_label}"
+                print(f"  [{_label}] profile: {_profile_dir}")
+                os.makedirs(_profile_dir, exist_ok=True)
+                _ctx = await pw.chromium.launch_persistent_context(_profile_dir, channel="chrome", headless=HEADLESS)
+                _p = _ctx.pages[0] if _ctx.pages else await _ctx.new_page()
+            else:
+                _ctx = _shared_ctx
+                _p = _shared_existing_pages.pop(0) if _shared_existing_pages else await _ctx.new_page()
+            domain_ctxs[_label] = _ctx
+            domain_pages[_label] = _p
             try:
                 await _p.goto(_url, wait_until="domcontentloaded", timeout=30000)
                 # Login redirects always land on a URL containing /ap/ or signin
@@ -1285,6 +1382,14 @@ async def main():
 
             if not _logged_in and _creds:
                 _logged_in = await ensure_logged_in(_p, _label, _creds, screenshot_dir=SCREENSHOT_DIR)
+
+            if _logged_in and _creds and not DIAGNOSE_ACCOUNTS:
+                # A crude "not on a signin page" pass does NOT guarantee the
+                # right account identity is active — see _resolve_account()'s
+                # docstring. Always resolve, even when _logged_in was already
+                # True from the shared-profile session check.
+                if not await _resolve_account(_p, _label, _creds, _url):
+                    print(f"  [{_label}] WARNING: could not resolve the correct account — scrape will likely fail")
 
             if _logged_in and DIAGNOSE_ACCOUNTS:
                 os.makedirs(SCREENSHOT_DIR, exist_ok=True)
@@ -1371,19 +1476,12 @@ async def main():
                 await asyncio.sleep(1)
             print("\r  Starting scrape!                    ")
 
-        # ── Create one dedicated scraping page per domain group ───────────────
-        # Each group gets its own fresh visible tab; all share session cookies.
-        domain_pages = {}
-        for d in DOMAINS:
-            group = "EU" if d == "EU" else d
-            if group not in domain_pages:
-                domain_pages[group] = await ctx.new_page()
-
         # ── Run all domains simultaneously ────────────────────────────────────
         async def _run(domain):
             try:
                 group = "EU" if domain == "EU" else domain
                 page  = domain_pages[group]
+                group_ctx = domain_ctxs[group]
                 if domain == "EU":
                     eu_file = os.path.join(OUT_DIR, "EU_seller_central_reviews.csv")
                     eu_rows = 0
@@ -1392,7 +1490,7 @@ async def main():
                         # Phase 1 — Germany (always first if included, clears or appends per APPEND_CSV)
                         if "DE" in EU_COUNTRIES:
                             n_de, _ = await scrape_domain(
-                                "DE", page, ctx, prof, asin_filter,
+                                "DE", page, group_ctx, prof, asin_filter,
                                 out_file=eu_file, append=APPEND_CSV,
                                 pages=PAGES_OVERRIDE.get("DE", PAGES), skip_images=True
                             )
@@ -1413,7 +1511,7 @@ async def main():
                                 page, _DOMAINS[sub]["sc_display_name"], prof
                             )
                             await scrape_domain(
-                                sub, page, ctx, prof, asin_filter,
+                                sub, page, group_ctx, prof, asin_filter,
                                 out_file=eu_file, append=first_append,
                                 pages=PAGES_OVERRIDE.get(sub, PAGES),
                                 skip_images=True, mkp_params=mkp
@@ -1438,7 +1536,7 @@ async def main():
                         return (domain, 0, 0, "SKIP (FETCH_IMAGES_ONLY — non-EU domain)")
                     eff_pages = PAGES_OVERRIDE.get(domain, PAGES)
                     n_rows, n_imgs = await scrape_domain(
-                        domain, page, ctx, prof, asin_filter, pages=eff_pages)
+                        domain, page, group_ctx, prof, asin_filter, pages=eff_pages)
                     _apply_column_filter(_out_file(domain))
                     return (domain, n_rows, n_imgs, "OK")
             except Exception as e:
@@ -1447,7 +1545,8 @@ async def main():
 
         results = await asyncio.gather(*[_run(d) for d in DOMAINS])
 
-        await ctx.close()
+        for _ctx in {id(c): c for c in domain_ctxs.values()}.values():
+            await _ctx.close()
 
     print(f"\n{'═'*60}")
     print("  SUMMARY")

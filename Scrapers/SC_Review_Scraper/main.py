@@ -22,7 +22,14 @@ import zipfile
 from apify import Actor
 
 PROFILE_STORE_NAME = "sc-scraper-state"
-PROFILE_ZIP_KEY = "chrome-scraper-profile"
+# Each of the 4 domain accounts is a genuinely separate Amazon identity that
+# can only hold one "actively signed in" session per Chrome profile at a
+# time (confirmed via live testing) — so each gets its own profile
+# directory and its own Key-Value Store entry, matching
+# scrape_sc_reviews.py's per-domain profile-dir naming
+# (f"{SCRAPER_PROFILE_DIR}_{label}").
+_DOMAIN_GROUPS = ("US", "EU", "JP", "IN")
+BASE_PROFILE_DIR = os.path.expanduser("~/.chrome-scraper-profile")
 
 _SKIP_DIR_NAMES = {
     "OptGuideOnDeviceModel", "OptGuideOnDeviceClassifierModel",
@@ -81,20 +88,22 @@ async def main():
             f.write(gws_token_json)
         os.chmod(token_path, 0o600)
 
-        # ── 3. Restore Chrome profile from Key-Value Store (if a prior run saved one) ──
-        profile_dir = os.path.expanduser("~/.chrome-scraper-profile")
+        # ── 3. Restore each domain's Chrome profile from Key-Value Store ──
         store = await Actor.open_key_value_store(name=PROFILE_STORE_NAME)
-        zip_bytes = await store.get_value(PROFILE_ZIP_KEY)
-        if zip_bytes:
-            os.makedirs(profile_dir, exist_ok=True)
-            restore_zip = "/tmp/profile_restore.zip"
-            with open(restore_zip, "wb") as f:
-                f.write(zip_bytes)
-            with zipfile.ZipFile(restore_zip) as zf:
-                zf.extractall(profile_dir)
-            Actor.log.info("Restored Chrome profile from Key-Value Store (%d bytes)", len(zip_bytes))
-        else:
-            Actor.log.info("No saved Chrome profile in Key-Value Store — first run, starting fresh")
+        for group in _DOMAIN_GROUPS:
+            profile_dir = f"{BASE_PROFILE_DIR}_{group}"
+            zip_key = f"chrome-scraper-profile-{group}"
+            zip_bytes = await store.get_value(zip_key)
+            if zip_bytes:
+                os.makedirs(profile_dir, exist_ok=True)
+                restore_zip = f"/tmp/profile_restore_{group}.zip"
+                with open(restore_zip, "wb") as f:
+                    f.write(zip_bytes)
+                with zipfile.ZipFile(restore_zip) as zf:
+                    zf.extractall(profile_dir)
+                Actor.log.info("Restored %s Chrome profile from Key-Value Store (%d bytes)", group, len(zip_bytes))
+            else:
+                Actor.log.info("No saved %s Chrome profile in Key-Value Store — first run for this account, starting fresh", group)
 
         # ── 4. Run the existing scraper, completely unmodified ──
         # scrape_sc_reviews.py decides interactive-vs-background login prompts
@@ -135,28 +144,32 @@ async def main():
                     saved += 1
             Actor.log.info("Saved %d diagnostic artifact(s) to Key-Value Store", saved)
 
-        # ── 5. Save the (possibly updated) profile back, trimming disposable caches ──
-        save_zip = "/tmp/profile_save.zip"
-        with zipfile.ZipFile(save_zip, "w", zipfile.ZIP_DEFLATED) as zf:
-            for root, dirs, files in os.walk(profile_dir):
-                dirs[:] = [d for d in dirs if not _should_skip(os.path.join(root, d))]
-                for fn in files:
-                    fp = os.path.join(root, fn)
-                    if _should_skip(fp):
-                        continue
-                    try:
-                        zf.write(fp, os.path.relpath(fp, profile_dir))
-                    except FileNotFoundError:
-                        # Chrome deletes lock/temp files (e.g. SingletonLock) as
-                        # part of its own shutdown/crash cleanup — a file that
-                        # existed when os.walk() listed it can vanish by the
-                        # time we get to writing it. Not worth failing the whole
-                        # profile save over.
-                        pass
-        with open(save_zip, "rb") as f:
-            zip_data = f.read()
-        await store.set_value(PROFILE_ZIP_KEY, zip_data, content_type="application/zip")
-        Actor.log.info("Saved Chrome profile to Key-Value Store (%d bytes)", len(zip_data))
+        # ── 5. Save each (possibly updated) profile back, trimming disposable caches ──
+        for group in _DOMAIN_GROUPS:
+            profile_dir = f"{BASE_PROFILE_DIR}_{group}"
+            if not os.path.isdir(profile_dir):
+                continue  # this domain wasn't in DOMAINS for this run — nothing to save
+            save_zip = f"/tmp/profile_save_{group}.zip"
+            with zipfile.ZipFile(save_zip, "w", zipfile.ZIP_DEFLATED) as zf:
+                for root, dirs, files in os.walk(profile_dir):
+                    dirs[:] = [d for d in dirs if not _should_skip(os.path.join(root, d))]
+                    for fn in files:
+                        fp = os.path.join(root, fn)
+                        if _should_skip(fp):
+                            continue
+                        try:
+                            zf.write(fp, os.path.relpath(fp, profile_dir))
+                        except FileNotFoundError:
+                            # Chrome deletes lock/temp files (e.g. SingletonLock) as
+                            # part of its own shutdown/crash cleanup — a file that
+                            # existed when os.walk() listed it can vanish by the
+                            # time we get to writing it. Not worth failing the whole
+                            # profile save over.
+                            pass
+            with open(save_zip, "rb") as f:
+                zip_data = f.read()
+            await store.set_value(f"chrome-scraper-profile-{group}", zip_data, content_type="application/zip")
+            Actor.log.info("Saved %s Chrome profile to Key-Value Store (%d bytes)", group, len(zip_data))
 
         if run_failed:
             raise Exception("scrape_sc_reviews.py reported at least one FAILED domain — see logs above")
