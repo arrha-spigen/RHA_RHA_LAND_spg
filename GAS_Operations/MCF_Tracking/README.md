@@ -211,6 +211,51 @@ re-added trigger) can't repeat the corruption. The `dailyTrackingMaintenance()` 
 caused the incident has already been deleted from **Apps Script editor → Triggers**. Only
 `backfillMCFFeesRecent()` (30 min) and `retryR429Errors()` (hourly) triggers remain active.
 
+### `resolveBlankTrackingNumbers()` — companion to `retryR429Errors()`, added 2026-08-28
+Fixes a *separate* failure mode from the 429/corruption saga above: `retryR429Errors()` only
+detects cells showing literal `"SP-API error 429"`/`"QuotaExceeded"` text. But `AMZTK()`/
+`AMZTK_JP()` treat SP-API's `"Unable to get order info"` (400 InvalidInput) as "not shipped yet"
+and silently return `''` — no error text ever lands in the cell, so `retryR429Errors()`'s
+text-match filter can never see or retry these rows.
+
+**Confirmed live** (direct SP-API calls, bypassing GAS entirely) that self-created MCF fulfillment
+orders stop being resolvable via `GetFulfillmentOrder` roughly **~1 day after creation** —
+same-day orders returned 200 OK, every order from the day before onward returned 400
+`"Unable to get order info"`, **including orders the sheet already shows a real tracking number
+for**. Per the team's own observed norm, a real tracking number only appears after at least
+~24h, so any row whose live formula happened to (re)run before that window opened, or after the
+order aged out of `GetFulfillmentOrder`, is stuck blank forever — the same order id 400s
+identically on every future call, with no way back.
+
+Called from the end of `retryR429Errors()` (rides the same hourly trigger — no new trigger
+needed). Two passes over every row with a live `AMZTK()`/`AMZTK_JP()` formula in col R (formula
+text contains `"AMZTK("` — distinguishes a still-live formula from an already-frozen static
+`=HYPERLINK(...)` cell):
+
+1. **Lock-in** — a cell already *displaying* a real tracking number is frozen to a static
+   `=HYPERLINK(...)` immediately. Needed because `AMZTK()`'s own success cache is only 6h — once
+   that expires, the very next recalculation re-queries the same now-aged-out order and silently
+   blanks a previously-correct cell. This pass is pure reads/writes, no API cost, so it always
+   runs in full regardless of the row cap below.
+2. **Backfill** — a genuinely blank cell (skipping rows younger than `BLANK_R_MIN_AGE_HOURS`,
+   24h) is retried directly. Resolved → frozen the same way as pass 1. Still unresolved past
+   `BLANK_R_GIVE_UP_DAYS` (3 days) → the cell is frozen to a literal blank (formula removed) so it
+   stops silently re-querying SP-API — and burning quota — for an order that will never resolve.
+   Still unresolved but younger than that → left alone, retried again next hour. Bounded to
+   `BLANK_R_MAX_ROWS_PER_RUN` (60) actual API calls per run, with the same
+   `BLANK_R_MAX_CONSEC_429`-consecutive-429 abort as `retryR429Errors()`.
+
+Scans the **whole sheet** from `BF_START_ROW`, not just `RETRY_R_START_ROW+` — this failure mode
+isn't confined to any particular row range.
+
+`BLANK_R_GIVE_UP_DAYS` (3) is a judgment call, not a measured constant — gives real stragglers a
+wide margin past the observed ~24h cutoff before permanently giving up on a row. Adjust if real
+data suggests otherwise.
+
+**Not yet independently re-verified live post-deploy** — worth checking `Logger` output after the
+next hourly run, and whether previously-blank rows in the 1700s–1900s range (reported stuck as of
+2026-08-28) start resolving or freezing to blank as expected.
+
 **Do not re-enable these** without first deciding what column (if any) can safely hold a resolved
 tracking-number cache — col Z cannot, since it's genuinely in use for the profit-margin figure.
 Options not yet evaluated: use a new/unused column as the real cache; skip caching entirely and
