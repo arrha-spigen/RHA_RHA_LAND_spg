@@ -223,11 +223,160 @@ function retryR429Errors() {
 
   SpreadsheetApp.flush();
   Logger.log('retryR429Errors done — processed: ' + processed + ', fixed: ' + fixed + ', cleared: ' + cleared + ', still 429: ' + stillFailing);
+
+  // Rides this same hourly trigger — see resolveBlankTrackingNumbers() doc comment below for why
+  // this is a SEPARATE failure mode retryR429Errors above can't see. Best-effort: a failure here
+  // must never mask the retry summary already logged above.
+  try {
+    resolveBlankTrackingNumbers();
+  } catch (e) {
+    Logger.log('resolveBlankTrackingNumbers (called from retryR429Errors) failed: ' + (e.message || e));
+  }
 }
 
 function _is429ErrorValue(v) {
   var s = String(v || '');
   return s.indexOf('SP-API error 429') >= 0 || s.indexOf('QuotaExceeded') >= 0;
+}
+
+/***** ========= RESOLVE BLANK TRACKING CELLS (col R) — companion to retryR429Errors ========= ****
+ * Root cause (confirmed live 2026-08-28, direct SP-API testing outside GAS): self-created MCF
+ * fulfillment orders stop being resolvable via GetFulfillmentOrder roughly ~1 day after creation
+ * (tested: today's orders 200 OK, yesterday's and older all 400 "Unable to get order info" —
+ * INCLUDING orders the sheet already shows a real, correct tracking number for). AMZTK()/
+ * AMZTK_JP() treat that 400 as "not shipped yet" (see _isNoOrderInfoError in sp-api.js) and
+ * silently return '' — no error text ever lands in the cell, so retryR429Errors()'s
+ * _is429ErrorValue() text-match filter can never see or retry these rows. Per the user
+ * (2026-08-28): a real tracking number normally only appears after AT LEAST ~24h, so any row
+ * whose live formula happened to (re)run before that window, or after the order aged out of
+ * GetFulfillmentOrder, is stuck blank FOREVER — no amount of future recalculation can ever fix
+ * it, since the same order id will 400 the exact same way every time from then on.
+ *
+ * This function, called from the end of retryR429Errors() (same hourly trigger, no new trigger
+ * needed), does two independent passes over every row with a live AMZTK()/AMZTK_JP() formula in
+ * col R (identified by the formula text containing "AMZTK(" — distinguishes a still-live formula
+ * from an already-frozen static =HYPERLINK(...) cell, which contains no such call):
+ *
+ *   1) LOCK-IN: a cell already DISPLAYING a real tracking number is frozen to a static
+ *      =HYPERLINK(...) right away. Needed because AMZTK()'s own success cache is only 6h
+ *      (sp-api.js) — once that expires, the very next recalculation re-queries the same
+ *      now-aged-out order and silently blanks a previously-correct cell. Freezing removes the
+ *      live formula so this can never happen to an already-good value again.
+ *   2) BACKFILL: a genuinely blank cell (skipping rows younger than BLANK_R_MIN_AGE_HOURS, to
+ *      give the normal ~24h+ window a chance) is retried directly. Resolved → frozen the same
+ *      way as (1). Still unresolved AND the row is older than BLANK_R_GIVE_UP_DAYS → the cell is
+ *      frozen to a literal blank (formula removed) so it stops silently re-querying SP-API (and
+ *      burning quota) on every future recalculation for an order that will never resolve. Still
+ *      unresolved but not yet past that age → left alone, tried again next hour.
+ *
+ * Scans the WHOLE sheet from BF_START_ROW (not just RETRY_R_START_ROW+, unlike retryR429Errors) —
+ * this failure mode isn't confined to any particular row range. Only pass (2) makes API calls, and
+ * only up to BLANK_R_MAX_ROWS_PER_RUN of them, with the same consecutive-429 abort as
+ * retryR429Errors — pass (1) is pure sheet reads/writes, no quota cost, so it always runs in full.
+ *
+ * BLANK_R_GIVE_UP_DAYS is a judgment call, not a measured constant — 3 days gives real stragglers
+ * a wide margin past the observed ~24h cutoff before permanently giving up on a row. Adjust if
+ * real data suggests otherwise.
+ */
+var BLANK_R_MAX_ROWS_PER_RUN = 60;   // cap on actual SP-API calls per run (pass 2 only)
+var BLANK_R_MAX_CONSEC_429   = 5;    // abort early if quota is clearly still exhausted
+var BLANK_R_MIN_AGE_HOURS    = 24;   // don't even attempt a row shipped more recently than this
+var BLANK_R_GIVE_UP_DAYS     = 3;    // past this age, stop retrying and freeze the cell blank
+
+function resolveBlankTrackingNumbers() {
+  var ss    = SpreadsheetApp.getActiveSpreadsheet();
+  var sheet = ss.getSheetByName(BF_SHEET_NAME);
+  if (!sheet) throw new Error('Sheet not found: ' + BF_SHEET_NAME);
+
+  var lastRow = sheet.getLastRow();
+  if (lastRow < BF_START_ROW) return;
+
+  var numRows   = lastRow - BF_START_ROW + 1;
+  var rValues   = sheet.getRange(BF_START_ROW, RETRY_R_COL, numRows, 1).getDisplayValues();
+  var rFormulas = sheet.getRange(BF_START_ROW, RETRY_R_COL, numRows, 1).getFormulas();
+  var regions   = sheet.getRange(BF_START_ROW, BF_COL_REGION, numRows, 1).getValues();
+  var orderIds  = sheet.getRange(BF_START_ROW, BF_COL_ORDER,  numRows, 1).getValues();
+  var sentDates = sheet.getRange(BF_START_ROW, BF_COL_SENT,   numRows, 1).getValues();
+
+  _warmLwaTokens();
+
+  var now = new Date();
+  var apiCalls = 0, frozenGood = 0, fixed = 0, gaveUp = 0, consec429 = 0;
+
+  for (var i = 0; i < numRows; i++) {
+    var formula = rFormulas[i][0];
+    // No formula at all, or already frozen to a static value (no AMZTK() call left in it) —
+    // nothing for this function to do either way.
+    if (!formula || formula.indexOf('AMZTK(') < 0) continue;
+
+    var row     = BF_START_ROW + i;
+    var display = String(rValues[i][0] || '').trim();
+    var orderId = String(orderIds[i][0] || '').trim();
+    if (!orderId) continue;
+
+    var isJP      = String(regions[i][0] || '').trim().toUpperCase() === 'JP';
+    var endpoints = isJP ? ['FE', 'EU'] : ['EU', 'FE'];
+    var domain    = isJP ? 'jp' : 'de';
+
+    // --- Pass 1: already resolved, just needs freezing before its cache can expire ---
+    if (display && !_is429ErrorValue(display)) {
+      var url = 'https://www.swiship.' + domain + '/track?id=' + display;
+      sheet.getRange(row, RETRY_R_COL).setFormula('=HYPERLINK("' + url + '","' + display + '")');
+      frozenGood++;
+      continue;
+    }
+
+    // 429-error-text cells are retryR429Errors()'s job above — don't double-handle them here.
+    if (display && _is429ErrorValue(display)) continue;
+
+    // --- Pass 2: genuinely blank — only attempt if old enough, and within this run's API budget ---
+    var sentDate = sentDates[i][0];
+    var ageHours = (sentDate instanceof Date) ? (now - sentDate) / 3600000 : null;
+    if (ageHours === null || ageHours < BLANK_R_MIN_AGE_HOURS) continue;
+    if (apiCalls >= BLANK_R_MAX_ROWS_PER_RUN) continue;
+
+    apiCalls++;
+    var tn = '', got429 = false, gotNoInfo = false;
+    try {
+      var tracks = _tracksWithFallbacks(orderId, endpoints);
+      tn = (tracks && tracks.length && (tracks[0].trackingNumber || '').trim())
+        ? tracks[0].trackingNumber.trim() : '';
+    } catch (e) {
+      if (_isRateLimit429(e))        { got429 = true; }
+      else if (_isNoOrderInfoError(e)) { gotNoInfo = true; }
+      else { Logger.log('resolveBlankTrackingNumbers row ' + row + ': unexpected error — ' + (e.message || e)); }
+    }
+
+    if (got429) {
+      consec429++;
+      if (consec429 >= BLANK_R_MAX_CONSEC_429) {
+        Logger.log('resolveBlankTrackingNumbers: quota exhausted after ' + consec429 + ' consecutive 429s — stopping this run.');
+        break;
+      }
+      continue;
+    }
+    consec429 = 0;
+
+    if (tn) {
+      var url2 = 'https://www.swiship.' + domain + '/track?id=' + tn;
+      sheet.getRange(row, RETRY_R_COL).setFormula('=HYPERLINK("' + url2 + '","' + tn + '")');
+      fixed++;
+      Logger.log('resolveBlankTrackingNumbers row ' + row + ': resolved → ' + tn);
+      continue;
+    }
+
+    if (gotNoInfo && ageHours >= BLANK_R_GIVE_UP_DAYS * 24) {
+      sheet.getRange(row, RETRY_R_COL).setValue('');
+      gaveUp++;
+      Logger.log('resolveBlankTrackingNumbers row ' + row + ': gave up (order info permanently unavailable, ' +
+        Math.round(ageHours / 24) + 'd old) — froze blank to stop future retries');
+    }
+    // else: genuinely still not ready, or a transient error — leave the live formula for next run
+  }
+
+  SpreadsheetApp.flush();
+  Logger.log('resolveBlankTrackingNumbers done — locked-in good: ' + frozenGood + ', newly resolved: ' + fixed +
+    ', gave up: ' + gaveUp + ', SP-API calls made: ' + apiCalls);
 }
 
 /***** ========= RETRY $0 TRANSPORTATION FEES IN COL Y ========= *****/
