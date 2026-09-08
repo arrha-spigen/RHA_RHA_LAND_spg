@@ -8,19 +8,25 @@
  * "Purchase Date" (Zendesk custom field 360019586172) therefore never
  * reaches the board's Purchase Date column.
  *
- * HOW IT WORKS
- * A Zendesk Trigger (condition: Purchase Date changed) calls this Web App
- * via a webhook with {"ticket_id": N}. The script:
- *   1. Fetches the ticket from Zendesk and reads the raw Purchase Date
- *      custom field value (already YYYY-MM-DD — no locale parsing needed).
- *   2. Finds the board item whose "Zendesk Ticket" integration column holds
- *      that ticket id (the native recipe stores {"entity_id": <ticket_id>}).
- *      Retries a few times because the recipe may not have created the
- *      item yet when the trigger fires on ticket creation.
- *   3. Writes the date to the "Purchase Date" date column via monday API.
+ * HOW IT WORKS  (rewritten 2026-09-08 — batch, twice a day)
+ * Previously this ran as a Zendesk webhook (doPost) that fired ~5-6x/min and
+ * walked the ENTIRE board up to 4x on every single call — the top consumer
+ * of the account's monday.com API budget. It now runs as a scheduled batch:
  *
- * backfillPurchaseDates() can be run manually from the GAS editor to fill
- * the date for all existing items that have a linked ticket but no date.
+ *   scheduledPurchaseDateSync()  — installed by setupPurchaseDateTriggers()
+ *   to run twice a day (SYNC_HOURS, Asia/Seoul):
+ *     1. ONE walk of the board (500 items/page) to collect every item that
+ *        has a linked Zendesk ticket, plus its current Purchase Date cell.
+ *     2. Fetch those tickets from Zendesk in bulk (show_many, 100 ids/call).
+ *     3. Write the Purchase Date to an item ONLY when it differs from what's
+ *        already on the board.
+ *
+ * The old webhook path is disabled — doPost() is now a no-op. After
+ * deploying this version, also deactivate the Zendesk trigger + webhook that
+ * used to POST here (Zendesk Admin → Business rules → Triggers, and Apps and
+ * integrations → Webhooks).
+ *
+ * backfillPurchaseDates() is kept as a manual alias for scheduledPurchaseDateSync().
  ********************************/
 
 const ZENDESK_EMAIL = 'kjw@spigen.com';
@@ -33,13 +39,16 @@ const MONDAY_BOARD_ID = 18421346787;
 const MONDAY_DATE_COL = 'date_mm59ejfp';          // "Purchase Date" (date)
 const MONDAY_TICKET_COL = 'integration_mm0fzmv0'; // "Zendesk Ticket" (integration)
 
-// Shared secret the Zendesk webhook must send back as the `?secret=` query param.
+// Shared secret the old Zendesk webhook sent as the `?secret=` query param.
+// Kept only so doPost can still recognise stray webhook traffic; unused otherwise.
 const WEBHOOK_SECRET = '8GD3uY_vYU5N9GJlD0T1y1b9jJylrPnv21QmeqBSsKU';
 
-// The native recipe creates the board item asynchronously — if the trigger
-// fires before the item exists, wait and look again.
-const FIND_RETRIES = 4;
-const FIND_RETRY_SLEEP_MS = 20000;
+// Local clock hours (Asia/Seoul) at which the batch sync runs. Two per day.
+const SYNC_HOURS = [7, 19];
+
+const BOARD_PAGE_LIMIT = 500;    // monday items_page max
+const ZD_SHOW_MANY_CHUNK = 100;  // Zendesk tickets/show_many max ids per call
+const WRITE_SLEEP_MS = 120;      // small gap between monday writes
 
 // ── Zendesk helpers ───────────────────────────────────────────────────────────
 
@@ -63,6 +72,28 @@ function zdPurchaseDate_(ticket) {
   return f && f.value ? String(f.value) : null; // raw value is YYYY-MM-DD
 }
 
+// Bulk fetch: ticketId (Number) -> Purchase Date string 'YYYY-MM-DD' | null.
+// Uses tickets/show_many (100 ids/request) instead of one GET per ticket.
+function zdGetPurchaseDatesForTickets_(ticketIds) {
+  const out = {};
+  const ids = Array.from(new Set(ticketIds.map(Number).filter(Boolean)));
+  for (let i = 0; i < ids.length; i += ZD_SHOW_MANY_CHUNK) {
+    const chunk = ids.slice(i, i + ZD_SHOW_MANY_CHUNK);
+    const resp = UrlFetchApp.fetch(
+      `https://${ZENDESK_SUBDOMAIN}.zendesk.com/api/v2/tickets/show_many.json?ids=${chunk.join(',')}`,
+      { headers: { Authorization: zdAuthHeader_() }, muteHttpExceptions: true }
+    );
+    if (resp.getResponseCode() !== 200) {
+      throw new Error(`Zendesk show_many -> ${resp.getResponseCode()}: ${resp.getContentText().slice(0, 500)}`);
+    }
+    (JSON.parse(resp.getContentText()).tickets || []).forEach(t => {
+      out[Number(t.id)] = zdPurchaseDate_(t);
+    });
+    Utilities.sleep(200);
+  }
+  return out;
+}
+
 // ── monday helpers ────────────────────────────────────────────────────────────
 
 function mondayGql_(query) {
@@ -80,15 +111,18 @@ function mondayGql_(query) {
   return body.data;
 }
 
-// Walks the whole board and returns { itemId, dateText } for the item whose
-// "Zendesk Ticket" integration column holds the given ticket id, else null.
-function findItemByTicketId_(ticketId) {
+// ONE walk of the board. Returns [{ itemId, ticketId (Number), dateText }] for
+// every item whose "Zendesk Ticket" integration column holds an entity_id.
+function collectLinkedItems_() {
+  const linked = [];
   let cursor = null;
   do {
-    const cursorArg = cursor ? `cursor: "${cursor}"` : 'limit: 100';
+    const pageArgs = cursor
+      ? `limit: ${BOARD_PAGE_LIMIT}, cursor: "${cursor}"`
+      : `limit: ${BOARD_PAGE_LIMIT}`;
     const data = mondayGql_(`query {
       boards(ids: [${MONDAY_BOARD_ID}]) {
-        items_page(${cursorArg}) {
+        items_page(${pageArgs}) {
           cursor
           items {
             id
@@ -103,14 +137,17 @@ function findItemByTicketId_(ticketId) {
       if (!tickCol || !tickCol.value) continue;
       let entityId;
       try { entityId = JSON.parse(tickCol.value).entity_id; } catch (e) { continue; }
-      if (Number(entityId) === Number(ticketId)) {
-        const dateCol = item.column_values.find(c => c.id === MONDAY_DATE_COL);
-        return { itemId: item.id, dateText: dateCol ? dateCol.text : '' };
-      }
+      if (!entityId) continue;
+      const dateCol = item.column_values.find(c => c.id === MONDAY_DATE_COL);
+      linked.push({
+        itemId: item.id,
+        ticketId: Number(entityId),
+        dateText: (dateCol && dateCol.text) || '',
+      });
     }
     cursor = page.cursor;
   } while (cursor);
-  return null;
+  return linked;
 }
 
 function setItemPurchaseDate_(itemId, isoDate) {
@@ -121,90 +158,84 @@ function setItemPurchaseDate_(itemId, isoDate) {
   }`);
 }
 
-// ── Core sync ─────────────────────────────────────────────────────────────────
+// ── Scheduled batch sync (installed by setupPurchaseDateTriggers) ─────────────
 
-function syncTicketPurchaseDate_(ticketId, allowRetry) {
-  const ticket = zdGetTicket_(ticketId);
-  const isoDate = zdPurchaseDate_(ticket);
-  if (!isoDate) return { ticketId, skipped: 'Purchase Date is empty on the ticket' };
+function scheduledPurchaseDateSync() {
+  const startedAt = new Date();
 
-  let found = null;
-  const attempts = allowRetry ? FIND_RETRIES : 1;
-  for (let i = 0; i < attempts && !found; i++) {
-    if (i > 0) Utilities.sleep(FIND_RETRY_SLEEP_MS);
-    found = findItemByTicketId_(ticketId);
-  }
-  if (!found) return { ticketId, skipped: 'no board item linked to this ticket (yet)' };
+  const linked = collectLinkedItems_();
+  Logger.log(`Board walk: ${linked.length} item(s) linked to a Zendesk ticket.`);
+  if (!linked.length) return;
 
-  setItemPurchaseDate_(found.itemId, isoDate);
-  Logger.log(`Ticket #${ticketId} → item ${found.itemId}: Purchase Date = ${isoDate}`);
-  return { ticketId, itemId: found.itemId, date: isoDate, ok: true };
-}
+  const dateByTicket = zdGetPurchaseDatesForTickets_(linked.map(x => x.ticketId));
 
-// ── Web App entry point (Zendesk webhook) ─────────────────────────────────────
-
-function doPost(e) {
-  const out = obj =>
-    ContentService.createTextOutput(JSON.stringify(obj)).setMimeType(ContentService.MimeType.JSON);
-  try {
-    if (!e || !e.parameter || e.parameter.secret !== WEBHOOK_SECRET) {
-      return out({ error: 'bad secret' });
+  let updated = 0, unchanged = 0, noDate = 0, failed = 0;
+  for (const it of linked) {
+    const isoDate = dateByTicket[it.ticketId];
+    if (!isoDate) { noDate++; continue; }
+    if (isoDate === it.dateText) { unchanged++; continue; }
+    try {
+      setItemPurchaseDate_(it.itemId, isoDate);
+      updated++;
+      Logger.log(`ticket #${it.ticketId} → item ${it.itemId}: Purchase Date ${it.dateText || '(empty)'} → ${isoDate}`);
+    } catch (err) {
+      failed++;
+      Logger.log(`item ${it.itemId} (ticket #${it.ticketId}) → ${isoDate} FAILED: ${err}`);
     }
-    const ticketId = Number(JSON.parse(e.postData.contents).ticket_id);
-    if (!ticketId) return out({ error: 'no ticket_id in payload' });
-    return out(syncTicketPurchaseDate_(ticketId, true));
-  } catch (err) {
-    Logger.log(err);
-    return out({ error: String(err) });
+    Utilities.sleep(WRITE_SLEEP_MS);
   }
+
+  Logger.log(
+    `scheduledPurchaseDateSync done in ${((new Date() - startedAt) / 1000).toFixed(1)}s — ` +
+    `updated ${updated}, unchanged ${unchanged}, ticket has no purchase date ${noDate}, failed ${failed}.`
+  );
 }
 
-// ── Manual backfill (run from the GAS editor) ─────────────────────────────────
+// Run once from the GAS editor (needs the script.scriptapp OAuth consent, so
+// it 403s if invoked headlessly). Installs the twice-a-day time triggers and
+// removes any it previously created. Safe to re-run.
+function setupPurchaseDateTriggers() {
+  ScriptApp.getProjectTriggers().forEach(t => {
+    if (t.getHandlerFunction() === 'scheduledPurchaseDateSync') ScriptApp.deleteTrigger(t);
+  });
+  SYNC_HOURS.forEach(h => {
+    ScriptApp.newTrigger('scheduledPurchaseDateSync')
+      .timeBased().everyDays(1).atHour(h).inTimezone('Asia/Seoul').create();
+  });
+  Logger.log(`Installed ${SYNC_HOURS.length} daily trigger(s) for scheduledPurchaseDateSync at hour(s) ${SYNC_HOURS.join(', ')} Asia/Seoul.`);
+}
 
-// Fills Purchase Date for every board item that has a linked Zendesk ticket
-// but an empty date column. Safe to re-run; already-dated items are skipped.
+// Kept for compatibility with older docs/muscle memory. The scheduled sync
+// supersedes the old "fill empty only" backfill — it also refreshes items
+// whose Purchase Date changed on the ticket after it was first written.
 function backfillPurchaseDates() {
-  let cursor = null;
-  let updated = 0, skipped = 0;
-  do {
-    const cursorArg = cursor ? `cursor: "${cursor}"` : 'limit: 100';
-    const data = mondayGql_(`query {
-      boards(ids: [${MONDAY_BOARD_ID}]) {
-        items_page(${cursorArg}) {
-          cursor
-          items {
-            id
-            column_values(ids: ["${MONDAY_TICKET_COL}", "${MONDAY_DATE_COL}"]) { id value text }
-          }
-        }
-      }
-    }`);
-    const page = data.boards[0].items_page;
-    for (const item of page.items) {
-      const dateCol = item.column_values.find(c => c.id === MONDAY_DATE_COL);
-      if (dateCol && dateCol.text) { skipped++; continue; } // already has a date
-      const tickCol = item.column_values.find(c => c.id === MONDAY_TICKET_COL);
-      if (!tickCol || !tickCol.value) { skipped++; continue; }
-      let entityId;
-      try { entityId = JSON.parse(tickCol.value).entity_id; } catch (e) { skipped++; continue; }
-      try {
-        const isoDate = zdPurchaseDate_(zdGetTicket_(entityId));
-        if (!isoDate) { skipped++; continue; }
-        setItemPurchaseDate_(item.id, isoDate);
-        updated++;
-        Logger.log(`backfill: ticket #${entityId} → item ${item.id}: ${isoDate}`);
-      } catch (err) {
-        Logger.log(`backfill: item ${item.id} (ticket #${entityId}) failed: ${err}`);
-      }
-    }
-    cursor = page.cursor;
-  } while (cursor);
-  Logger.log(`backfill done — updated ${updated}, skipped ${skipped}`);
+  scheduledPurchaseDateSync();
+}
+
+// ── Web App entry point — DISABLED 2026-09-08 ────────────────────────────────
+// This script now syncs on a schedule (scheduledPurchaseDateSync). The Zendesk
+// webhook that used to POST here should be deactivated; until it is, respond
+// cheaply and do NO monday/Zendesk work so it can't run up the API bill again.
+function doPost(e) {
+  return ContentService
+    .createTextOutput(JSON.stringify({
+      ok: true,
+      disabled: true,
+      note: 'PurchaseDate_Sync runs on a twice-daily schedule now; this webhook is a no-op. Deactivate the Zendesk trigger/webhook.',
+    }))
+    .setMimeType(ContentService.MimeType.JSON);
 }
 
 // ── Smoke test (run from the GAS editor) ──────────────────────────────────────
 
+// Reports what the batch would do for one ticket (does one board walk).
 function testSyncOneTicket() {
   const TICKET_ID = 1000153779; // Jane's test ticket (item "1010101010")
-  Logger.log(JSON.stringify(syncTicketPurchaseDate_(TICKET_ID, false)));
+  const linked = collectLinkedItems_().filter(x => x.ticketId === TICKET_ID);
+  const dates = zdGetPurchaseDatesForTickets_([TICKET_ID]);
+  Logger.log(JSON.stringify({
+    ticketId: TICKET_ID,
+    zendeskPurchaseDate: dates[TICKET_ID] || null,
+    linkedBoardItems: linked,
+  }, null, 2));
 }
