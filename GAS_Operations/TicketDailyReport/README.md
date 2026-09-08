@@ -51,7 +51,14 @@ Google Apps Script project that generates the Spigen GCX daily Zendesk ticket re
 | I | 1차 Defect Reason or Inquiries | field `360022182831` — shown on the Chat card as **인입사유** |
 
 Rows are grouped by Country + Brand + Category + Device + Reason; `Qty` is the group size.
-The Chat card line is `No. | Country | Brand | Category | Device | 인입사유 | Qty | Owner`.
+
+The Chat card renders these as one column-aligned `<pre>` monospace table
+(`# | CC | Brand | Category | Device | 인입사유 | Qty | PIC`). Card-only cleanups
+applied in `kSheetToChat()` (the sheet keeps its raw values):
+
+- Brand: strip `spigen_` / `Spigen` / `(` / `)`, then upper-case → `NEW BIZ`, `SDA`
+- Category: drop the leading `N. ` → `Product Inquiry`
+- 인입사유: drop the leading `(XXX)_` prefix → `대량구매문의`
 
 ---
 
