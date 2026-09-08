@@ -26,6 +26,7 @@ function runZendeskDailyJob() {
     { name: 'all_GraphChartToGoogleChat', fn: all_GraphChartToGoogleChat }, // Step 3   -> chart image to Google Chat
     { name: 'collapseOldRowsIfNeeded',    fn: collapseOldRowsIfNeeded, critical: false }, // Step 3.5 -> collapse rows past 4 weeks (cosmetic, never fails the job)
     { name: 'fetchZendeskViewToKsheet_B', fn: fetchZendeskViewToKsheet },   // Step 4   -> rebuild 'K_시트' table for 'P_시트'
+    { name: 'archiveKSheetHistory',       fn: archiveKSheetHistory, critical: false }, // Step 4.5 -> append today's K_시트 rows to 'K_시트_history' (date picker source)
     { name: 'kSheetToChat',               fn: kSheetToChat },               // Step 5   -> 'K_시트' image to Google Chat
   ]);
 }
