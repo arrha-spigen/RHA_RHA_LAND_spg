@@ -9,14 +9,42 @@ const SPREADSHEET_ID = '10VYnysCGztKWMXfvXIWBVcE2_zENnRxvXUr9nicHkpo';
 /********************************
  * COMMON HELPERS
  ********************************/
+// How many times each Zendesk API call is retried on a transient failure
+// ("Address unavailable" / DNS blips, HTTP 429, HTTP 5xx, bad JSON).
+const ZENDESK_FETCH_ATTEMPTS   = 3;
+const ZENDESK_FETCH_BACKOFF_MS = [0, 2000, 4000];
+
 function getZendeskTicketsByView(viewId) {
   const headers = {
     "Authorization": "Basic " + Utilities.base64Encode(`${ZENDESK_EMAIL}/token:${ZENDESK_TOKEN}`)
   };
   const url = `https://${ZENDESK_SUBDOMAIN}.zendesk.com/api/v2/views/${viewId}/tickets.json`;
-  const response = UrlFetchApp.fetch(url, { method: 'get', headers, muteHttpExceptions: true });
-  const json = JSON.parse(response.getContentText());
-  return json.tickets || [];
+
+  let lastErr = null;
+  for (let attempt = 1; attempt <= ZENDESK_FETCH_ATTEMPTS; attempt++) {
+    const wait = ZENDESK_FETCH_BACKOFF_MS[Math.min(attempt - 1, ZENDESK_FETCH_BACKOFF_MS.length - 1)];
+    if (wait) Utilities.sleep(wait);
+    try {
+      const response = UrlFetchApp.fetch(url, { method: 'get', headers, muteHttpExceptions: true });
+      const code = response.getResponseCode();
+
+      if (code === 429 || code >= 500) {          // transient -> retry
+        lastErr = new Error(`Zendesk view ${viewId} HTTP ${code}`);
+        Logger.log(`WARN ${lastErr.message} (attempt ${attempt}/${ZENDESK_FETCH_ATTEMPTS})`);
+        continue;
+      }
+      if (code < 200 || code >= 300) {            // 4xx (auth/not-found) -> not transient, fail fast
+        throw new Error(`Zendesk view ${viewId} HTTP ${code}: ${response.getContentText().slice(0, 200)}`);
+      }
+
+      const json = JSON.parse(response.getContentText());   // bad JSON -> caught below, retried
+      return json.tickets || [];
+    } catch (e) {
+      lastErr = e;
+      Logger.log(`WARN Zendesk view ${viewId} fetch failed (attempt ${attempt}/${ZENDESK_FETCH_ATTEMPTS}): ${(e && e.message) || e}`);
+    }
+  }
+  throw new Error(`Zendesk view ${viewId} unreachable after ${ZENDESK_FETCH_ATTEMPTS} attempts: ${(lastErr && lastErr.message) || lastErr}`);
 }
 
 function removeDuplicatesByTicketID(sheet) {
@@ -88,6 +116,8 @@ function fetchZendeskViewToSheet() {
   } else {
     Logger.log("No tickets found in any of the views.");
   }
+
+  SpreadsheetApp.flush(); // make sure the writes land before appendZendeskDailyStatus() counts them
 }
 
 /********************************
