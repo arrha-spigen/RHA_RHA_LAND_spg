@@ -151,6 +151,9 @@ ROOMS = [
     {"name": "[CQ] SPIGEN 국내&해외 CS", "sid": "AAAA45iXDL0",
      "token": "zh67JI0vK1DIeoet937rQ2byrOin9gV98FQddSSvfmY",
      "glxz8": "Bplrki7kUVeXMMCkkpplYn4QK1g-aMR0X-0RPYgqCOs"},
+    # 리더들방 — one webhook for every card (no per-product override).
+    {"name": "리더들방", "sid": "AAAALqHjZHo",
+     "token": "Z8696aOLrUlGk7zUUgjNywb8PIMbmKqrKaQd5JnofT0"},
 ]
 
 WEBHOOK = "https://chat.googleapis.com/v1/spaces/{sid}/messages?key=" + KEY + "&token={tok}"

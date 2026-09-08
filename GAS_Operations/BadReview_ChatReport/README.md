@@ -42,13 +42,14 @@ Columns used: `인입사유(tag)`, `Update 날짜` (falls back to `Exported Date
 - **TEST room** — always the first target. `--test` sends here and nowhere else.
 - **Broadcast rooms** (`ROOMS` in the script): GCX전략 x SDA / ADS1 / ADS2 / ADS3 /
   ADS5 (CP) / JP Sales / IN Sales / 모바일제품개발팀, 실장님 & GCX,
-  GCX x 클리어프로텍션 개발팀, [CQ] SPIGEN 국내&해외 CS. The internal GCX team room is
-  deliberately excluded.
+  GCX x 클리어프로텍션 개발팀, [CQ] SPIGEN 국내&해외 CS, 리더들방. The internal GCX team
+  room is deliberately excluded. (리더들방 uses one webhook for every card.)
 
 **Per-product webhook routing.** Each room has a default `token` (the Pixel 11 card
-always uses it). As of 2026-09-07 **all 11 rooms** carry a `glxz8` override token — a *separate*
-incoming webhook in the *same* room — used **only for the Galaxy Z8 card**. The
-Pixel 11 card always uses the default `token`. `room_url(room, product_key)` picks it.
+always uses it). The 11 GCX rooms each also carry a `glxz8` override token — a
+*separate* incoming webhook in the *same* room — used **only for the Galaxy Z8 card**
+(complete as of 2026-09-07). 리더들방 has no override — every card goes through its
+single `token`. `room_url(room, product_key)` picks it.
 
 Webhook URLs (space id + token) are inlined in the script. They are Google Chat
 incoming-webhook tokens, not account credentials.
@@ -72,7 +73,7 @@ python3 badreview_chat_report.py --dry-run --print-data
 ```
 
 `--broadcast` refuses to run without `--yes`. Each room receives **2 messages**
-(Z8 then Pixel 11), one second apart — 11 rooms = 22 messages. Webhook messages
+(Z8 then Pixel 11), one second apart — 12 rooms = 24 messages. Webhook messages
 cannot be edited or deleted afterwards.
 
 ## Requirements
