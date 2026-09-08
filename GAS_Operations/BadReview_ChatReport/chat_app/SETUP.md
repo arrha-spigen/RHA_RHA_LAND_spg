@@ -32,10 +32,10 @@ can't receive the "user picked a date" event. A Chat app has an endpoint that do
    Platform (GCP) Project → Change project) whose number you control.
 3. **Enable the Google Chat API** in that GCP project (APIs & Services → Enable APIs
    → "Google Chat API").
-4. **Deploy the script:** Apps Script → Deploy → New deployment → type **Add-on**
-   is NOT it — choose **"Web app"**? also not it. For Chat, just create a
-   **versioned deployment** (Deploy → New deployment → *Deployment type: none needed*;
-   copy the **Deployment ID**). The Head deployment also works for testing.
+4. **Get a deployment ID:** Apps Script → Deploy → **New deployment** → gear icon →
+   there's no "Chat" type in the list; just create the deployment (the default is
+   fine) and **copy the Deployment ID**. For quick testing you can instead use
+   Deploy → **Test deployments** → copy the **Head deployment** ID.
 5. **Configure the Chat app:** GCP Console → Google Chat API → **Configuration**:
    - App name: `BadReview 리포트`  ·  Avatar URL: any 256px HTTPS image  ·  Description
    - Functionality: tick **Receive 1:1 messages** and **Join spaces and group
