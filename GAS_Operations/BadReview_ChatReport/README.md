@@ -20,6 +20,10 @@ identical; keep the two in sync when either changes.
 | button | **배드리뷰** → the product's `1-3점` sheet |
 
 `N` (총 N건) = number of `1-3점` rows whose `Update 날짜` resolves to today (KST).
+
+Rows whose `인입사유(tag)` is **`긍정 리뷰`** are dropped before any counting — excluded
+from 총 N건, the day breakdown, and the cumulative Top 5, and never shown on the card
+(`EXCLUDED_TAGS`; user rule 2026-09-08, permanent unless revoked).
 Every list is padded to a fixed line count so the Pixel 11 and Z8 cards render the
 same height.
 

@@ -41,6 +41,10 @@ var PRODUCTS = {
 
 var GID_13 = 970309432;                                   // '1-3점' tab
 var CAT_COLOR = { '휴대폰보호필름': '#EA4335', '휴대폰케이스': '#4285F4' };
+// 인입사유(tag) values dropped before any counting (user rule 2026-09-08:
+// exclude 긍정 리뷰 from every stat and every card, permanently). Mirror of
+// EXCLUDED_TAGS in ../badreview_chat_report.py — keep in sync.
+var EXCLUDED_TAGS = ['긍정 리뷰'];
 var WD = ['일', '월', '화', '수', '목', '금', '토'];      // JS getDay(): 0 = Sun
 var TZ = 'Asia/Seoul';
 
@@ -214,6 +218,7 @@ function crunch_(sheetId, target) {
   for (var r = 1; r < vals.length; r++) {
     var row = vals[r];
     var tag = String(row[iT] || '').trim() || '(빈칸)';
+    if (EXCLUDED_TAGS.indexOf(tag) !== -1) continue;
     var cc = String(row[iC] || '').trim();
     if (cat[cc]) cat[cc][tag] = (cat[cc][tag] || 0) + 1;
     if (matchesDate_(row[iU], target)) { count++; tally[tag] = (tally[tag] || 0) + 1; }

@@ -59,6 +59,9 @@ can't receive the "user picked a date" event. A Chat app has an endpoint that do
 
 ## Notes / limits
 
+- `긍정 리뷰` 인입사유(tag) is excluded from every count and the card (`EXCLUDED_TAGS`
+  in `Code.gs`, mirrors the Python) — user rule 2026-09-08.
+
 - Interaction only works where the **app itself** is present — it won't retrofit onto
   the existing webhook messages in the 12 broadcast rooms.
 - `refreshReport` is the button handler (Apps Script routes `CARD_CLICKED` to the

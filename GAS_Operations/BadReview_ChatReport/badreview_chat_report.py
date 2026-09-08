@@ -107,6 +107,12 @@ PRODUCTS = {
 
 CATEGORIES = ("휴대폰보호필름", "휴대폰케이스")
 
+# 인입사유(tag) values excluded from every count and every card (user rule, 2026-09-08:
+# "exclude 긍정 리뷰 from the stats and the result card, permanently"). Rows with one
+# of these tags are dropped before anything is counted — 총 N건, the 오늘 breakdown,
+# and the cumulative Top 5. Remove an entry only if the user says so.
+EXCLUDED_TAGS = frozenset({"긍정 리뷰"})
+
 KOR_WD = ["월", "화", "수", "목", "금", "토", "일"]
 
 # ------------------------------------------------------------------------- rooms
@@ -201,6 +207,8 @@ def crunch(rows: list[list[str]], today: datetime.date) -> dict:
         if len(row) <= max(i_upd, i_tag, i_cat):
             row = row + [""] * (max(i_upd, i_tag, i_cat) + 1 - len(row))
         tag = (row[i_tag] or "").strip() or "(빈칸)"
+        if tag in EXCLUDED_TAGS:
+            continue
         cc = (row[i_cat] or "").strip()
         if cc in cat:
             cat[cc][tag] = cat[cc].get(tag, 0) + 1
