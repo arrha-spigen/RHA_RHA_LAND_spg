@@ -34,18 +34,20 @@ function kSheetToChat() {
   for (const r of clip) {
     const no = safeStr(r[0]);
     const country = safeStr(r[1]);
-    // Strip "spigen_" / "Spigen" / "(" / ")" from the brand label, then any dangling underscores
+    // Strip "spigen_" / "Spigen" / "(" / ")" and dangling underscores, then upper-case: "Spigen(New Biz)" -> "NEW BIZ"
     const brand = safeStr(r[2])
       .replace(/spigen_/g, '')
       .replace(/Spigen/g, '')
       .replace(/[()]/g, '')
       .replace(/^_+|_+$/g, '')
-      .trim();
+      .trim()
+      .toUpperCase();
     const category = safeStr(r[3]);
     const qty = toInt(r[4]);
     const owner = safeStr(r[5]);
     const device = safeStr(r[6]);
-    const reason = safeStr(r[7]); // 1차 Defect Reason or Inquiries -> shown as 인입사유
+    // 1차 Defect Reason or Inquiries -> shown as 인입사유; drop the leading "(XXX)_" prefix
+    const reason = safeStr(r[7]).replace(/^\([^)]*\)_/, '');
 
     totalQty += qty;
     const ownerUpper = owner.toUpperCase();
