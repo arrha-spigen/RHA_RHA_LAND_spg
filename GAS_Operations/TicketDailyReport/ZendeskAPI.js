@@ -14,11 +14,14 @@ const SPREADSHEET_ID = '10VYnysCGztKWMXfvXIWBVcE2_zENnRxvXUr9nicHkpo';
 const ZENDESK_FETCH_ATTEMPTS   = 3;
 const ZENDESK_FETCH_BACKOFF_MS = [0, 2000, 4000];
 
-function getZendeskTicketsByView(viewId) {
+// GET a Zendesk API path (relative, e.g. "/api/v2/views/123/tickets.json") and
+// return the parsed JSON. Retries transient failures ("Address unavailable" /
+// DNS blips, HTTP 429, HTTP 5xx, unparseable JSON); non-transient 4xx fail fast.
+function zendeskApiGet_(path) {
   const headers = {
     "Authorization": "Basic " + Utilities.base64Encode(`${ZENDESK_EMAIL}/token:${ZENDESK_TOKEN}`)
   };
-  const url = `https://${ZENDESK_SUBDOMAIN}.zendesk.com/api/v2/views/${viewId}/tickets.json`;
+  const url = `https://${ZENDESK_SUBDOMAIN}.zendesk.com${path}`;
 
   let lastErr = null;
   for (let attempt = 1; attempt <= ZENDESK_FETCH_ATTEMPTS; attempt++) {
@@ -29,22 +32,35 @@ function getZendeskTicketsByView(viewId) {
       const code = response.getResponseCode();
 
       if (code === 429 || code >= 500) {          // transient -> retry
-        lastErr = new Error(`Zendesk view ${viewId} HTTP ${code}`);
+        lastErr = new Error(`Zendesk GET ${path} HTTP ${code}`);
         Logger.log(`WARN ${lastErr.message} (attempt ${attempt}/${ZENDESK_FETCH_ATTEMPTS})`);
         continue;
       }
       if (code < 200 || code >= 300) {            // 4xx (auth/not-found) -> not transient, fail fast
-        throw new Error(`Zendesk view ${viewId} HTTP ${code}: ${response.getContentText().slice(0, 200)}`);
+        throw new Error(`Zendesk GET ${path} HTTP ${code}: ${response.getContentText().slice(0, 200)}`);
       }
 
-      const json = JSON.parse(response.getContentText());   // bad JSON -> caught below, retried
-      return json.tickets || [];
+      return JSON.parse(response.getContentText());   // bad JSON -> caught below, retried
     } catch (e) {
       lastErr = e;
-      Logger.log(`WARN Zendesk view ${viewId} fetch failed (attempt ${attempt}/${ZENDESK_FETCH_ATTEMPTS}): ${(e && e.message) || e}`);
+      Logger.log(`WARN Zendesk GET ${path} failed (attempt ${attempt}/${ZENDESK_FETCH_ATTEMPTS}): ${(e && e.message) || e}`);
     }
   }
-  throw new Error(`Zendesk view ${viewId} unreachable after ${ZENDESK_FETCH_ATTEMPTS} attempts: ${(lastErr && lastErr.message) || lastErr}`);
+  throw new Error(`Zendesk GET ${path} failed after ${ZENDESK_FETCH_ATTEMPTS} attempts: ${(lastErr && lastErr.message) || lastErr}`);
+}
+
+function getZendeskTicketsByView(viewId) {
+  return zendeskApiGet_(`/api/v2/views/${viewId}/tickets.json`).tickets || [];
+}
+
+// Build a { rawValue: "Display Name" } map for a tagger custom field, so raw
+// option values (e.g. "galaxy_s26_ultra") can be shown the way the agent UI does
+// ("Galaxy S26 Ultra"). Returns {} if the field has no options.
+function getZendeskFieldOptionMap_(fieldId) {
+  const field = zendeskApiGet_(`/api/v2/ticket_fields/${fieldId}.json`).ticket_field || {};
+  const map = {};
+  (field.custom_field_options || []).forEach(o => { map[o.value] = o.name; });
+  return map;
 }
 
 function removeDuplicatesByTicketID(sheet) {
@@ -123,15 +139,25 @@ function fetchZendeskViewToSheet() {
 /********************************
  * 2. Fetch Ksheet View → K_시트
  ********************************/
+// Zendesk custom field IDs used for the K_시트 table
+const KSHEET_BRAND_FIELD_ID    = 5495572594201; // Brand(상세)
+const KSHEET_COUNTRY_FIELD_ID  = 4513936822297; // Country
+const KSHEET_CATEGORY_FIELD_ID = 900006613446;  // Category
+const KSHEET_DEVICE_FIELD_ID   = 360022185671;  // Device
+const KSHEET_REASON_FIELD_ID   = 360022182831;  // 1차 Defect Reason or Inquiries
+
 function fetchZendeskViewToKsheet() {
   const viewId = '49523632520985';
   const sheet = SpreadsheetApp.openById(SPREADSHEET_ID).getSheetByName('K_시트');
 
-  // Clear B~G from row 5 to bottom
+  // Clear B~I from row 5 to bottom (B seq, C country, D brand, E category,
+  // F qty, G owner, H device, I 1차 reason)
   const maxRows = sheet.getMaxRows();
   if (maxRows > 4) {
-    sheet.getRange(5, 2, maxRows - 4, 6).clearContent();
+    sheet.getRange(5, 2, maxRows - 4, 8).clearContent();
   }
+  // Make sure the two added columns are labelled (idempotent)
+  sheet.getRange(4, 8, 1, 2).setValues([['Device', '1차 Defect Reason or Inquiries']]);
 
   const tickets = getZendeskTicketsByView(viewId);
   if (tickets.length === 0) {
@@ -139,6 +165,11 @@ function fetchZendeskViewToKsheet() {
     updateB3DateBanner(sheet);
     return;
   }
+
+  // Raw option value -> display name, so "galaxy_s26_ultra" shows as "Galaxy S26 Ultra"
+  const deviceMap = getZendeskFieldOptionMap_(KSHEET_DEVICE_FIELD_ID);
+  const reasonMap = getZendeskFieldOptionMap_(KSHEET_REASON_FIELD_ID);
+  const prettyOption = (map, raw) => raw ? (map[raw] || String(raw).replace(/_/g, ' ').trim()) : '';
 
   // Format helpers
   const formatBrandCode = raw => ({
@@ -189,32 +220,38 @@ function fetchZendeskViewToKsheet() {
     .filter(t => t.status && t.status.toLowerCase() === 'pending')
     .map(t => {
       const cf = t.custom_fields || [];
-      const brandRaw = cf.find(f => f.id === 5495572594201)?.value || '';
-      const countryRaw = cf.find(f => f.id === 4513936822297)?.value || '';
-      const categoryRaw = cf.find(f => f.id === 900006613446)?.value || '';
+      const brandRaw = cf.find(f => f.id === KSHEET_BRAND_FIELD_ID)?.value || '';
+      const countryRaw = cf.find(f => f.id === KSHEET_COUNTRY_FIELD_ID)?.value || '';
+      const categoryRaw = cf.find(f => f.id === KSHEET_CATEGORY_FIELD_ID)?.value || '';
+      const deviceRaw = cf.find(f => f.id === KSHEET_DEVICE_FIELD_ID)?.value || '';
+      const reasonRaw = cf.find(f => f.id === KSHEET_REASON_FIELD_ID)?.value || '';
       return [
         (countryRaw || '').toUpperCase(),
         formatBrandCode(brandRaw),
-        formatCategoryCode(categoryRaw)
+        formatCategoryCode(categoryRaw),
+        prettyOption(deviceMap, deviceRaw),
+        prettyOption(reasonMap, reasonRaw)
       ];
     });
 
-  // Group by country|brand|category
-  const grouped = {};
-  rawRows.forEach(([country, brand, category]) => {
-    if (!country) return;
-    const key = `${country}|${brand}|${category}`;
-    grouped[key] = (grouped[key] || 0) + 1;
+  // Group by country + brand + category + device + reason
+  const grouped = new Map(); // JSON([...]) -> { fields, count }
+  rawRows.forEach(fields => {
+    if (!fields[0]) return; // no country
+    const key = JSON.stringify(fields);
+    const hit = grouped.get(key);
+    if (hit) hit.count++;
+    else grouped.set(key, { fields: fields, count: 1 });
   });
 
-  // Final rows
-  const finalRows = Object.entries(grouped).map(([key, count]) => {
-    const [country, brand, category] = key.split('|');
-    return [country, brand, category, count, getPIC(country)];
+  // Final rows: [country, brand, category, count, PIC, device, reason] -> written to C:I
+  const finalRows = Array.from(grouped.values()).map(({ fields, count }) => {
+    const [country, brand, category, device, reason] = fields;
+    return [country, brand, category, count, getPIC(country), device, reason];
   });
 
   if (finalRows.length > 0) {
-    sheet.getRange(5, 3, finalRows.length, 5).setValues(finalRows);
+    sheet.getRange(5, 3, finalRows.length, 7).setValues(finalRows);
     const seq = Array.from({ length: finalRows.length }, (_, i) => [i + 1]);
     sheet.getRange(5, 2, finalRows.length, 1).setValues(seq);
   }

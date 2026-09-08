@@ -6,12 +6,11 @@ function kSheetToChat() {
   const titleText = String(sheet.getRange('B3').getValue() || '');
   const manualTotal = sheet.getRange('G3').getValue();
 
-  // Headers + data from B4:G
-  const all = sheet.getRange('B:G').getValues();
-  const headers = all[3]; // B4..G4
+  // Headers + data from B4:I  (B no, C country, D brand, E category, F qty, G owner, H device, I 인입사유)
+  const all = sheet.getRange('B:I').getValues();
   let last = all.length;
   while (last > 5 && all[last - 1].every(v => v === '' || v === null)) last--;
-  const rows = all.slice(4, last); // B5..G(last)
+  const rows = all.slice(4, last); // B5..I(last)
   if (!rows.length) return;
 
   // Build compact row strings + compute totals
@@ -27,7 +26,7 @@ function kSheetToChat() {
   // Header line (as topLabel)
   listWidgets.push({
     decoratedText: {
-      topLabel: headers.join(' | '),
+      topLabel: 'No. | Country | Brand | Category | Device | 인입사유 | Qty | Owner',
       text: ''
     }
   });
@@ -39,6 +38,8 @@ function kSheetToChat() {
     const category = safeStr(r[3]);
     const qty = toInt(r[4]);
     const owner = safeStr(r[5]);
+    const device = safeStr(r[6]);
+    const reason = safeStr(r[7]); // 1차 Defect Reason or Inquiries -> shown as 인입사유
 
     totalQty += qty;
     const ownerUpper = owner.toUpperCase();
@@ -47,7 +48,7 @@ function kSheetToChat() {
 
     const iso = normalizeIso(country);
     const flag = toFlagEmoji(iso);
-    const line = `${no}. ${flag ? flag + ' ' : ''}${iso || country} | ${brand} | ${category} | ${qty} | ${owner}`;
+    const line = `${no}. ${flag ? flag + ' ' : ''}${iso || country} | ${brand} | ${category} | ${device || '-'} | ${reason || '-'} | ${qty} | ${owner}`;
     listWidgets.push({ decoratedText: { text: line } });
   }
 
