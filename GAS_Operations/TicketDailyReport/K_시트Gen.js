@@ -34,7 +34,13 @@ function kSheetToChat() {
   for (const r of clip) {
     const no = safeStr(r[0]);
     const country = safeStr(r[1]);
-    const brand = safeStr(r[2]);
+    // Strip "spigen_" / "Spigen" / "(" / ")" from the brand label, then any dangling underscores
+    const brand = safeStr(r[2])
+      .replace(/spigen_/g, '')
+      .replace(/Spigen/g, '')
+      .replace(/[()]/g, '')
+      .replace(/^_+|_+$/g, '')
+      .trim();
     const category = safeStr(r[3]);
     const qty = toInt(r[4]);
     const owner = safeStr(r[5]);
