@@ -33,6 +33,12 @@ Reads the `1-3점` tab (`A:S`) of each spreadsheet via the **Sheets API v4**, au
 with the local gws_shim OAuth token at `~/.config/gws_shim/token.json` (dukso123
 account, `drive` scope; the script refreshes the token and writes it back).
 
+> ⚠️ **2026-09-08:** this token's GCP project was deleted — Sheets calls now 403
+> `CONSUMER_INVALID`. The standalone script can't fetch until a new OAuth client is
+> set up. Until then, use the Claude Code skill path (`pixel11/glxz8-badreview-chat-report`
+> + `badreview-chat-broadcast`), which reads the sheet through the browser `gviz`
+> endpoint and doesn't need this token, then `report.py --data ... --webhook ...`.
+
 | Product | Spreadsheet ID |
 |---------|----------------|
 | Pixel 11 Series | `12I6z_FFmDIMHa0rLanltKKFp7kI_yREQj3adkMamPgI` |
