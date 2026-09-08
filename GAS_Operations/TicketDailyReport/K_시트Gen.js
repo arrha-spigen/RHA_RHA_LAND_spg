@@ -13,7 +13,6 @@ function kSheetToChat() {
   const rows = all.slice(4, last); // B5..I(last)
   if (!rows.length) return;
 
-  // Build compact row strings + compute totals
   const MAX_ROWS = 25;
   const clip = rows.slice(0, MAX_ROWS);
 
@@ -21,18 +20,12 @@ function kSheetToChat() {
   let lysTotal = 0;
   let kjwTotal = 0;
 
-  const listWidgets = [];
-
-  // Header line (as topLabel)
-  listWidgets.push({
-    decoratedText: {
-      topLabel: 'No. | Country | Brand | Category | Device | 인입사유 | Qty | Owner',
-      text: ''
-    }
-  });
+  // Build the table rows
+  const headerCells = ['#', 'CC', 'Brand', 'Category', 'Device', '인입사유', 'Qty', 'PIC'];
+  const dataRows = [];
 
   for (const r of clip) {
-    const no = safeStr(r[0]);
+    const no = safeStr(r[0]).replace(/\.$/, '');
     const country = safeStr(r[1]);
     // Strip "spigen_" / "Spigen" / "(" / ")" and dangling underscores, then upper-case: "Spigen(New Biz)" -> "NEW BIZ"
     const brand = safeStr(r[2])
@@ -42,7 +35,8 @@ function kSheetToChat() {
       .replace(/^_+|_+$/g, '')
       .trim()
       .toUpperCase();
-    const category = safeStr(r[3]);
+    // Drop the leading "N. " numbering: "6. Product Inquiry" -> "Product Inquiry"
+    const category = safeStr(r[3]).replace(/^\d+\.\s*/, '');
     const qty = toInt(r[4]);
     const owner = safeStr(r[5]);
     const device = safeStr(r[6]);
@@ -54,11 +48,12 @@ function kSheetToChat() {
     if (ownerUpper === 'LYS') lysTotal += qty;
     if (ownerUpper === 'KJW') kjwTotal += qty;
 
-    const iso = normalizeIso(country);
-    const flag = toFlagEmoji(iso);
-    const line = `${no}. ${flag ? flag + ' ' : ''}${iso || country} | ${brand} | ${category} | ${device || '-'} | ${reason || '-'} | ${qty} | ${owner}`;
-    listWidgets.push({ decoratedText: { text: line } });
+    const iso = normalizeIso(country) || country;
+    dataRows.push([no, iso, brand || '-', category || '-', device || '-', reason || '-', String(qty), owner]);
   }
+
+  // Monospace, column-aligned table (CJK chars count as width 2)
+  const tableText = buildMonoTable_(headerCells, dataRows);
 
   // If G3 is present, prefer it; otherwise use computed sum
   const headlineTotal = (manualTotal !== '' && manualTotal !== null) ? Number(manualTotal) : totalQty;
@@ -66,20 +61,19 @@ function kSheetToChat() {
   // Totals line (All, LYS, KJW)
   const totalsLine = `All: ${headlineTotal} | LYS: ${lysTotal} | KJW: ${kjwTotal}`;
 
-  const spreadsheetUrl = `https://docs.google.com/spreadsheets/d/${spreadsheetId}/edit#gid=${sheet.getSheetId()}`;
   const payload = {
     text: titleText || 'K_시트 Pending Ticket Snapshot',
     cardsV2: [
       {
         cardId: 'k_sheet_compact',
         card: {
-        header: {
-          title: titleText || 'K_시트 Pending Ticket 수',
-          subtitle: '담당자별 Pending 티켓 현황',
-          imageUrl: 'https://img.icons8.com/color/512/zendesk.png',
-          imageType: 'SQUARE',
-          imageAltText: 'Zendesk'
-        },
+          header: {
+            title: titleText || 'K_시트 Pending Ticket 수',
+            subtitle: '담당자별 Pending 티켓 현황',
+            imageUrl: 'https://img.icons8.com/color/512/zendesk.png',
+            imageType: 'SQUARE',
+            imageAltText: 'Zendesk'
+          },
           sections: [
             {
               widgets: [
@@ -90,23 +84,27 @@ function kSheetToChat() {
                   }
                 },
                 {
-                              buttonList: {
-              buttons: [
-                {
-                  text: 'Start Zendesk',
-                  onClick: {
-                    openLink: {
-                      url: 'https://spigenhelp.zendesk.com/agent/filters/360103290632'
-                    }
+                  buttonList: {
+                    buttons: [
+                      {
+                        text: 'Start Zendesk',
+                        onClick: {
+                          openLink: {
+                            url: 'https://spigenhelp.zendesk.com/agent/filters/360103290632'
+                          }
+                        }
+                      }
+                    ]
                   }
-                }
-              ]
-            },
                 },
                 { divider: {} }
               ]
             },
-            { widgets: listWidgets },
+            {
+              widgets: [
+                { textParagraph: { text: '<pre>' + htmlEscape_(tableText) + '</pre>' } }
+              ]
+            },
             ...(rows.length > MAX_ROWS
               ? [{
                   widgets: [{
@@ -146,4 +144,35 @@ function toFlagEmoji(iso2) {
   const c1 = iso2.charCodeAt(0), c2 = iso2.charCodeAt(1);
   if (c1 < A || c1 > 0x5A || c2 < A || c2 > 0x5A) return '';
   return String.fromCodePoint(REGIONAL + (c1 - A), REGIONAL + (c2 - A));
+}
+
+function htmlEscape_(s) {
+  return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+}
+
+// Display width: CJK / full-width / Hangul chars occupy 2 monospace cells, the rest 1.
+function monoWidth_(s) {
+  const wide = /[\u1100-\u11FF\u3000-\u30FF\u3130-\u318F\u3400-\u9FFF\uAC00-\uD7A3\uF900-\uFAFF\uFF00-\uFFEF]/;
+  let w = 0;
+  for (const ch of String(s)) w += wide.test(ch) ? 2 : 1;
+  return w;
+}
+
+// Build a fixed-width, column-aligned text table. `#` and `Qty` columns are right-aligned.
+function buildMonoTable_(headerCells, dataRows) {
+  const grid = [headerCells].concat(dataRows);
+  const cols = headerCells.length;
+  const colW = [];
+  for (let c = 0; c < cols; c++) {
+    colW[c] = grid.reduce((m, row) => Math.max(m, monoWidth_(row[c])), 0);
+  }
+  const rightAlign = {}; rightAlign[0] = true; rightAlign[cols - 2] = true; // '#' and 'Qty'
+  const pad = (val, w, right) => {
+    const s = String(val);
+    const gap = ' '.repeat(Math.max(0, w - monoWidth_(s)));
+    return right ? gap + s : s + gap;
+  };
+  const fmtRow = row => row.map((v, c) => pad(v, colW[c], rightAlign[c])).join('  ');
+  const rule = colW.map(w => '-'.repeat(w)).join('  ');
+  return [fmtRow(headerCells), rule].concat(dataRows.map(fmtRow)).join('\n');
 }
