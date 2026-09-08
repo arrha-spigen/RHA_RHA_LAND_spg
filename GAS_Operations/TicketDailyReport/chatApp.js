@@ -26,7 +26,11 @@ const CHAT_CARD_MAX_ROWS = 40;
 
 function onMessage(event) {
   // Slash command or plain message -> show the picker with the newest date
-  return buildPickerMessage_(null);
+  try {
+    return buildPickerMessage_(null);
+  } catch (e) {
+    return { text: '⚠️ onMessage 오류: ' + (e && e.stack ? e.stack : e) };
+  }
 }
 
 function onAddToSpace(event) {
@@ -40,9 +44,24 @@ function onRemoveFromSpace(event) {
 // Card button handler — Apps Script invokes the function named in
 // onClick.action.function. Kept tolerant of the different event shapes.
 function loadDayReport(event) {
-  const key = chatFormValue_(event, 'reportDate');
-  const msg = buildPickerMessage_(key);
-  msg.actionResponse = { type: 'UPDATE_MESSAGE' };
+  try {
+    const key = chatFormValue_(event, 'reportDate');
+    const msg = buildPickerMessage_(key);
+    msg.actionResponse = { type: 'UPDATE_MESSAGE' };
+    return msg;
+  } catch (e) {
+    return { text: '⚠️ loadDayReport 오류: ' + (e && e.stack ? e.stack : e) };
+  }
+}
+
+/**
+ * Run this once from the Apps Script editor (Run > test_chatPicker) to trigger
+ * the OAuth authorization prompt (Sheets access). Approve it, then /report works.
+ * Also logs the card JSON so you can eyeball it.
+ */
+function test_chatPicker() {
+  const msg = buildPickerMessage_(null);
+  Logger.log(JSON.stringify(msg, null, 2));
   return msg;
 }
 
