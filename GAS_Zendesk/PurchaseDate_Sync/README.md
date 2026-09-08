@@ -11,22 +11,27 @@ board columns — for a date column its dropdown only offers Zendesk's system
 fields (`Created at` / `Due at` / `Updated at`). So the Purchase Date entered
 by agents on the ticket never reaches the board.
 
-## How  (rewritten 2026-09-08 — batch, twice a day)
+## How  (rewritten 2026-09-08 — scheduled batch)
 
 Previously a Zendesk webhook hit `doPost` on every "Purchase Date changed"
 event. In practice it fired ~5–6×/min around the clock and each call walked
 the **entire board up to 4×** to locate one item — by far the biggest
-consumer of the monday.com account's API budget. It is now a scheduled batch:
+consumer of the monday.com account's API budget (~tens of thousands of calls
+/day). It is now a scheduled batch:
 
 ```
-Time trigger ×2/day (SYNC_HOURS = 07:00, 19:00 Asia/Seoul)
-  └─ scheduledPurchaseDateSync()
-       ├─ ONE board walk (500 items/page) → every item with a linked
-       │  Zendesk ticket + its current Purchase Date cell
-       ├─ Zendesk tickets/show_many (100 ids/call) → Purchase Date per ticket
-       └─ change_multiple_column_values → date_mm59ejfp
-          ONLY for items where the ticket's date differs from the board
+Time trigger every SYNC_EVERY_MINUTES min (15 → ~96 runs/day)
+  └─ scheduledPurchaseDateSync()   (script-lock guarded; overlapping tick = no-op)
+       └─ _runPurchaseDateSync_()
+            ├─ ONE board walk (500 items/page) → every item with a linked
+            │  Zendesk ticket + its current Purchase Date cell
+            ├─ Zendesk tickets/show_many (100 ids/call) → Purchase Date per ticket
+            └─ change_multiple_column_values → date_mm59ejfp
+               ONLY for items where the ticket's date differs from the board
 ```
+
+Cost is now ~(board_pages) monday reads + only-changed writes per run —
+a few hundred monday calls/day instead of tens of thousands.
 
 `doPost` is now a **no-op** — deactivate the Zendesk trigger + webhook.
 
@@ -35,15 +40,16 @@ Time trigger ×2/day (SYNC_HOURS = 07:00, 19:00 Asia/Seoul)
 | Piece | Where |
 |---|---|
 | GAS project | `PurchaseDate_Sync` (standalone) |
-| Time triggers | 2× daily `scheduledPurchaseDateSync` — installed by `setupPurchaseDateTriggers` |
+| Time trigger | every 15 min `scheduledPurchaseDateSync` (~96/day) — installed by `setupPurchaseDateTriggers` |
 | Zendesk webhook | "monday Purchase Date Sync" → **deactivate** (endpoint is a no-op now) |
 | Zendesk trigger | "monday Purchase Date Sync" → **deactivate** |
 | monday board | `18421346787`, columns `date_mm59ejfp` (Purchase Date), `integration_mm0fzmv0` (Zendesk Ticket) |
 
 ## Functions (GAS editor → Run)
 
-- `setupPurchaseDateTriggers` — **run once** to install the two daily triggers
-  (needs the OAuth consent click; 403s if invoked headlessly). Re-run-safe.
+- `setupPurchaseDateTriggers` — **run once** to install the every-15-min trigger
+  (needs the OAuth consent click; 403s if invoked headlessly). Re-run-safe;
+  also clears any stale `backfillPurchaseDates` timer.
 - `scheduledPurchaseDateSync` — the batch sync itself; also runnable on demand.
 - `backfillPurchaseDates` — alias for `scheduledPurchaseDateSync` (kept for
   older docs). Now also refreshes items whose date changed, not just empty ones.

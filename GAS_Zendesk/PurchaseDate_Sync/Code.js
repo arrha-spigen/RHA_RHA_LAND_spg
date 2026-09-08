@@ -8,18 +8,21 @@
  * "Purchase Date" (Zendesk custom field 360019586172) therefore never
  * reaches the board's Purchase Date column.
  *
- * HOW IT WORKS  (rewritten 2026-09-08 — batch, twice a day)
+ * HOW IT WORKS  (rewritten 2026-09-08 — scheduled batch)
  * Previously this ran as a Zendesk webhook (doPost) that fired ~5-6x/min and
  * walked the ENTIRE board up to 4x on every single call — the top consumer
  * of the account's monday.com API budget. It now runs as a scheduled batch:
  *
  *   scheduledPurchaseDateSync()  — installed by setupPurchaseDateTriggers()
- *   to run twice a day (SYNC_HOURS, Asia/Seoul):
+ *   to run every SYNC_EVERY_MINUTES minutes (15 → ~96 runs/day):
  *     1. ONE walk of the board (500 items/page) to collect every item that
  *        has a linked Zendesk ticket, plus its current Purchase Date cell.
  *     2. Fetch those tickets from Zendesk in bulk (show_many, 100 ids/call).
  *     3. Write the Purchase Date to an item ONLY when it differs from what's
  *        already on the board.
+ *   A script lock makes an overlapping tick a no-op, so a long run can never
+ *   pile up. Cost is now ~(board_pages) monday reads + only-changed writes
+ *   per run, i.e. a few hundred calls/day instead of tens of thousands.
  *
  * The old webhook path is disabled — doPost() is now a no-op. After
  * deploying this version, also deactivate the Zendesk trigger + webhook that
@@ -43,8 +46,9 @@ const MONDAY_TICKET_COL = 'integration_mm0fzmv0'; // "Zendesk Ticket" (integrati
 // Kept only so doPost can still recognise stray webhook traffic; unused otherwise.
 const WEBHOOK_SECRET = '8GD3uY_vYU5N9GJlD0T1y1b9jJylrPnv21QmeqBSsKU';
 
-// Local clock hours (Asia/Seoul) at which the batch sync runs. Two per day.
-const SYNC_HOURS = [7, 19];
+// How often the batch sync runs. 15 min → 96 runs/day (~100/day).
+// GAS everyMinutes() only accepts 1, 5, 10, 15 or 30.
+const SYNC_EVERY_MINUTES = 15;
 
 const BOARD_PAGE_LIMIT = 500;    // monday items_page max
 const ZD_SHOW_MANY_CHUNK = 100;  // Zendesk tickets/show_many max ids per call
@@ -163,6 +167,20 @@ function setItemPurchaseDate_(itemId, isoDate) {
 function scheduledPurchaseDateSync() {
   const startedAt = new Date();
 
+  // A frequent timer must never let two runs overlap and double-walk the board.
+  const lock = LockService.getScriptLock();
+  if (!lock.tryLock(0)) {
+    Logger.log('scheduledPurchaseDateSync: another run holds the lock — skipping this tick.');
+    return;
+  }
+  try {
+    _runPurchaseDateSync_(startedAt);
+  } finally {
+    lock.releaseLock();
+  }
+}
+
+function _runPurchaseDateSync_(startedAt) {
   const linked = collectLinkedItems_();
   Logger.log(`Board walk: ${linked.length} item(s) linked to a Zendesk ticket.`);
   if (!linked.length) return;
@@ -192,17 +210,16 @@ function scheduledPurchaseDateSync() {
 }
 
 // Run once from the GAS editor (needs the script.scriptapp OAuth consent, so
-// it 403s if invoked headlessly). Installs the twice-a-day time triggers and
-// removes any it previously created. Safe to re-run.
+// it 403s if invoked headlessly). Replaces any existing scheduledPurchaseDateSync
+// trigger with a single every-SYNC_EVERY_MINUTES timer. Safe to re-run.
 function setupPurchaseDateTriggers() {
   ScriptApp.getProjectTriggers().forEach(t => {
-    if (t.getHandlerFunction() === 'scheduledPurchaseDateSync') ScriptApp.deleteTrigger(t);
+    const fn = t.getHandlerFunction();
+    if (fn === 'scheduledPurchaseDateSync' || fn === 'backfillPurchaseDates') ScriptApp.deleteTrigger(t);
   });
-  SYNC_HOURS.forEach(h => {
-    ScriptApp.newTrigger('scheduledPurchaseDateSync')
-      .timeBased().everyDays(1).atHour(h).inTimezone('Asia/Seoul').create();
-  });
-  Logger.log(`Installed ${SYNC_HOURS.length} daily trigger(s) for scheduledPurchaseDateSync at hour(s) ${SYNC_HOURS.join(', ')} Asia/Seoul.`);
+  ScriptApp.newTrigger('scheduledPurchaseDateSync')
+    .timeBased().everyMinutes(SYNC_EVERY_MINUTES).create();
+  Logger.log(`Installed 1 trigger for scheduledPurchaseDateSync every ${SYNC_EVERY_MINUTES} min (~${Math.round(1440 / SYNC_EVERY_MINUTES)} runs/day).`);
 }
 
 // Kept for compatibility with older docs/muscle memory. The scheduled sync
