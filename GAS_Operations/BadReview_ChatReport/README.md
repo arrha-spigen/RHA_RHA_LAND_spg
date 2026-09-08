@@ -82,6 +82,15 @@ cannot be edited or deleted afterwards.
 - `google-auth`, `google-auth-oauthlib`, `google-api-python-client`
 - A valid `~/.config/gws_shim/token.json`
 
+## `chat_app/` — interactive Google Chat app (proof of concept)
+
+`chat_app/` holds a separate Apps Script **Google Chat app** that adds an in-card
+**date picker + product dropdown**: pick a date and it re-renders the report for the
+rows whose `Update 날짜` matches that day. It runs *alongside* the webhook broadcast,
+not instead of it (a webhook is send-only and can't receive the picker event). Not
+deployed yet — see `chat_app/SETUP.md` for the Cloud Console steps. Card design is
+duplicated from `badreview_chat_report.py`; keep them in sync.
+
 ## Safety flow (matches the skill)
 
 1. Re-read the sheets every run (never reuse stale numbers).
