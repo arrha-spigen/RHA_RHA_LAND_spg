@@ -13,9 +13,9 @@ Google Apps Script project that generates the Spigen GCX daily Zendesk ticket re
 |------|---------|
 | `main.js` | `runZendeskDailyJob()` — declares the ordered step list, runs it via `runResumableJob_()` |
 | `retryRunner.js` | Resilient runner: per-step retry, resume-from-crash, auto catch-up scheduling |
-| `ZendeskAPI.js` | Zendesk API helpers — fetch tickets by view (with retry), dedup by ticket ID |
+| `ZendeskAPI.js` | Zendesk API helpers — `zendeskApiGet_()` (retrying GET), tickets-by-view, tagger option→name map, `fetchZendeskViewToKsheet()` |
 | `All_GraphGen.js` | Appends daily counts to `All_Graph` sheet and renders charts |
-| `K_시트Gen.js` | Fills the `K_시트` table with current ticket data |
+| `K_시트Gen.js` | `kSheetToChat()` — builds the `K_시트` snapshot card for Google Chat |
 | `sendChat.js` | Sends chart images to Google Chat via `hcti.io` image API + webhook |
 | `testingFunc.js` | Manual test helpers |
 | `trigger.js` | Sets up time-based triggers |
@@ -30,12 +30,28 @@ Google Apps Script project that generates the Spigen GCX daily Zendesk ticket re
 | # | Step (`name`) | Does | Critical? |
 |---|---------------|------|-----------|
 | 1 | `fetchZendeskViewToSheet`    | fills `Zendesk_Daily` from 9 Zendesk views | yes |
-| 2 | `fetchZendeskViewToKsheet_A` | fills `K_시트` B5:Gn table | yes |
+| 2 | `fetchZendeskViewToKsheet_A` | fills `K_시트` B5:In table | yes |
 | 3 | `appendZendeskDailyStatus`   | counts new/open/pending → **one** `All_Graph` row/day, clears `Zendesk_Daily` | yes |
 | 4 | `all_GraphChartToGoogleChat` | posts the `All_Graph` chart image to Google Chat | yes |
 | 5 | `collapseOldRowsIfNeeded`    | collapses rows past 4 weeks | **no** (logged & skipped on failure) |
 | 6 | `fetchZendeskViewToKsheet_B` | rebuilds `K_시트` for `P_시트` | yes |
 | 7 | `kSheetToChat`               | posts the `K_시트` snapshot image to Google Chat | yes |
+
+### `K_시트` table columns (view `49523632520985`, `pending` tickets only)
+
+| Col | Field | Source |
+|-----|-------|--------|
+| B | No. | sequence |
+| C | Country | field `4513936822297` |
+| D | Brand | field `5495572594201` |
+| E | Category | field `900006613446` |
+| F | Qty | group count |
+| G | Owner | week-alternating PIC (LYS / KJW) |
+| H | Device | field `360022185671` (raw value → agent-UI name) |
+| I | 1차 Defect Reason or Inquiries | field `360022182831` — shown on the Chat card as **인입사유** |
+
+Rows are grouped by Country + Brand + Category + Device + Reason; `Qty` is the group size.
+The Chat card line is `No. | Country | Brand | Category | Device | 인입사유 | Qty | Owner`.
 
 ---
 
