@@ -30,8 +30,14 @@ Time trigger every SYNC_EVERY_MINUTES min (15 → ~96 runs/day)
                ONLY for items where the ticket's date differs from the board
 ```
 
-Cost is now ~(board_pages) monday reads + only-changed writes per run —
-a few hundred monday calls/day instead of tens of thousands.
+The board ("📌Galaxy Z8 Case+CP") holds ~960 items = **2 pages**, so a run
+costs **~2 monday reads + only-changed writes** → **~200–300 monday calls/day**
+across 96 runs (was ~40,000/day via the webhook).
+
+`MONDAY_CALLS_MAX_PER_RUN = 50` is a hard ceiling — `mondayGql_` throws once a
+single run passes it (50 × 96 = 4,800/day absolute worst case). A run that hits
+the cap stops cleanly and the next run picks up the remainder, so nothing is
+lost; a genuine loop/bug fails loudly instead of repeating the 2026-09 runaway.
 
 `doPost` is now a **no-op** — deactivate the Zendesk trigger + webhook.
 

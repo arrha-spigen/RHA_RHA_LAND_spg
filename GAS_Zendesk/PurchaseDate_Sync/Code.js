@@ -21,8 +21,11 @@
  *     3. Write the Purchase Date to an item ONLY when it differs from what's
  *        already on the board.
  *   A script lock makes an overlapping tick a no-op, so a long run can never
- *   pile up. Cost is now ~(board_pages) monday reads + only-changed writes
- *   per run, i.e. a few hundred calls/day instead of tens of thousands.
+ *   pile up. The board is small (~960 items = 2 pages), so a run costs ~2
+ *   monday reads + only-changed writes → ~200-300 monday calls/day total
+ *   (96 runs), versus the ~40,000/day the old webhook was burning.
+ *   MONDAY_CALLS_MAX_PER_RUN is a hard ceiling: mondayGql_ throws past it so
+ *   no future change can quietly turn this back into a runaway.
  *
  * The old webhook path is disabled — doPost() is now a no-op. After
  * deploying this version, also deactivate the Zendesk trigger + webhook that
@@ -53,6 +56,16 @@ const SYNC_EVERY_MINUTES = 15;
 const BOARD_PAGE_LIMIT = 500;    // monday items_page max
 const ZD_SHOW_MANY_CHUNK = 100;  // Zendesk tickets/show_many max ids per call
 const WRITE_SLEEP_MS = 120;      // small gap between monday writes
+
+// Hard ceiling on monday API calls per single run. A healthy run is ~2 reads
+// plus a handful of writes. 50 * 96 runs/day = 4,800/day absolute worst case
+// (< 5,000 by design); real usage is ~200-300/day. If a bulk date edit needs
+// more than ~48 writes in one 15-min window the run stops at the cap and the
+// remainder is picked up by the next run (it re-walks and still sees the diff),
+// so nothing is lost — and a genuine bug/loop bails loud instead of repeating
+// the 2026-09 runaway.
+const MONDAY_CALLS_MAX_PER_RUN = 50;
+let _mondayCallCount = 0; // reset at the top of each run
 
 // ── Zendesk helpers ───────────────────────────────────────────────────────────
 
@@ -100,7 +113,12 @@ function zdGetPurchaseDatesForTickets_(ticketIds) {
 
 // ── monday helpers ────────────────────────────────────────────────────────────
 
+const MONDAY_BUDGET_ERR = 'MONDAY_CALLS_MAX_PER_RUN';
+
 function mondayGql_(query) {
+  if (++_mondayCallCount > MONDAY_CALLS_MAX_PER_RUN) {
+    throw new Error(`${MONDAY_BUDGET_ERR} (${MONDAY_CALLS_MAX_PER_RUN}) reached — stopping this run; remainder resumes next tick.`);
+  }
   const resp = UrlFetchApp.fetch('https://api.monday.com/v2', {
     method: 'post',
     contentType: 'application/json',
@@ -181,13 +199,15 @@ function scheduledPurchaseDateSync() {
 }
 
 function _runPurchaseDateSync_(startedAt) {
+  _mondayCallCount = 0;
+
   const linked = collectLinkedItems_();
-  Logger.log(`Board walk: ${linked.length} item(s) linked to a Zendesk ticket.`);
+  Logger.log(`Board walk: ${linked.length} item(s) linked to a Zendesk ticket (${_mondayCallCount} monday read call(s)).`);
   if (!linked.length) return;
 
   const dateByTicket = zdGetPurchaseDatesForTickets_(linked.map(x => x.ticketId));
 
-  let updated = 0, unchanged = 0, noDate = 0, failed = 0;
+  let updated = 0, unchanged = 0, noDate = 0, failed = 0, cappedAt = 0;
   for (const it of linked) {
     const isoDate = dateByTicket[it.ticketId];
     if (!isoDate) { noDate++; continue; }
@@ -197,6 +217,11 @@ function _runPurchaseDateSync_(startedAt) {
       updated++;
       Logger.log(`ticket #${it.ticketId} → item ${it.itemId}: Purchase Date ${it.dateText || '(empty)'} → ${isoDate}`);
     } catch (err) {
+      if (String(err).indexOf(MONDAY_BUDGET_ERR) !== -1) {
+        cappedAt = updated;
+        Logger.log(`Hit MONDAY_CALLS_MAX_PER_RUN after ${updated} write(s) — leaving the rest for the next run.`);
+        break;
+      }
       failed++;
       Logger.log(`item ${it.itemId} (ticket #${it.ticketId}) → ${isoDate} FAILED: ${err}`);
     }
@@ -205,7 +230,9 @@ function _runPurchaseDateSync_(startedAt) {
 
   Logger.log(
     `scheduledPurchaseDateSync done in ${((new Date() - startedAt) / 1000).toFixed(1)}s — ` +
-    `updated ${updated}, unchanged ${unchanged}, ticket has no purchase date ${noDate}, failed ${failed}.`
+    `updated ${updated}, unchanged ${unchanged}, ticket has no purchase date ${noDate}, failed ${failed}` +
+    (cappedAt ? `, CAPPED at ${MONDAY_CALLS_MAX_PER_RUN} monday calls` : '') +
+    `. Total monday calls this run: ${_mondayCallCount}.`
   );
 }
 
