@@ -20,40 +20,17 @@ function kSheetToChat() {
   let lysTotal = 0;
   let kjwTotal = 0;
 
-  // Build the table rows
-  const headerCells = ['#', 'CC', 'Brand', 'Category', 'Device', '인입사유', 'Qty', 'PIC'];
   const dataRows = [];
-
   for (const r of clip) {
-    const no = safeStr(r[0]).replace(/\.$/, '');
-    const country = safeStr(r[1]);
-    // Strip "spigen_" / "Spigen" / "(" / ")" and dangling underscores, then upper-case: "Spigen(New Biz)" -> "NEW BIZ"
-    const brand = safeStr(r[2])
-      .replace(/spigen_/g, '')
-      .replace(/Spigen/g, '')
-      .replace(/[()]/g, '')
-      .replace(/^_+|_+$/g, '')
-      .trim()
-      .toUpperCase();
-    // Drop the leading "N. " numbering: "6. Product Inquiry" -> "Product Inquiry"
-    const category = safeStr(r[3]).replace(/^\d+\.\s*/, '');
-    const qty = toInt(r[4]);
-    const owner = safeStr(r[5]);
-    const device = safeStr(r[6]);
-    // 1차 Defect Reason or Inquiries -> shown as 인입사유; drop the leading "(XXX)_" prefix
-    const reason = safeStr(r[7]).replace(/^\([^)]*\)_/, '');
-
-    totalQty += qty;
-    const ownerUpper = owner.toUpperCase();
-    if (ownerUpper === 'LYS') lysTotal += qty;
-    if (ownerUpper === 'KJW') kjwTotal += qty;
-
-    const iso = normalizeIso(country) || country;
-    dataRows.push([no, iso, brand || '-', category || '-', device || '-', reason || '-', String(qty), owner]);
+    const c = cleanKSheetDisplayRow_(r);
+    totalQty += c.qty;
+    if (c.owner.toUpperCase() === 'LYS') lysTotal += c.qty;
+    if (c.owner.toUpperCase() === 'KJW') kjwTotal += c.qty;
+    dataRows.push(c.display);
   }
 
   // Monospace, column-aligned table (CJK chars count as width 2)
-  const tableText = buildMonoTable_(headerCells, dataRows);
+  const tableText = buildMonoTable_(KSHEET_CARD_HEADER, dataRows);
 
   // If G3 is present, prefer it; otherwise use computed sum
   const headlineTotal = (manualTotal !== '' && manualTotal !== null) ? Number(manualTotal) : totalQty;
@@ -131,6 +108,35 @@ function kSheetToChat() {
 }
 
 /* ===== helpers ===== */
+
+// Shared header for the K_시트 monospace card table (used by kSheetToChat + the Chat app)
+const KSHEET_CARD_HEADER = ['#', 'CC', 'Brand', 'Category', 'Device', '인입사유', 'Qty', 'PIC'];
+
+// Turn one raw K_시트 / K_시트_history row [seq, country, brand, category, qty, owner, device, reason]
+// into { display: [#, CC, Brand, Category, Device, 인입사유, Qty, PIC], qty, owner } with the
+// card-only cleanups (Brand strip+UPPER, Category drop "N. ", 인입사유 drop "(XXX)_").
+function cleanKSheetDisplayRow_(raw) {
+  const no = safeStr(raw[0]).replace(/\.$/, '');
+  const cc = normalizeIso(safeStr(raw[1])) || safeStr(raw[1]);
+  const brand = safeStr(raw[2])
+    .replace(/spigen_/g, '')
+    .replace(/Spigen/g, '')
+    .replace(/[()]/g, '')
+    .replace(/^_+|_+$/g, '')
+    .trim()
+    .toUpperCase();
+  const category = safeStr(raw[3]).replace(/^\d+\.\s*/, '');
+  const qty = toInt(raw[4]);
+  const owner = safeStr(raw[5]);
+  const device = safeStr(raw[6]);
+  const reason = safeStr(raw[7]).replace(/^\([^)]*\)_/, '');
+  return {
+    display: [no, cc, brand || '-', category || '-', device || '-', reason || '-', String(qty), owner],
+    qty: qty,
+    owner: owner
+  };
+}
+
 function safeStr(v) { return (v === null || v === undefined) ? '' : String(v).trim(); }
 function toInt(v) { const n = Number(v); return Number.isFinite(n) ? n : 0; }
 function normalizeIso(code) {
