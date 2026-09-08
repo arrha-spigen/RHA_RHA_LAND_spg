@@ -16,10 +16,43 @@ Google Apps Script project that generates the Spigen GCX daily Zendesk ticket re
 | `ZendeskAPI.js` | Zendesk API helpers — `zendeskApiGet_()` (retrying GET), tickets-by-view, tagger option→name map, `fetchZendeskViewToKsheet()` |
 | `All_GraphGen.js` | Appends daily counts to `All_Graph` sheet and renders charts |
 | `K_시트Gen.js` | `kSheetToChat()` — builds the `K_시트` snapshot card for Google Chat |
+| `KSheetHistory.js` | `archiveKSheetHistory()` — appends today's `K_시트` rows to the `K_시트_history` sheet (source for the `/report` date picker) |
+| `chatApp.js` | Google Chat app — `/report` slash command → `onMessage` shows an "Update 날짜" date-picker card; `loadDayReport` handles the button |
 | `sendChat.js` | Sends chart images to Google Chat via `hcti.io` image API + webhook |
 | `testingFunc.js` | Manual test helpers |
 | `trigger.js` | Sets up time-based triggers |
-| `appsscript.json` | GAS manifest |
+| `appsscript.json` | GAS manifest — **must contain `"chat": {}`** (see the `/report` section) |
+
+---
+
+## `/report` Chat app
+
+Type `/report` in a DM with the **T2 Report** app (or a space it's in) to get a
+card: pick an `Update 날짜` from the dropdown and see that day's `K_시트`
+pending-ticket table, read from the `K_시트_history` sheet that
+`archiveKSheetHistory()` appends to on every weekday run.
+
+### Wiring (all in the `gcxbot` GCP project — `console.cloud.google.com`, project `gcxbot` / number `64325928759`)
+
+1. **Google Chat API** enabled.
+2. **`appsscript.json` must have `"chat": {}`.** Without it, *no* deployment of
+   this project registers as a Chat app — Chat has nowhere to send the event,
+   so `/report` returns **"T2 Report not responding"** with **zero** Apps Script
+   executions and zero `chat_app` logs. This was the bug on 2026-09-08.
+3. Deploy → **New deployment → type Add-on** → copy the **Deployment ID**
+   (a *versioned* deployment, not Head).
+4. Chat API → **Configuration**:
+   - App status **LIVE**, name `T2 Report`, `/report` slash command (id 1),
+     Interactive features on, "Join spaces" on.
+   - **Connection settings → Apps Script → paste the Deployment ID from step 3.**
+   - Visibility: the people/groups who should see it (currently `kjw@spigen.com`).
+5. After any `chatApp.js` change: `clasp push`, make a **new** Add-on deployment,
+   and update the Deployment ID in Connection settings (`clasp push` alone does
+   **not** move the versioned deployment Chat points at). Allow ~1–3 min to
+   propagate, then re-test `/report`.
+
+`test_chatPicker` (editor → Run) logs the card JSON and triggers the OAuth
+consent — run it once after granting any new scope.
 
 ---
 
