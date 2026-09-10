@@ -24,6 +24,8 @@ WHAT THIS DOES (established 2026-09-10, see skill `sc-review-propagate`):
 
   Phase D  On the 1-3점 sheet, set the 인입사유(AI) column for the newly added
            rows to `=dr(<본문col><n>, <대분류col><n>)`.
+           GlxZ8 / Pixel11 / 유지훈P ONLY. SDA / Auto_Acc / Power_Acc / 전략폰
+           skip Phase D (`dr_skip`) — their agents type 인입사유 by hand.
 
 SAFETY: dry-run is the DEFAULT. Nothing is written without `--commit`.
 Run ONE product at a time on the first live run and eyeball the sheet after
@@ -99,8 +101,13 @@ PRODUCTS = {
         "dr_category_header": "대분류",
     },
     "Glx26": {
+        # INACTIVE 2026-09-10: Galaxy S26 is past its monitoring period. Config
+        # kept for reference only — skipped by --all-products; the `GlxS26
+        # finalize` filter view is no longer maintained. Run explicitly with
+        # --product Glx26 only if the user asks.
+        "inactive": True,
         "filter_view": "GlxS26 finalize",         # FV 302123587
-        "dest_id": "1fpv9TEDPGR8D6QRRc0ll-WzF7sOkfxe9UNBCmdBSE9g",  # CONFIRM w/ user (from CLAUDE.md SHEET_CONFIGS)
+        "dest_id": "1fpv9TEDPGR8D6QRRc0ll-WzF7sOkfxe9UNBCmdBSE9g",  # confirmed 2026-09-10 (1-5점 + 1-3점)
         "dest_sheet": "1-5점",
         "dest_review_id_col": "K",
         "paste_review_id": True,
@@ -126,20 +133,20 @@ PRODUCTS = {
         "dr_body_header": "본문",                  # → col G
         "dr_category_header": "대분류",            # → col S
     },
+    # ── SDA / Auto_Acc / Power_Acc / 전략폰 ──────────────────────────────────
+    # NO =dr() (confirmed 2026-09-10): CX agents type the 인입사유 column by hand
+    # on these four. Phase D is skipped — `dr_skip: True`.
     "SDA": {
         "filter_view": "SDA finalize",            # FV 1125062509
         "dest_id": "1sxapIqJgXcJdeqyCf9bAxCNXrVMsVjsZE9QWPwEm0R4",
         "dest_sheet": "1-3점",                     # ONLY 1-3점
         "dest_review_id_col": "J",
         "paste_review_id": False,                  # J is derived from Review Url (I) by a formula
-        "paste_through_col": "I",                  # paste A..I, then skip J, then K.. (Customer Order ID)
-        "paste_after_skip_from_col": "K",
+        "paste_through_col": "I",                  # paste A..I ONLY. J = Review ID (auto from I).
+        # Everything from J onward is agent-typed or arrayformula — never pasted.
         "insert_at_top": False,
         "one_three_sheet": None,
-        "dr_sheet": "1-3점",
-        "dr_col_header_contains": "인입사유",       # header is bare "인입사유" (col L) — CONFIRM dr() applies here
-        "dr_body_header": "Review Content",        # → col G
-        "dr_category_header": "대분류",            # → col S
+        "dr_skip": True,
     },
     "Auto_Acc": {
         "filter_view": "AutoAcc finalize",        # FV 1131952515
@@ -147,14 +154,10 @@ PRODUCTS = {
         "dest_sheet": "1-3점",
         "dest_review_id_col": "J",
         "paste_review_id": False,
-        "paste_through_col": "I",
-        "paste_after_skip_from_col": "K",
+        "paste_through_col": "I",                  # paste A..I ONLY (J onward = auto / agent-typed)
         "insert_at_top": False,
         "one_three_sheet": None,
-        "dr_sheet": "1-3점",
-        "dr_col_header_contains": "인입사유",       # bare "인입사유" (col L) — CONFIRM
-        "dr_body_header": "Review Content",
-        "dr_category_header": None,                # no 대분류 column in Auto_Acc 1-3점 — CONFIRM dr() 2nd arg
+        "dr_skip": True,
     },
     "Power_Acc": {
         "filter_view": "PowerAcc finalize",       # FV 1414549791
@@ -162,14 +165,10 @@ PRODUCTS = {
         "dest_sheet": "1-3점",
         "dest_review_id_col": "J",
         "paste_review_id": False,
-        "paste_through_col": "I",
-        "paste_after_skip_from_col": "K",
+        "paste_through_col": "I",                  # paste A..I ONLY (J onward = auto / agent-typed)
         "insert_at_top": False,
         "one_three_sheet": None,
-        "dr_sheet": "1-3점",
-        "dr_col_header_contains": "인입사유",       # bare "인입사유" (col L) — CONFIRM
-        "dr_body_header": "Review Content",
-        "dr_category_header": None,
+        "dr_skip": True,
     },
     "전략폰": {
         "filter_view": "전략폰 finalize",          # FV 1853891342
@@ -177,14 +176,10 @@ PRODUCTS = {
         "dest_sheet": "1-3점",
         "dest_review_id_col": "J",
         "paste_review_id": False,
-        "paste_through_col": "I",
-        "paste_after_skip_from_col": "K",
+        "paste_through_col": "I",                  # paste A..I ONLY (J onward = auto / agent-typed)
         "insert_at_top": False,
         "one_three_sheet": None,
-        "dr_sheet": "1-3점",
-        "dr_col_header_contains": "인입사유",       # bare "인입사유" (col L) — CONFIRM
-        "dr_body_header": "Review Content",
-        "dr_category_header": None,
+        "dr_skip": True,
     },
 }
 
@@ -391,16 +386,17 @@ def phase_b_c_d_product(svc, product, dry_run=True):
                 block[rid_i] = ""
         payload.append(block)
 
-    print(f"[{product}] will write {len(payload)} rows × {through} cols into "
+    print(f"[{product}] will write {len(payload)} rows × {through} cols (A:{cfg['paste_through_col']}) into "
           f"'{dest_sheet}' ({'insert@row2' if cfg['insert_at_top'] else 'append@bottom'}); "
-          f"paste_review_id={cfg['paste_review_id']}")
-    if cfg.get("paste_after_skip_from_col"):
-        print(f"[{product}] NOTE: cols from {cfg['paste_after_skip_from_col']} onward "
-              f"(Customer Order ID etc.) not yet handled by this script — verify manually")
+          f"paste_review_id={cfg['paste_review_id']}  "
+          f"(everything past col {cfg['paste_through_col']} is auto-formula / agent-typed — never written)")
 
+    dr_note = ("Phase D skipped (agents type 인입사유 by hand)"
+               if cfg.get("dr_skip")
+               else f"set 인입사유(AI) =dr() on '{cfg['dr_sheet']}'")
     if dry_run:
         print(f"[{product}] [dry-run] sample row:", payload[0][:12], "...")
-        print(f"[{product}] [dry-run] would then set 인입사유(AI) =dr() and refresh tem col "
+        print(f"[{product}] [dry-run] would then {dr_note} and refresh tem col "
               f"{idx_to_a1_col(TEM_COL[product])}")
         return
 
@@ -426,7 +422,10 @@ def main():
         print("=== Phase A ===")
         phase_a_append_and_dedupe(svc, args.new_sheet, dry_run=dry)
 
-    prods = list(PRODUCTS) if args.all_products else ([args.product] if args.product else [])
+    if args.all_products:
+        prods = [p for p, c in PRODUCTS.items() if not c.get("inactive")]
+    else:
+        prods = [args.product] if args.product else []
     for p in prods:
         print(f"=== Phase B/C/D: {p} ===")
         phase_b_c_d_product(svc, p, dry_run=dry)
