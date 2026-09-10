@@ -192,28 +192,9 @@ function fetchZendeskViewToKsheet() {
     '8._문의_사항_파악_불가': '8. 문의 사항 파악 불가'
   }[raw] || raw);
 
-  const getPIC = country => {
-    const groupA = ['DE', 'FR', 'IT', 'UK', 'ES'];
-
-    // Base date: Monday, 2025-08-11 00:00 KST
-    const baseDateKST = new Date('2025-08-11T00:00:00+09:00');
-
-    // Current date/time in KST
-    const nowKST = new Date(
-      new Date().toLocaleString("en-US", { timeZone: "Asia/Seoul" })
-    );
-
-    // Weeks since base date
-    const msPerWeek = 7 * 24 * 60 * 60 * 1000;
-    const weekIndex = Math.floor((nowKST - baseDateKST) / msPerWeek);
-
-    // Even week index → LYS, Odd week index → KJW for Group A (switched 2026-06-29)
-    const assignKJWThisWeek = (weekIndex % 2 === 0);
-
-    return groupA.includes(country)
-      ? (assignKJWThisWeek ? 'LYS' : 'KJW')
-      : (assignKJWThisWeek ? 'KJW' : 'LYS');
-  };
+  // LYS left the company (2026-09-10) — all K_시트 ownership now goes to KJW.
+  // (Previously week-alternating LYS/KJW by country group, base Monday 2025-08-11 KST.)
+  const getPIC = () => 'KJW';
 
   // Process rows
   const rawRows = tickets
@@ -247,7 +228,7 @@ function fetchZendeskViewToKsheet() {
   // Final rows: [country, brand, category, count, PIC, device, reason] -> written to C:I
   const finalRows = Array.from(grouped.values()).map(({ fields, count }) => {
     const [country, brand, category, device, reason] = fields;
-    return [country, brand, category, count, getPIC(country), device, reason];
+    return [country, brand, category, count, getPIC(), device, reason];
   });
 
   if (finalRows.length > 0) {

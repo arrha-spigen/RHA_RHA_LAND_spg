@@ -17,14 +17,12 @@ function kSheetToChat() {
   const clip = rows.slice(0, MAX_ROWS);
 
   let totalQty = 0;
-  let lysTotal = 0;
   let kjwTotal = 0;
 
   const dataRows = [];
   for (const r of clip) {
     const c = cleanKSheetDisplayRow_(r);
     totalQty += c.qty;
-    if (c.owner.toUpperCase() === 'LYS') lysTotal += c.qty;
     if (c.owner.toUpperCase() === 'KJW') kjwTotal += c.qty;
     dataRows.push(c.display);
   }
@@ -35,8 +33,8 @@ function kSheetToChat() {
   // If G3 is present, prefer it; otherwise use computed sum
   const headlineTotal = (manualTotal !== '' && manualTotal !== null) ? Number(manualTotal) : totalQty;
 
-  // Totals line (All, LYS, KJW)
-  const totalsLine = `All: ${headlineTotal} | LYS: ${lysTotal} | KJW: ${kjwTotal}`;
+  // Totals line (All, KJW) — LYS retired 2026-09-10, KJW owns all pending tickets
+  const totalsLine = `All: ${headlineTotal} | KJW: ${kjwTotal}`;
 
   const payload = {
     text: titleText || 'K_시트 Pending Ticket Snapshot',

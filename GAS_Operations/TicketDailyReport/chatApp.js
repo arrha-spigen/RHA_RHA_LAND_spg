@@ -112,18 +112,18 @@ function buildPickerMessage_(selectedKey) {
 
   const items = h.order.map(k => ({ text: h.labelByKey[k] || k, value: k, selected: k === key }));
 
-  let totalQty = 0, lysTotal = 0, kjwTotal = 0;
+  let totalQty = 0, kjwTotal = 0;
   const raw = (h.rowsByKey[key] || []).slice(0, CHAT_CARD_MAX_ROWS);
   const dataRows = raw.map(r => {
     const c = cleanKSheetDisplayRow_(r);
     totalQty += c.qty;
-    if (c.owner.toUpperCase() === 'LYS') lysTotal += c.qty;
     if (c.owner.toUpperCase() === 'KJW') kjwTotal += c.qty;
     return c.display;
   });
 
   const tableText = buildMonoTable_(KSHEET_CARD_HEADER, dataRows);
-  const totalsLine = 'All: ' + totalQty + ' | LYS: ' + lysTotal + ' | KJW: ' + kjwTotal;
+  // LYS retired 2026-09-10 — KJW owns all pending tickets
+  const totalsLine = 'All: ' + totalQty + ' | KJW: ' + kjwTotal;
   const truncated = (h.rowsByKey[key] || []).length > CHAT_CARD_MAX_ROWS;
 
   return {

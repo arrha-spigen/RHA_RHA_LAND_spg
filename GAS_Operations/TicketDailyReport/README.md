@@ -79,7 +79,7 @@ consent — run it once after granting any new scope.
 | D | Brand | field `5495572594201` |
 | E | Category | field `900006613446` |
 | F | Qty | group count |
-| G | Owner | week-alternating PIC (LYS / KJW) |
+| G | Owner | PIC — always `KJW` (LYS left the company 2026-09-10; was week-alternating LYS/KJW by country group) |
 | H | Device | field `360022185671` (raw value → agent-UI name) |
 | I | 1차 Defect Reason or Inquiries | field `360022182831` — shown on the Chat card as **인입사유** |
 
