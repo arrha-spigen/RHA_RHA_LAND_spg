@@ -30,14 +30,14 @@ same height.
 ## Data source
 
 Reads the `1-3점` tab (`A:S`) of each spreadsheet via the **Sheets API v4**, authorised
-with the local gws_shim OAuth token at `~/.config/gws_shim/token.json` (dukso123
-account, `drive` scope; the script refreshes the token and writes it back).
+with the local gws_shim OAuth token at `~/.config/gws_shim/token.json` (`drive` scope;
+the script refreshes the token and writes it back).
 
-> ⚠️ **2026-09-08:** this token's GCP project was deleted — Sheets calls now 403
-> `CONSUMER_INVALID`. The standalone script can't fetch until a new OAuth client is
-> set up. Until then, use the Claude Code skill path (`pixel11/glxz8-badreview-chat-report`
-> + `badreview-chat-broadcast`), which reads the sheet through the browser `gviz`
-> endpoint and doesn't need this token, then `report.py --data ... --webhook ...`.
+> 2026-09-08: the old gws_shim GCP project was deleted (Sheets 403 `CONSUMER_INVALID`).
+> 2026-09-09: rebuilt on GCP project `gcxbot` (#64325928759), token now authorised as
+> `kjw@spigen.com`. Verified working 2026-09-10. If it 403s again, the fallback is the
+> Claude Code skill path (`pixel11/glxz8-badreview-chat-report` + `badreview-chat-broadcast`),
+> which reads the sheet through the browser `gviz` endpoint, then `report.py --data ... --webhook ...`.
 
 | Product | Spreadsheet ID |
 |---------|----------------|
