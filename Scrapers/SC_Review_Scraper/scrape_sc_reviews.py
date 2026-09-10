@@ -1338,7 +1338,10 @@ async def main():
         raise ValueError(f"Unknown domain(s): {unknown}. Choose from: EU | {list(_DOMAINS)}")
 
     KST = timezone(timedelta(hours=9))
-    run_date = datetime.now(KST).strftime("%y%m%d")
+    # SC_SCRAPER_RUN_DATE (yymmdd) overrides the KST "today" used for the
+    # SC_<date> sheet name — for test runs / backfills. Unset in normal use.
+    run_date = os.environ.get("SC_SCRAPER_RUN_DATE", "").strip() \
+        or datetime.now(KST).strftime("%y%m%d")
 
     prof = _PROFILES[DETECTION_AVOIDANCE]
 
