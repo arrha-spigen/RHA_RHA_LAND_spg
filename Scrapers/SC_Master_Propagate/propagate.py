@@ -17,10 +17,12 @@ WHAT THIS DOES (established 2026-09-10, see skill `sc-review-propagate`):
            destination sheet, and paste the survivors into the product's
            monitoring sheet (1-5점 where the book has both 1-5/1-3, else 1-3점).
 
-  Phase C  Refresh the `tem` sheet column for that product with every Review ID
-           now present in the destination sheet's Review-ID column, so the
-           `<Product> Tab` helper formula on `SC` flips those rows to "Updated"
-           and they are not re-propagated next run.
+  Phase C  Rewrite `tem` sheet cols F-K (유지훈P, Pixel 10a, Glx26, iPh17e,
+           GlxZ8, Pixel11) from each product's `1-5점` Review-ID col K (유지훈P
+           uses its `1-3점` col K — no 1-5점). This makes the `<Product> Tab`
+           helper formula on `SC` read true. Cols A-E (SDA, iPh17, Auto Acc,
+           전략폰, Power_Acc) are `IMPORTRANGE` formulas and are NEVER touched.
+           Run it every time (`--refresh-tem`), not only when rows were added.
 
   Phase D  On the 1-3점 sheet, set the 인입사유(AI) column for the newly added
            rows to `=dr(<본문col><n>, <대분류col><n>)`.
@@ -62,10 +64,23 @@ SC_REVIEW_ID_IDX = 10  # 0-based col K within the A..N block
 # tem sheet columns (1-based), header row 1, Review IDs from row 2:
 #  A SDA | B iPh17 | C Auto Acc | D 전략폰 | E Power_Acc | F 유지훈P |
 #  G Pixel 10a | H Glx26 | I iPh17e | J GlxZ8 | K Pixel11
-TEM_COL = {
-    "SDA": 1, "Auto_Acc": 3, "전략폰": 4, "Power_Acc": 5,
-    "유지훈P": 6, "Glx26": 8, "GlxZ8": 10, "Pixel11": 11,
+#
+# Cols A-E are `={"hdr"; IMPORTRANGE(<destbook>, "…J2:J")}` formulas that
+# self-update — NEVER write to A-E. (IMPORTRANGE is only used for the small
+# books; the others have too many rows and would hit mass-fetch errors.)
+#
+# Cols F-K are plain value lists that Phase C must rewrite every run from the
+# product's `1-5점` Review-ID column K (유지훈P has no 1-5점 → its `1-3점` col K).
+# Verified 2026-09-10: all six sources use Review-ID col K.
+TEM_REFRESH = {  # tem col letter -> (source book id, source sheet, review-id col)
+    "F": ("1dlY6q8trbVMVJAjw_OUoxp1cguA2oTB8WlPhHR01xIw", "1-3점", "K"),  # 유지훈P
+    "G": ("1BpeGq5gIr4tNsPZmnHr19NNY6pQ6sb2_H-v3V9-It4E", "1-5점", "K"),  # Pixel 10a
+    "H": ("1fpv9TEDPGR8D6QRRc0ll-WzF7sOkfxe9UNBCmdBSE9g", "1-5점", "K"),  # Glx26 (inactive product, tem still kept fresh)
+    "I": ("16xRJHH7Ynii4erNOn_905ST4CZs6OLpOYTof4uqsGsQ", "1-5점", "K"),  # iPh17e
+    "J": ("19OhswglYMx_dxSFFDtWI1WYPWq2jONJn6RK84KITwy4", "1-5점", "K"),  # GlxZ8
+    "K": ("12I6z_FFmDIMHa0rLanltKKFp7kI_yREQj3adkMamPgI", "1-5점", "K"),  # Pixel11
 }
+TEM_CLEAR_TO_ROW = 6000  # nuke any residue below the refreshed data
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Per-product config. Verified 2026-09-10 against live sheet headers/filter views
@@ -396,23 +411,57 @@ def phase_b_c_d_product(svc, product, dry_run=True):
                else f"set 인입사유(AI) =dr() on '{cfg['dr_sheet']}'")
     if dry_run:
         print(f"[{product}] [dry-run] sample row:", payload[0][:12], "...")
-        print(f"[{product}] [dry-run] would then {dr_note} and refresh tem col "
-              f"{idx_to_a1_col(TEM_COL[product])}")
+        print(f"[{product}] [dry-run] would then {dr_note}. "
+              "(Phase C tem refresh is a separate global step: --refresh-tem)")
         return
 
     raise SystemExit(
         f"[{product}] --commit path intentionally not implemented yet. "
         "First live run must be done step-by-step under supervision "
-        "(insert-at-top row math, dr() column resolution, and tem refresh each "
-        "carry production risk). Use this dry-run output as the worklist."
+        "(insert-at-top row math and dr() column resolution carry production "
+        "risk). Use this dry-run output as the worklist."
     )
+
+
+def phase_c_refresh_tem(svc, dry_run=True):
+    """Rewrite tem cols F-K from each product's 1-5점 (유지훈P: 1-3점) Review-ID
+    col K. Cols A-E are IMPORTRANGE — never touched. Safe to run every time."""
+    cur = svc.spreadsheets().values().get(
+        spreadsheetId=SRC, range=f"'{TEM_SHEET}'!A1:K"
+    ).execute().get("values", [])
+    cur_len = {}
+    for ci in range(11):
+        cur_len[idx_to_a1_col(ci + 1)] = sum(
+            1 for row in cur[1:] if ci < len(row) and str(row[ci]).strip()
+        )
+
+    data = []
+    for col, (sid, sheet, rid_col) in TEM_REFRESH.items():
+        vals = svc.spreadsheets().values().get(
+            spreadsheetId=sid, range=f"'{sheet}'!{rid_col}2:{rid_col}"
+        ).execute().get("values", [])
+        ids = [v[0].strip() for v in vals if v and str(v[0]).strip() and v[0].strip() != "Review ID"]
+        old_n = cur_len.get(col, 0)
+        print(f"  tem!{col} ← {sheet}!{rid_col} : {old_n} → {len(ids)} ids")
+        body = [[x] for x in ids] + [[""]] * max(0, TEM_CLEAR_TO_ROW - 1 - len(ids))
+        data.append({"range": f"{TEM_SHEET}!{col}2:{col}{TEM_CLEAR_TO_ROW}", "values": body})
+
+    if dry_run:
+        print("  [dry-run] would rewrite tem cols F-K (A-E IMPORTRANGE untouched)")
+        return
+    svc.spreadsheets().values().batchUpdate(
+        spreadsheetId=SRC,
+        body={"valueInputOption": "RAW", "data": data},
+    ).execute()
+    print("  ✓ tem cols F-K refreshed")
 
 
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--new-sheet", help="SC_yymmdd or CaspiLM_yymmdd tab to funnel into SC (Phase A)")
     ap.add_argument("--product", choices=list(PRODUCTS), help="run Phase B/C/D for one product")
-    ap.add_argument("--all-products", action="store_true", help="Phase B/C/D for all 8 (dry-run only)")
+    ap.add_argument("--all-products", action="store_true", help="Phase B/D for all active products (dry-run only)")
+    ap.add_argument("--refresh-tem", action="store_true", help="Phase C: rewrite tem cols F-K from the 1-5점/1-3점 Review-ID cols")
     ap.add_argument("--commit", action="store_true", help="actually write (default: dry-run)")
     args = ap.parse_args()
     dry = not args.commit
@@ -422,6 +471,10 @@ def main():
         print("=== Phase A ===")
         phase_a_append_and_dedupe(svc, args.new_sheet, dry_run=dry)
 
+    if args.refresh_tem:
+        print("=== Phase C: tem refresh ===")
+        phase_c_refresh_tem(svc, dry_run=dry)
+
     if args.all_products:
         prods = [p for p, c in PRODUCTS.items() if not c.get("inactive")]
     else:
@@ -430,7 +483,7 @@ def main():
         print(f"=== Phase B/C/D: {p} ===")
         phase_b_c_d_product(svc, p, dry_run=dry)
 
-    if not args.new_sheet and not prods:
+    if not args.new_sheet and not prods and not args.refresh_tem:
         ap.print_help()
 
 
