@@ -227,7 +227,12 @@ def get_service():
     creds.refresh(Request())
     with open(TOKEN, "w") as f:
         f.write(creds.to_json())
-    return build("sheets", "v4", credentials=creds)
+    # googleapiclient's default per-request timeout is 60s; the master SC sheet
+    # is ~14k rows and full-width reads have hit "read operation timed out".
+    import httplib2
+    from google_auth_httplib2 import AuthorizedHttp
+    http = AuthorizedHttp(creds, http=httplib2.Http(timeout=300))
+    return build("sheets", "v4", http=http)
 
 
 def load_filter_views(svc):
@@ -313,14 +318,12 @@ def phase_a_append_and_dedupe(svc, new_sheet, dry_run=True):
     body = src_vals[1:]  # drop header
     body = [r + [""] * (SC_DATA_COLS - len(r)) for r in body if any(c.strip() for c in r)]
 
-    sc_vals = svc.spreadsheets().values().get(
-        spreadsheetId=SRC, range=f"'{SC_SHEET}'!A:N"
+    # Only the Review-ID column is needed for dedup — reading the full A:N
+    # block (14 cols incl. review text) was ~14x heavier and timed out.
+    sc_body = svc.spreadsheets().values().get(
+        spreadsheetId=SRC, range=f"'{SC_SHEET}'!K2:K"
     ).execute().get("values", [])
-    sc_body = sc_vals[1:]
-    seen = set()
-    for r in sc_body:
-        if len(r) > SC_REVIEW_ID_IDX:
-            seen.add(r[SC_REVIEW_ID_IDX])
+    seen = set(r[0] for r in sc_body if r and r[0])
 
     to_add = []
     dup_in_batch = 0
