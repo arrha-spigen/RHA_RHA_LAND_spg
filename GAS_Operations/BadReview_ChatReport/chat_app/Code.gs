@@ -1,21 +1,20 @@
 /**
- * BadReview — Google Chat app (proof of concept).
+ * BadReview — Google Chat app (interactive twin of ../badreview_chat_report.py).
  *
- * Runs ALONGSIDE the webhook broadcast (../badreview_chat_report.py); it does not
- * replace it. Difference: this one is interactive — the user picks a date (and a
- * product) from widgets in the card, and the app re-renders the Pixel 11 / Galaxy
- * Z8 배드리뷰 (1~3점) report for the rows whose `Update 날짜` matches that date.
+ * One deployment = one product (see Config.gs → APP_PRODUCT):
+ *   chat_app/      김지우 Kevin 글로벌CX전략팀 → Pixel 11 Series
+ *   chat_app_jane/ 나아름 Jane 글로벌CX전략팀  → Galaxy Z8 Series
  *
- * Card layout is the same as the webhook card:
- *   header  ✔️ M/D(요일) <product> 배드리뷰 (1~3점) (총 N건)  + product thumbnail
- *   "Top 5 인입사유(누적)"  2 cols by 대분류 (red 보호필름 / blue 케이스),
- *                          5 decoratedText rows each (n위 / 이유 / c건 · p%)
- *   "M/D(요일) 최다 인입사유"  top 인입사유(tag) on that date + fixed 5-line list
- *   [배드리뷰] button → the 1-3점 sheet
- * plus a control card on top: a DATE_ONLY picker + a product DROPDOWN + [조회].
+ * Control card:  시작일 / 종료일 (DATE_ONLY; default = earliest `Update 날짜` on the
+ *                '1-3점' tab → today), 국가 dropdown, 기종 dropdown, [조회].
+ * Report card:   ✔️ M/D(요일)~M/D(요일) <product> 배드리뷰 (1~3점) (총 N건)
+ *                "Top 5 인입사유" 2 cols by 대분류 (red 보호필름 / blue 케이스)
+ *                "기간 내 최다 인입사유" + fixed 5-line list, [배드리뷰] link button.
+ * EVERY number is scoped to the picked range + 국가/기종 filters (unlike the webhook
+ * card, whose Top 5 is cumulative).
  *
- * N (총 N건) = rows on the '1-3점' tab whose `Update 날짜` == the picked date.
- * The two Top-5 columns count the whole sheet (cumulative), same as the webhook.
+ * Runs as a Google Workspace add-on (Chat API config checkbox, irreversible per GCP
+ * project) → replies must be wrapped in the add-on action envelope; see chatCreate_.
  */
 
 var PRODUCTS = {
@@ -40,22 +39,19 @@ var PRODUCTS = {
 };
 
 var GID_13 = 970309432;                                   // '1-3점' tab
+var COL = { date: 'Update 날짜', dateAlt: 'Exported Date', tag: '인입사유(tag)',
+            cat: '대분류', country: '국가(tag)', device: '기종명' };
 var CAT_COLOR = { '휴대폰보호필름': '#EA4335', '휴대폰케이스': '#4285F4' };
 // 인입사유(tag) values dropped before any counting (user rule 2026-09-08:
 // exclude 긍정 리뷰 from every stat and every card, permanently). Mirror of
 // EXCLUDED_TAGS in ../badreview_chat_report.py — keep in sync.
 var EXCLUDED_TAGS = ['긍정 리뷰'];
+var ALL = '__all__';                                      // dropdown "전체"
 var WD = ['일', '월', '화', '수', '목', '금', '토'];      // JS getDay(): 0 = Sun
 var TZ = 'Asia/Seoul';
 
 /* ===================== Chat event handlers ===================== */
 
-/*
- * This app is registered as a Google Workspace add-on (the Chat API config's
- * "Build this Chat app as a Workspace add-on" is on — irreversible per project), so
- * every reply must be wrapped in the add-on action envelope instead of a bare Chat
- * message. See https://developers.google.com/workspace/add-ons/chat/send-messages
- */
 function chatCreate_(message) {
   return { hostAppDataAction: { chatDataAction: { createMessageAction: { message: message } } } };
 }
@@ -64,54 +60,62 @@ function chatUpdate_(message) {
 }
 
 function onMessage(event) {
-  var d = parseDateFromText_((event.message && event.message.text) || '') || todayKst_();
-  return chatCreate_({ cardsV2: buildCards_(d, 'both') });
+  var q = defaultQuery_();
+  var range = parseRangeFromText_(messageText_(event));
+  if (range) { q.start = range[0]; q.end = range[1]; }
+  return chatCreate_({ cardsV2: buildCards_(q) });
+}
+
+/** Message text under either event shape (classic: event.message; add-on: event.chat.messagePayload). */
+function messageText_(event) {
+  var m = (event && event.message) ||
+          (event && event.chat && event.chat.messagePayload && event.chat.messagePayload.message) || {};
+  return m.argumentText || m.text || '';
 }
 
 function onAddToSpace(event) {
   return chatCreate_({
-    text: 'BadReview 리포트 앱입니다. 날짜를 골라 배드리뷰(1~3점) 리포트를 조회하세요.',
-    cardsV2: buildCards_(todayKst_(), 'both')
+    text: PRODUCTS[APP_PRODUCT].name + ' 배드리뷰(1~3점) 리포트 앱입니다. 기간·국가·기종을 고르고 [조회]하세요.',
+    cardsV2: buildCards_(defaultQuery_())
   });
 }
 
 function onRemoveFromSpace(event) {}
 
-/**
- * Classic (non-add-on) Chat apps deliver CARD_CLICKED here instead of calling the
- * button's `onClick.action.function` directly. Route by function name so the
- * card works under either dispatch model.
- */
+/** Classic-mode shim; add-on mode calls refreshReport directly. */
 function onCardClick(event) {
   var fn = (event.common && event.common.invokedFunction) ||
            (event.action && event.action.actionMethodName) || '';
   if (fn === 'refreshReport') return refreshReport(event);
-  return chatUpdate_({ cardsV2: buildCards_(todayKst_(), 'both') });
+  return chatUpdate_({ cardsV2: buildCards_(defaultQuery_()) });
 }
 
-/** The [조회] button (onClick.action.function = "refreshReport") lands here. */
+/** [조회] → onClick.action.function = "refreshReport". */
 function refreshReport(event) {
   var inputs = formInputs_(event);
-  var ms = extractDateMs_(inputs);
-  var product = extractString_(inputs, 'product') || 'both';
-  var d;
-  if (ms != null) {
-    var picked = new Date(Number(ms));                    // DATE_ONLY → UTC-midnight ms
-    d = new Date(picked.getUTCFullYear(), picked.getUTCMonth(), picked.getUTCDate());
-  } else {
-    d = todayKst_();
-  }
-  return chatUpdate_({ cardsV2: buildCards_(d, product) });
+  var q = defaultQuery_();
+  var s = extractDateMs_(inputs, 'startDate'), e = extractDateMs_(inputs, 'endDate');
+  if (s != null) q.start = utcMsToLocalDate_(s);
+  if (e != null) q.end = utcMsToLocalDate_(e);
+  if (q.start > q.end) { var t = q.start; q.start = q.end; q.end = t; }
+  q.country = extractString_(inputs, 'country') || ALL;
+  q.device  = extractString_(inputs, 'device')  || ALL;
+  return chatUpdate_({ cardsV2: buildCards_(q) });
+}
+
+/* ===================== Query defaults ===================== */
+
+/** { start: earliest Update 날짜 on the sheet, end: today (KST), country/device: 전체 } */
+function defaultQuery_() {
+  var sheet = loadSheet_();
+  return { start: sheet.minDate || todayKst_(), end: todayKst_(), country: ALL, device: ALL };
 }
 
 /* ===================== Form input parsing ===================== */
 
 /**
- * Chat interaction events carry widget values as
- *   event.common.formInputs[name][""]        → { dateInput: {msSinceEpoch}, stringInputs: {value: [...]} }
- * while the Workspace add-on event object uses
- *   event.commonEventObject.formInputs[name] → same inner shape, no "" key.
- * Normalise to the inner object so the extractors work under either model.
+ * Chat interaction events: event.common.formInputs[name][""] → {dateInput|stringInputs}
+ * Workspace add-on event object: event.commonEventObject.formInputs[name] → same inner shape.
  */
 function formInputs_(event) {
   return (event.common && event.common.formInputs) ||
@@ -125,16 +129,14 @@ function inputField_(inputs, name) {
   return v[''] || v;
 }
 
-/** DATE_ONLY picker → ms since epoch (UTC midnight of the picked day), or null. */
-function extractDateMs_(inputs) {
-  var f = inputField_(inputs, 'reportDate');
+function extractDateMs_(inputs, name) {
+  var f = inputField_(inputs, name);
   if (!f) return null;
   var di = f.dateInput || f.dateTimeInput;
   if (di && di.msSinceEpoch != null && di.msSinceEpoch !== '') return Number(di.msSinceEpoch);
   return null;
 }
 
-/** DROPDOWN / text → first string value, or ''. */
 function extractString_(inputs, name) {
   var f = inputField_(inputs, name);
   if (!f) return '';
@@ -143,35 +145,53 @@ function extractString_(inputs, name) {
   return '';
 }
 
-/* ===================== Card building ===================== */
-
-function buildCards_(d, product) {
-  var keys = product === 'both' ? ['pixel11', 'glxz8'] : [product];
-  var cards = [controlCard_(d, product)];
-  keys.forEach(function (k) { cards.push(reportCard_(k, d)); });
-  return cards;
+/** DATE_ONLY gives UTC midnight of the picked day; keep that calendar day. */
+function utcMsToLocalDate_(ms) {
+  var d = new Date(Number(ms));
+  return new Date(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate());
 }
 
-function controlCard_(d, product) {
-  var ms = Date.UTC(d.getFullYear(), d.getMonth(), d.getDate());
+/* ===================== Card building ===================== */
+
+function buildCards_(q) {
+  var sheet = loadSheet_();
+  return [controlCard_(q, sheet), reportCard_(q, sheet)];
+}
+
+function controlCard_(q, sheet) {
+  var p = PRODUCTS[APP_PRODUCT];
+  var toMs = function (d) { return String(Date.UTC(d.getFullYear(), d.getMonth(), d.getDate())); };
+  var items = function (values, selected, allLabel) {
+    var out = [{ text: allLabel, value: ALL, selected: selected === ALL }];
+    values.forEach(function (v) { out.push({ text: v, value: v, selected: selected === v }); });
+    return out;
+  };
   return {
     cardId: 'badreview-control',
     card: {
-      header: { title: 'BadReview 리포트 조회', subtitle: '날짜·제품을 고르고 [조회]' },
+      header: {
+        title: p.name + ' 배드리뷰 리포트 조회',
+        subtitle: '기본 기간 ' + fmtYmd_(sheet.minDate || todayKst_()) + ' ~ ' + fmtYmd_(todayKst_()) +
+                  ' · 기간·국가·기종을 고르고 [조회]'
+      },
       sections: [{
         widgets: [
-          { dateTimePicker: {
-              name: 'reportDate', label: '조회 날짜 (Update 날짜)',
-              type: 'DATE_ONLY', valueMsEpoch: String(ms)
-          }},
-          { selectionInput: {
-              name: 'product', label: '제품', type: 'DROPDOWN',
-              items: [
-                { text: '둘 다', value: 'both', selected: product === 'both' },
-                { text: 'Pixel 11 Series', value: 'pixel11', selected: product === 'pixel11' },
-                { text: 'Galaxy Z8 Series', value: 'glxz8', selected: product === 'glxz8' }
-              ]
-          }},
+          { columns: { columnItems: [
+            { horizontalSizeStyle: 'FILL_AVAILABLE_SPACE', widgets: [
+              { dateTimePicker: { name: 'startDate', label: '시작일 (Update 날짜)',
+                                  type: 'DATE_ONLY', valueMsEpoch: toMs(q.start) } } ] },
+            { horizontalSizeStyle: 'FILL_AVAILABLE_SPACE', widgets: [
+              { dateTimePicker: { name: 'endDate', label: '종료일 (Update 날짜)',
+                                  type: 'DATE_ONLY', valueMsEpoch: toMs(q.end) } } ] }
+          ]}},
+          { columns: { columnItems: [
+            { horizontalSizeStyle: 'FILL_AVAILABLE_SPACE', widgets: [
+              { selectionInput: { name: 'country', label: '국가', type: 'DROPDOWN',
+                                  items: items(sheet.countries, q.country, '전체 국가') } } ] },
+            { horizontalSizeStyle: 'FILL_AVAILABLE_SPACE', widgets: [
+              { selectionInput: { name: 'device', label: '기종', type: 'DROPDOWN',
+                                  items: items(sheet.devices, q.device, '전체 기종') } } ] }
+          ]}},
           { buttonList: { buttons: [
               { text: '조회', type: 'FILLED', onClick: { action: { function: 'refreshReport' } } }
           ]}}
@@ -181,15 +201,18 @@ function controlCard_(d, product) {
   };
 }
 
-function reportCard_(key, d) {
-  var p = PRODUCTS[key];
-  var data = crunch_(p.sheetId, d);
-  var md = fmtMd_(d);
+function reportCard_(q, sheet) {
+  var p = PRODUCTS[APP_PRODUCT];
+  var data = crunch_(sheet, q);
+  var period = fmtMd_(q.start) + (sameDay_(q.start, q.end) ? '' : '~' + fmtMd_(q.end));
+  var filt = [];
+  if (q.country !== ALL) filt.push(q.country);
+  if (q.device !== ALL) filt.push(q.device);
   var link = 'https://docs.google.com/spreadsheets/d/' + p.sheetId +
              '/edit?gid=' + GID_13 + '#gid=' + GID_13;
 
   var top5Section = {
-    header: 'Top 5 인입사유(누적)',
+    header: 'Top 5 인입사유 (' + period + (filt.length ? ' · ' + filt.join(' · ') : '') + ')',
     widgets: [{ columns: { columnItems: [
       catColumn_('휴대폰보호필름', data.film),
       catColumn_('휴대폰케이스', data.box)
@@ -217,7 +240,7 @@ function reportCard_(key, d) {
     dayWidgets = [
       { decoratedText: {
           topLabel: '인입사유(tag) 기준',
-          text: '해당 날짜 업로드된 배드리뷰 없음',
+          text: '조건에 맞는 배드리뷰 없음',
           startIcon: { knownIcon: 'STAR' }
       }},
       { textParagraph: { text: pad_([], 5) } }
@@ -231,12 +254,12 @@ function reportCard_(key, d) {
     cardId: p.cardId,
     card: {
       header: {
-        title: '✔️ ' + md + ' ' + p.name + ' 배드리뷰 (1~3점) (총 ' + data.count + '건)',
-        subtitle: p.subtitle,
+        title: '✔️ ' + period + ' ' + p.name + ' 배드리뷰 (1~3점) (총 ' + data.count + '건)',
+        subtitle: p.subtitle + (filt.length ? ' · ' + filt.join(' · ') : ''),
         imageUrl: p.img,
         imageType: 'SQUARE'
       },
-      sections: [ top5Section, { header: md + ' 최다 인입사유', widgets: dayWidgets } ]
+      sections: [ top5Section, { header: period + ' 최다 인입사유', widgets: dayWidgets } ]
     }
   };
 }
@@ -265,25 +288,57 @@ function catColumn_(label, blk) {
   };
 }
 
-/* ===================== Sheet crunching ===================== */
+/* ===================== Sheet loading & crunching ===================== */
 
-function crunch_(sheetId, target) {
-  var vals = SpreadsheetApp.openById(sheetId).getSheetByName('1-3점').getDataRange().getValues();
+var SHEET_CACHE_ = null;   // per-execution memo (one Sheets read per interaction)
+
+/**
+ * Reads the product's '1-3점' tab once and normalises the rows:
+ *   rows: [{date: Date|null, tag, cat, country, device}] (excluded tags dropped)
+ *   minDate: earliest Update 날짜; countries / devices: sorted distinct values.
+ */
+function loadSheet_() {
+  if (SHEET_CACHE_) return SHEET_CACHE_;
+  var p = PRODUCTS[APP_PRODUCT];
+  var vals = SpreadsheetApp.openById(p.sheetId).getSheetByName('1-3점').getDataRange().getValues();
   var H = vals[0];
-  var iU = H.indexOf('Update 날짜'); if (iU < 0) iU = H.indexOf('Exported Date');
-  var iT = H.indexOf('인입사유(tag)');
-  var iC = H.indexOf('대분류');
+  var iU = H.indexOf(COL.date); if (iU < 0) iU = H.indexOf(COL.dateAlt);
+  var iT = H.indexOf(COL.tag), iC = H.indexOf(COL.cat);
+  var iN = H.indexOf(COL.country), iD = H.indexOf(COL.device);
 
-  var count = 0, tally = {};
-  var cat = { '휴대폰보호필름': {}, '휴대폰케이스': {} };
+  var rows = [], minDate = null, countries = {}, devices = {};
   for (var r = 1; r < vals.length; r++) {
     var row = vals[r];
     var tag = String(row[iT] || '').trim() || '(빈칸)';
     if (EXCLUDED_TAGS.indexOf(tag) !== -1) continue;
-    var cc = String(row[iC] || '').trim();
-    if (cat[cc]) cat[cc][tag] = (cat[cc][tag] || 0) + 1;
-    if (matchesDate_(row[iU], target)) { count++; tally[tag] = (tally[tag] || 0) + 1; }
+    var d = toDate_(row[iU]);
+    var country = iN >= 0 ? String(row[iN] || '').trim() : '';
+    var device  = iD >= 0 ? String(row[iD] || '').trim() : '';
+    if (country) countries[country] = (countries[country] || 0) + 1;
+    if (device)  devices[device]   = (devices[device]   || 0) + 1;
+    if (d && (!minDate || d < minDate)) minDate = d;
+    rows.push({ date: d, tag: tag, cat: String(row[iC] || '').trim(), country: country, device: device });
   }
+  var byCount = function (o) { return Object.keys(o).sort(function (a, b) { return o[b] - o[a]; }); };
+  SHEET_CACHE_ = { rows: rows, minDate: minDate, countries: byCount(countries), devices: byCount(devices) };
+  return SHEET_CACHE_;
+}
+
+/** Counts within [q.start, q.end] (inclusive, calendar days) and the 국가/기종 filters. */
+function crunch_(sheet, q) {
+  var lo = dayKey_(q.start), hi = dayKey_(q.end);
+  var count = 0, tally = {};
+  var cat = { '휴대폰보호필름': {}, '휴대폰케이스': {} };
+  sheet.rows.forEach(function (x) {
+    if (!x.date) return;
+    var k = dayKey_(x.date);
+    if (k < lo || k > hi) return;
+    if (q.country !== ALL && x.country !== q.country) return;
+    if (q.device  !== ALL && x.device  !== q.device)  return;
+    count++;
+    tally[x.tag] = (tally[x.tag] || 0) + 1;
+    if (cat[x.cat]) cat[x.cat][x.tag] = (cat[x.cat][x.tag] || 0) + 1;
+  });
   return {
     count: count,
     tags: sortDesc_(tally),
@@ -292,17 +347,17 @@ function crunch_(sheetId, target) {
   };
 }
 
-function matchesDate_(cell, target) {
+/** Sheet cell (Date object or "2026. 8. 19"-style text) → local Date at midnight, or null. */
+function toDate_(cell) {
   if (Object.prototype.toString.call(cell) === '[object Date]') {
-    return cell.getFullYear() === target.getFullYear() &&
-           cell.getMonth() === target.getMonth() &&
-           cell.getDate() === target.getDate();
+    return new Date(cell.getFullYear(), cell.getMonth(), cell.getDate());
   }
   var m = String(cell || '').match(/(\d{4})\D+(\d{1,2})\D+(\d{1,2})/);
-  return !!m && Number(m[1]) === target.getFullYear() &&
-         Number(m[2]) === target.getMonth() + 1 &&
-         Number(m[3]) === target.getDate();
+  return m ? new Date(Number(m[1]), Number(m[2]) - 1, Number(m[3])) : null;
 }
+
+function dayKey_(d) { return d.getFullYear() * 10000 + (d.getMonth() + 1) * 100 + d.getDate(); }
+function sameDay_(a, b) { return dayKey_(a) === dayKey_(b); }
 
 function block_(obj) {
   var rows = sortDesc_(obj);
@@ -326,17 +381,30 @@ function fmtMd_(d) {
   return (d.getMonth() + 1) + '/' + d.getDate() + '(' + WD[d.getDay()] + ')';
 }
 
+function fmtYmd_(d) {
+  return d.getFullYear() + '. ' + (d.getMonth() + 1) + '. ' + d.getDate();
+}
+
 function pad_(lines, n) {
   var out = lines.slice(0, n);
   while (out.length < n) out.push('&nbsp;');
   return out.join('<br>');
 }
 
-/** "9/5" or "2026-09-05" in the message text → a Date (this year if year omitted). */
-function parseDateFromText_(text) {
-  var m = String(text).match(/(\d{4})\D+(\d{1,2})\D+(\d{1,2})/);
-  if (m) return new Date(Number(m[1]), Number(m[2]) - 1, Number(m[3]));
-  m = String(text).match(/\b(\d{1,2})\s*[\/.]\s*(\d{1,2})\b/);
-  if (m) return new Date(todayKst_().getFullYear(), Number(m[1]) - 1, Number(m[2]));
-  return null;
+/**
+ * Message text → [start, end] or null.
+ *   "9/1~9/11", "9/1 - 9/11", "2026-09-01~2026-09-11" → that range
+ *   "9/11"                                            → single day
+ */
+function parseRangeFromText_(text) {
+  var dates = [];
+  var re = /(\d{4})\D(\d{1,2})\D(\d{1,2})|(\d{1,2})\s*[\/.]\s*(\d{1,2})/g, m;
+  var y = todayKst_().getFullYear();
+  while ((m = re.exec(String(text))) && dates.length < 2) {
+    dates.push(m[1] ? new Date(Number(m[1]), Number(m[2]) - 1, Number(m[3]))
+                    : new Date(y, Number(m[4]) - 1, Number(m[5])));
+  }
+  if (!dates.length) return null;
+  if (dates.length === 1) return [dates[0], dates[0]];
+  return dates[0] <= dates[1] ? [dates[0], dates[1]] : [dates[1], dates[0]];
 }
