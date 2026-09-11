@@ -93,14 +93,33 @@ function onCardClick(event) {
 /** [조회] → onClick.action.function = "refreshReport". */
 function refreshReport(event) {
   var inputs = formInputs_(event);
+  // The pickers render empty after every re-render (valueMsEpoch is ignored in add-on
+  // mode), so the card's current query travels in the button's action.parameters and is
+  // the fallback whenever a picker was left blank — re-pressing [조회] keeps the range.
+  var prev = actionParams_(event);
   var q = defaultQuery_();
+  if (prev.start) q.start = toDate_(prev.start) || q.start;
+  if (prev.end)   q.end   = toDate_(prev.end)   || q.end;
   var s = extractDateMs_(inputs, 'startDate'), e = extractDateMs_(inputs, 'endDate');
   if (s != null) q.start = utcMsToLocalDate_(s);
   if (e != null) q.end = utcMsToLocalDate_(e);
   if (q.start > q.end) { var t = q.start; q.start = q.end; q.end = t; }
-  q.country = extractString_(inputs, 'country') || ALL;
-  q.device  = extractString_(inputs, 'device')  || ALL;
+  q.country = extractString_(inputs, 'country') || prev.country || ALL;
+  q.device  = extractString_(inputs, 'device')  || prev.device  || ALL;
   return chatUpdate_({ cardsV2: buildCards_(q) });
+}
+
+/** onClick.action.parameters → {key: value}, under either event shape. */
+function actionParams_(event) {
+  var list = (event.common && event.common.parameters) ||
+             (event.commonEventObject && event.commonEventObject.parameters) ||
+             (event.action && event.action.parameters) || {};
+  if (Array.isArray(list)) {
+    var o = {};
+    list.forEach(function (p) { o[p.key] = p.value; });
+    return o;
+  }
+  return list;   // commonEventObject.parameters is already a {key: value} map
 }
 
 /* ===================== Query defaults ===================== */
@@ -193,7 +212,15 @@ function controlCard_(q, sheet) {
                                   items: items(sheet.devices, q.device, '전체 기종') } } ] }
           ]}},
           { buttonList: { buttons: [
-              { text: '조회', type: 'FILLED', onClick: { action: { function: 'refreshReport' } } }
+              { text: '조회', type: 'FILLED', onClick: { action: {
+                  function: 'refreshReport',
+                  parameters: [                       // current query → fallback for blank pickers
+                    { key: 'start',   value: fmtYmd_(q.start) },
+                    { key: 'end',     value: fmtYmd_(q.end) },
+                    { key: 'country', value: q.country },
+                    { key: 'device',  value: q.device }
+                  ]
+              } } }
           ]}}
         ]
       }]
