@@ -5,8 +5,13 @@ source review spreadsheet (`1tMbA_msRfCRY0KK40GnyZ_h1uNCldlnk9Cg-_MTcbsw`) into
 the master `SC` sheet, then distributes the new rows to the 8 downstream product
 monitoring spreadsheets.
 
-Full procedure, schemas, filter-view criteria and open questions: Claude Code
-skill `sc-review-propagate` (`~/.claude/skills/sc-review-propagate/SKILL.md`).
+Full procedure, schemas, filter-view criteria, decisions and lessons: the Claude
+Code skill **`SKILL.md` in this folder** (canonical, git-tracked).
+`~/.claude/skills/sc-review-propagate/SKILL.md` is a symlink to it so Claude Code
+loads it as the `sc-review-propagate` skill.
+
+Plain Python 3 + `googleapiclient` (Sheets API v4 / Drive API v3). Not MCP, not
+Apps Script — the legacy `Master.js` Apify pipeline is a separate path.
 
 ## Usage
 
