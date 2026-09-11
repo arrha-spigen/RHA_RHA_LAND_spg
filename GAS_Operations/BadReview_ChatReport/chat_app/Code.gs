@@ -50,23 +50,48 @@ var TZ = 'Asia/Seoul';
 
 /* ===================== Chat event handlers ===================== */
 
+/*
+ * This app is registered as a Google Workspace add-on (the Chat API config's
+ * "Build this Chat app as a Workspace add-on" is on — irreversible per project), so
+ * every reply must be wrapped in the add-on action envelope instead of a bare Chat
+ * message. See https://developers.google.com/workspace/add-ons/chat/send-messages
+ */
+function chatCreate_(message) {
+  return { hostAppDataAction: { chatDataAction: { createMessageAction: { message: message } } } };
+}
+function chatUpdate_(message) {
+  return { hostAppDataAction: { chatDataAction: { updateMessageAction: { message: message } } } };
+}
+
 function onMessage(event) {
   var d = parseDateFromText_((event.message && event.message.text) || '') || todayKst_();
-  return { cardsV2: buildCards_(d, 'both') };
+  return chatCreate_({ cardsV2: buildCards_(d, 'both') });
 }
 
 function onAddToSpace(event) {
-  return {
+  return chatCreate_({
     text: 'BadReview 리포트 앱입니다. 날짜를 골라 배드리뷰(1~3점) 리포트를 조회하세요.',
     cardsV2: buildCards_(todayKst_(), 'both')
-  };
+  });
 }
 
 function onRemoveFromSpace(event) {}
 
+/**
+ * Classic (non-add-on) Chat apps deliver CARD_CLICKED here instead of calling the
+ * button's `onClick.action.function` directly. Route by function name so the
+ * card works under either dispatch model.
+ */
+function onCardClick(event) {
+  var fn = (event.common && event.common.invokedFunction) ||
+           (event.action && event.action.actionMethodName) || '';
+  if (fn === 'refreshReport') return refreshReport(event);
+  return chatUpdate_({ cardsV2: buildCards_(todayKst_(), 'both') });
+}
+
 /** The [조회] button (onClick.action.function = "refreshReport") lands here. */
 function refreshReport(event) {
-  var inputs = (event.common && event.common.formInputs) || event.formInputs || {};
+  var inputs = formInputs_(event);
   var ms = extractDateMs_(inputs);
   var product = extractString_(inputs, 'product') || 'both';
   var d;
@@ -76,10 +101,46 @@ function refreshReport(event) {
   } else {
     d = todayKst_();
   }
-  return {
-    actionResponse: { type: 'UPDATE_MESSAGE' },
-    cardsV2: buildCards_(d, product)
-  };
+  return chatUpdate_({ cardsV2: buildCards_(d, product) });
+}
+
+/* ===================== Form input parsing ===================== */
+
+/**
+ * Chat interaction events carry widget values as
+ *   event.common.formInputs[name][""]        → { dateInput: {msSinceEpoch}, stringInputs: {value: [...]} }
+ * while the Workspace add-on event object uses
+ *   event.commonEventObject.formInputs[name] → same inner shape, no "" key.
+ * Normalise to the inner object so the extractors work under either model.
+ */
+function formInputs_(event) {
+  return (event.common && event.common.formInputs) ||
+         (event.commonEventObject && event.commonEventObject.formInputs) ||
+         event.formInputs || {};
+}
+
+function inputField_(inputs, name) {
+  var v = inputs && inputs[name];
+  if (!v) return null;
+  return v[''] || v;
+}
+
+/** DATE_ONLY picker → ms since epoch (UTC midnight of the picked day), or null. */
+function extractDateMs_(inputs) {
+  var f = inputField_(inputs, 'reportDate');
+  if (!f) return null;
+  var di = f.dateInput || f.dateTimeInput;
+  if (di && di.msSinceEpoch != null && di.msSinceEpoch !== '') return Number(di.msSinceEpoch);
+  return null;
+}
+
+/** DROPDOWN / text → first string value, or ''. */
+function extractString_(inputs, name) {
+  var f = inputField_(inputs, name);
+  if (!f) return '';
+  var si = f.stringInputs;
+  if (si && si.value && si.value.length) return String(si.value[0]);
+  return '';
 }
 
 /* ===================== Card building ===================== */

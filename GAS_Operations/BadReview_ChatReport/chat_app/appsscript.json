@@ -3,8 +3,13 @@
   "runtimeVersion": "V8",
   "exceptionLogging": "STACKDRIVER",
   "oauthScopes": [
-    "https://www.googleapis.com/auth/spreadsheets.readonly",
-    "https://www.googleapis.com/auth/chat.bot"
+    "https://www.googleapis.com/auth/spreadsheets"
   ],
-  "chat": {}
+  "addOns": {
+    "common": {
+      "name": "김지우 Kevin 글로벌CX전략팀",
+      "logoUrl": "https://lh3.googleusercontent.com/7rTYMwEWSNl4z3gmx106wEgLz0sXZbACu10SMQdoH_nu-q05C4-B53nXqrbVhTr2WNXwwDYke9lsA5wZfUyBA3IULVdlf--k_A"
+    },
+    "chat": {}
+  }
 }
