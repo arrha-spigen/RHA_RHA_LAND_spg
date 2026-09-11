@@ -24,9 +24,22 @@ python3 propagate.py --all-products
 python3 propagate.py --new-sheet SC_260910 --commit
 ```
 
-`--commit` currently only implements **Phase A**. Phase B/C/D `--commit` is
-deliberately blocked — the first live run of the downstream paste / `tem`
-refresh / `=dr()` stamping must be done one product at a time under supervision.
+```bash
+# Phase B/D — paste one product live (A:<boundary> + Update 날짜 + 키워드 =ai()
+# + =dr() on today's 1-3점 rows + date restyle)
+python3 propagate.py --product GlxZ8 --commit
+
+# re-run only the post-paste steps (idempotent): =dr() on today's
+# un-classified 1-3점 rows + Update 날짜 yellow/bold restyle
+python3 propagate.py --finish --product GlxZ8 --commit
+
+# Phase C — rewrite tem cols F-K (A-E are IMPORTRANGE, never touched)
+python3 propagate.py --refresh-tem --commit
+```
+
+Every phase is dry-run without `--commit`. Run products one at a time and read
+back the row just above the pasted block afterwards (see the skill's 2026-09-11
+lesson).
 
 ## Config
 
