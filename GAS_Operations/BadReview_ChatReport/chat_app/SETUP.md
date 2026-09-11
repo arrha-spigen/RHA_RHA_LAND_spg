@@ -30,9 +30,15 @@ can't receive the "user picked a date" event. A Chat app has an endpoint that do
 | Deployment ID | `AKfycbyAj5jQ_3NmppD3lrLNaiq68_tGJDBT_Qjs_xn21ncKcrRqegJ-iMAyS20zO6QSTaMx` — roll new versions with `clasp deploy -i <id>`; the Console keeps pointing at it |
 | Visibility | specific people: `kjw@spigen.com` (widen in Chat API → Configuration → Visibility) |
 
-Jane's identity (`나아름 Jane 글로벌CX전략팀`) is planned on GCP project `formats-uaox` — needs its own
-Apps Script project (a copy of this folder with the `addOns.common` name/logoUrl swapped), because
-an Apps Script project can be attached to only one GCP project.
+| | Jane identity (`../chat_app_jane/`) |
+|---|---|
+| Apps Script | `1Zhc91kpARwwlNctKsk2THxt8nIvj6SvuJMOFOaKzrJotbWsKobSxbFhI` |
+| GCP project | `formats-uaox` (#1009119937520) — Chat API enabled + OAuth consent (Internal) created 2026-09-11 |
+| Chat app name / avatar | `나아름 Jane 글로벌CX전략팀` / Jane's profile photo |
+| Deployment ID | `AKfycbysje3fhJaLZ-VPezr2GTnZRJNJjpFAp22bHSExro0aFzP2IuNyDIyI1i9ixoxnZgJC` |
+
+Each identity needs its own Apps Script project because an Apps Script project can be attached to
+only one GCP project; `chat_app_jane/Code.gs` is a copy of this folder's — re-copy after edits.
 
 ### Lessons that cost time (read before repeating this on another project)
 
