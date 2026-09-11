@@ -418,12 +418,214 @@ def phase_b_c_d_product(svc, product, dry_run=True):
               "(Phase C tem refresh is a separate global step: --refresh-tem)")
         return
 
-    raise SystemExit(
-        f"[{product}] --commit path intentionally not implemented yet. "
-        "First live run must be done step-by-step under supervision "
-        "(insert-at-top row math and dr() column resolution carry production "
-        "risk). Use this dry-run output as the worklist."
-    )
+    phase_b_commit_product(svc, product, cfg, new_rows, payload)
+
+
+KEYWORD_FORMULA = ('=ai("briefly summarize input which is customer\'s amazon product '
+                   'review of our(Spigen) product. max 10 words in english only",G{n})')
+
+
+def today_kst_iso():
+    kst = datetime.timezone(datetime.timedelta(hours=9))
+    return datetime.datetime.now(kst).strftime("%Y-%m-%d")
+
+
+def sheet_props(svc, sid, title):
+    meta = svc.spreadsheets().get(
+        spreadsheetId=sid, fields="sheets(properties(sheetId,title,gridProperties))"
+    ).execute()
+    for s in meta["sheets"]:
+        if s["properties"]["title"] == title:
+            s["properties"].setdefault("gridProperties", {"rowCount": 0})
+            return s["properties"]
+    raise SystemExit(f"sheet {title!r} not found in {sid}")
+
+
+def ensure_rows(svc, sid, props, needed_last_row):
+    """Grow the grid if the target rows don't exist yet (Master.js does +100)."""
+    have = props["gridProperties"]["rowCount"]
+    if needed_last_row <= have:
+        return
+    svc.spreadsheets().batchUpdate(spreadsheetId=sid, body={"requests": [{
+        "appendDimension": {"sheetId": props["sheetId"], "dimension": "ROWS",
+                            "length": needed_last_row - have + 100}}]}).execute()
+
+
+def last_data_row(svc, sid, sheet, cols=("A", "K")):
+    """Last row with content in any of `cols` (array-literal spills past the data
+    render as "" and would fool values.append's table detection)."""
+    best = 2  # first free row when the sheet has only a header
+    for c in cols:
+        vals = svc.spreadsheets().values().get(
+            spreadsheetId=sid, range=f"'{sheet}'!{c}2:{c}").execute().get("values", [])
+        last = 1
+        for i, v in enumerate(vals):
+            if v and str(v[0]).strip():
+                last = i + 2          # sheet row number of that cell (range starts at row 2)
+        best = max(best, last + 1)    # next FREE row (2026-09-11: an off-by-one here
+    return best                       # overwrote a live row — keep the +1)
+
+
+def numeric_rating(block, idx=4):
+    """SC col E arrives as text ("5"); the 1-3점 FILTER does E<=3 numerically."""
+    v = str(block[idx]).strip()
+    if v.isdigit():
+        block[idx] = int(v)
+    return block
+
+
+def phase_b_commit_product(svc, product, cfg, new_rows, payload):
+    dest_id, dest_sheet = cfg["dest_id"], cfg["dest_sheet"]
+    today = today_kst_iso()
+    hdr = header_row(svc, dest_id, dest_sheet)
+    upd_col = find_col(hdr, want_exact="Update 날짜") or find_col(hdr, want_exact="Exported Date")
+    kw_col = find_col(hdr, want_exact="키워드 (AI 요약)")
+    payload = [numeric_rating(list(b)) for b in payload]
+    n = len(payload)
+    width = a1_col_to_idx(cfg["paste_through_col"])
+    props = sheet_props(svc, dest_id, dest_sheet)
+
+    if cfg["insert_at_top"]:
+        # Snapshot row-1 formulas: inserting at row 2 shifts their $X$2 refs to
+        # $X$3 (the breakage the user warned about). Master.js rewrites them too.
+        row1 = svc.spreadsheets().values().get(
+            spreadsheetId=dest_id, range=f"'{dest_sheet}'!1:1",
+            valueRenderOption="FORMULA").execute().get("values", [[]])[0]
+        svc.spreadsheets().batchUpdate(spreadsheetId=dest_id, body={"requests": [{
+            "insertDimension": {"range": {"sheetId": props["sheetId"], "dimension": "ROWS",
+                                          "startIndex": 1, "endIndex": 1 + n},
+                                "inheritFromBefore": False}}]}).execute()
+        first = 2
+        svc.spreadsheets().values().update(
+            spreadsheetId=dest_id, range=f"'{dest_sheet}'!A1",
+            valueInputOption="USER_ENTERED", body={"values": [row1]}).execute()
+        print(f"[{product}] inserted {n} rows at row 2; row-1 formulas rewritten "
+              f"({sum(1 for x in row1 if str(x).startswith('='))} formula cells)")
+    else:
+        first = last_data_row(svc, dest_id, dest_sheet)
+        ensure_rows(svc, dest_id, props, first + n - 1)
+    last = first + n - 1
+
+    end_col = idx_to_a1_col(width)
+    svc.spreadsheets().values().update(
+        spreadsheetId=dest_id, range=f"'{dest_sheet}'!A{first}:{end_col}{last}",
+        valueInputOption="RAW", body={"values": payload}).execute()
+    print(f"[{product}] wrote {n} rows A:{end_col} → '{dest_sheet}' rows {first}-{last}")
+
+    extra = []
+    if upd_col:
+        c = idx_to_a1_col(upd_col)
+        extra.append({"range": f"'{dest_sheet}'!{c}{first}:{c}{last}",
+                      "values": [[today]] * n})
+    if kw_col:
+        c = idx_to_a1_col(kw_col)
+        extra.append({"range": f"'{dest_sheet}'!{c}{first}:{c}{last}",
+                      "values": [[KEYWORD_FORMULA.format(n=r)] for r in range(first, last + 1)]})
+    # 1-3점-only books with dr: stamp on the same rows
+    if not cfg.get("dr_skip") and cfg.get("dr_sheet") == dest_sheet:
+        ai_col = find_col(hdr, contains=cfg["dr_col_header_contains"])
+        g = idx_to_a1_col(find_col(hdr, want_exact=cfg["dr_body_header"]))
+        s = idx_to_a1_col(find_col(hdr, want_exact=cfg["dr_category_header"]))
+        c = idx_to_a1_col(ai_col)
+        extra.append({"range": f"'{dest_sheet}'!{c}{first}:{c}{last}",
+                      "values": [[f"=dr({g}{r}, {s}{r})"] for r in range(first, last + 1)]})
+    if extra:
+        svc.spreadsheets().values().batchUpdate(
+            spreadsheetId=dest_id,
+            body={"valueInputOption": "USER_ENTERED", "data": extra}).execute()
+        print(f"[{product}] stamped: " + ", ".join(e["range"].split("!")[1] for e in extra)
+              + f"  (Update 날짜={today})")
+
+    # has15 books: 1-3점 A:L is `=FILTER('1-5점'!A2:L, E2:E<=3)` anchored at A2
+    # (NOT row 1 — a row-1 formula scan misses it). Never paste into it; the
+    # new <=3-star rows appear there by themselves. Just stamp =dr() on them.
+    if cfg.get("one_three_sheet") and not cfg.get("dr_skip"):
+        stamp_dr_on_filtered_13(svc, product, cfg, payload)
+    restyle_update_dates(svc, dest_id, dest_sheet, today)
+    if cfg.get("one_three_sheet"):
+        restyle_update_dates(svc, dest_id, cfg["one_three_sheet"], today)
+
+
+def stamp_dr_on_filtered_13(svc, product, cfg, payload=None, dry_run=False):
+    """Same rule as Master.js: rows whose Update 날짜 == today and whose
+    인입사유(AI) is empty get =dr(). Idempotent — safe to rerun (--finish)."""
+    dest_id, s13 = cfg["dest_id"], cfg["one_three_sheet"] or cfg["dest_sheet"]
+    hdr13 = header_row(svc, dest_id, s13)
+    ai_i = find_col(hdr13, contains=cfg["dr_col_header_contains"])
+    upd_i = find_col(hdr13, want_exact="Update 날짜") or find_col(hdr13, want_exact="Exported Date")
+    ai13 = idx_to_a1_col(ai_i)
+    g = idx_to_a1_col(find_col(hdr13, want_exact=cfg["dr_body_header"]))
+    s = idx_to_a1_col(find_col(hdr13, want_exact=cfg["dr_category_header"]))
+    today = today_kst_iso()
+    y, m, d = (int(x) for x in today.split("-"))
+    serial = (datetime.date(y, m, d) - datetime.date(1899, 12, 30)).days
+    kor = f"{y}. {m}. {d}"
+    grid = svc.spreadsheets().values().get(
+        spreadsheetId=dest_id, range=f"'{s13}'!A2:{idx_to_a1_col(max(ai_i, upd_i))}",
+        valueRenderOption="UNFORMATTED_VALUE").execute().get("values", [])
+    rows = []
+    for i, r in enumerate(grid):
+        r = r + [""] * (max(ai_i, upd_i) - len(r))
+        u = r[upd_i - 1]
+        if (u == serial or str(u).strip() in (today, kor)) and str(r[ai_i - 1]).strip() == "":
+            rows.append(i + 2)
+    if not rows:
+        print(f"[{product}] {s13}: no rows dated {today} with empty {hdr13[ai_i-1]!r}")
+        return
+    if dry_run:
+        print(f"[{product}] {s13}: [dry-run] would set =dr({g},{s}) on {len(rows)} rows "
+              f"({rows[0]}..{rows[-1]})")
+        return
+    svc.spreadsheets().values().batchUpdate(
+        spreadsheetId=dest_id,
+        body={"valueInputOption": "USER_ENTERED", "data": [
+            {"range": f"'{s13}'!{ai13}{r}", "values": [[f"=dr({g}{r}, {s}{r})"]]}
+            for r in rows]}).execute()
+    print(f"[{product}] {s13}: =dr({g},{s}) set in col {ai13} on rows "
+          f"{rows[0]}..{rows[-1]} ({len(rows)} rows)")
+
+
+YELLOW = {"red": 1.0, "green": 1.0, "blue": 0.0}
+WHITE = {"red": 1.0, "green": 1.0, "blue": 1.0}
+
+
+def restyle_update_dates(svc, sid, sheet, today_iso):
+    """Standing rule (2026-09-11): in the Update 날짜 / Exported Date column,
+    today's cells are yellow-filled + bold; every other date is plain."""
+    hdr = header_row(svc, sid, sheet)
+    col = find_col(hdr, want_exact="Update 날짜") or find_col(hdr, want_exact="Exported Date")
+    if not col:
+        return
+    props = sheet_props(svc, sid, sheet)
+    letter = idx_to_a1_col(col)
+    vals = svc.spreadsheets().values().get(
+        spreadsheetId=sid, range=f"'{sheet}'!{letter}2:{letter}",
+        valueRenderOption="UNFORMATTED_VALUE").execute().get("values", [])
+    y, m, d = (int(x) for x in today_iso.split("-"))
+    serial = (datetime.date(y, m, d) - datetime.date(1899, 12, 30)).days
+    kor = f"{y}. {m}. {d}"
+    hits = [i + 2 for i, v in enumerate(vals)
+            if v and (v[0] == serial or str(v[0]).strip() in (today_iso, kor))]
+    last = max(len(vals) + 1, 2)
+    gid = props["sheetId"]
+    def fmt(r0, r1, bg, bold):
+        return {"repeatCell": {
+            "range": {"sheetId": gid, "startRowIndex": r0 - 1, "endRowIndex": r1,
+                      "startColumnIndex": col - 1, "endColumnIndex": col},
+            "cell": {"userEnteredFormat": {"backgroundColor": bg, "textFormat": {"bold": bold}}},
+            "fields": "userEnteredFormat.backgroundColor,userEnteredFormat.textFormat.bold"}}
+    reqs = [fmt(2, last, WHITE, False)]
+    # collapse consecutive hit rows into ranges
+    runs, start, prev = [], None, None
+    for r in hits:
+        if start is None: start = prev = r
+        elif r == prev + 1: prev = r
+        else: runs.append((start, prev)); start = prev = r
+    if start is not None: runs.append((start, prev))
+    reqs += [fmt(a, b, YELLOW, True) for a, b in runs]
+    svc.spreadsheets().batchUpdate(spreadsheetId=sid, body={"requests": reqs}).execute()
+    print(f"[{sheet}] {letter}: cleared bold/fill on rows 2-{last}, yellow+bold on {len(hits)} "
+          f"cells dated {today_iso}")
 
 
 def phase_c_refresh_tem(svc, dry_run=True):
@@ -465,6 +667,9 @@ def main():
     ap.add_argument("--product", choices=list(PRODUCTS), help="run Phase B/C/D for one product")
     ap.add_argument("--all-products", action="store_true", help="Phase B/D for all active products (dry-run only)")
     ap.add_argument("--refresh-tem", action="store_true", help="Phase C: rewrite tem cols F-K from the 1-5점/1-3점 Review-ID cols")
+    ap.add_argument("--finish", action="store_true",
+                    help="with --product: (re)run only the post-paste steps — =dr() on today's "
+                         "un-classified rows + Update 날짜 restyle. Idempotent.")
     ap.add_argument("--commit", action="store_true", help="actually write (default: dry-run)")
     args = ap.parse_args()
     dry = not args.commit
@@ -483,6 +688,19 @@ def main():
     else:
         prods = [args.product] if args.product else []
     for p in prods:
+        if args.finish:
+            cfg = PRODUCTS[p]
+            print(f"=== finish: {p} ===")
+            if not cfg.get("dr_skip"):
+                stamp_dr_on_filtered_13(svc, p, cfg, dry_run=dry)
+            if not dry:
+                restyle_update_dates(svc, cfg["dest_id"], cfg["dest_sheet"], today_kst_iso())
+                if cfg.get("one_three_sheet"):
+                    restyle_update_dates(svc, cfg["dest_id"], cfg["one_three_sheet"], today_kst_iso())
+            else:
+                print(f"[{p}] [dry-run] would restyle Update 날짜 on {cfg['dest_sheet']}"
+                      + (f" + {cfg['one_three_sheet']}" if cfg.get("one_three_sheet") else ""))
+            continue
         print(f"=== Phase B/C/D: {p} ===")
         phase_b_c_d_product(svc, p, dry_run=dry)
 
