@@ -1,0 +1,15 @@
+{
+  "timeZone": "Asia/Seoul",
+  "runtimeVersion": "V8",
+  "exceptionLogging": "STACKDRIVER",
+  "oauthScopes": [
+    "https://www.googleapis.com/auth/spreadsheets"
+  ],
+  "addOns": {
+    "common": {
+      "name": "나아름 Jane 글로벌CX전략팀",
+      "logoUrl": "https://lh3.googleusercontent.com/9skaUPeNEHUQw63TCBBgAYXZALwWdXWjd39NzWNvFU83uyAX7ccRmUA_ohlxYEyAY3d6oI8H75178alRl1vToD5iEcxjCar4Zg"
+    },
+    "chat": {}
+  }
+}
