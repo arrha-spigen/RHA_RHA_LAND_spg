@@ -17,8 +17,20 @@ can't receive the "user picked a date" event. A Chat app has an endpoint that do
 
 | File | Purpose |
 |------|---------|
-| `Code.gs` | all handlers + card builder + sheet crunching |
+| `Config.gs` | `APP_PRODUCT` — the one product this deployment reports (`pixel11` here, `glxz8` in `../chat_app_jane/`) |
+| `Code.gs` | all handlers + card builder + sheet crunching — **identical copy in `../chat_app_jane/`; re-copy after edits** |
 | `appsscript.json` | manifest — `addOns.common` (name, logoUrl) + `addOns.chat: {}`; scope: `spreadsheets` |
+
+### Card behaviour (v9+, 2026-09-11)
+
+- Control card: 시작일 / 종료일 DATE_ONLY pickers (default = earliest `Update 날짜` on the tab →
+  today, shown in the card subtitle because the pickers themselves render empty), 국가 dropdown
+  (`국가(tag)` values + 전체 국가), 기종 dropdown (`기종명` values + 전체 기종), [조회].
+- Report card: one product only; **every number is scoped to the range + filters** (the webhook
+  card's Top 5 is cumulative — this one is not). Title `✔️ M/D(요일)~M/D(요일) <product> 배드리뷰
+  (1~3점) (총 N건)`; filters echoed in the subtitle / section header.
+- Message text also works: `9/1~9/11` → that range, `9/11` → one day, anything else → default.
+  Add-on events carry the text at `event.chat.messagePayload.message.text` (`messageText_`).
 
 ## Live deployment (2026-09-11)
 
