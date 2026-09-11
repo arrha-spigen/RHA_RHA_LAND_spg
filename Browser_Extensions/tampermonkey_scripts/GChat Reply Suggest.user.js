@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         GChat Reply Suggest
 // @namespace    https://spigen.com/gcx
-// @version      3.5.1
+// @version      3.5.2
 // @description  Alt+G offers T3 Esc (deterministic ticket-forward, no AI) / Gratitude / Reminder templates in every Google Chat room by default; only in designated rooms does it suggest AI-generated reply sentences instead
 // @author       Spigen GCX
 // @updateURL    https://raw.githubusercontent.com/codingintheusa0402/spigen-gcx-automation/main/Browser_Extensions/tampermonkey_scripts/GChat%20Reply%20Suggest.user.js
@@ -504,12 +504,11 @@
   function insertThreadFollowup(kind) {
     const box = getComposeBox();
     if (!box) return;
-    const info = getThreadRootInfo();
-    if (!info) {
-      renderStatus(box, "Couldn't find a T3 Esc message for this thread — open a thread on one first", "grs-error");
-      setTimeout(removeBar, 3500);
-      return;
-    }
+    // If the thread's T3 Esc root can't be found (thread on an older/manual
+    // message, root scrolled out, etc.), fall back to a name-less version
+    // with the default honorific rather than an error chip — per explicit
+    // request: "프로님, 확인 감사합니다. ..." is still a usable reply.
+    const info = getThreadRootInfo() || { name: null, honorific: DEFAULT_HONORIFIC };
     const text = kind === "gratitude" ? buildGratitudeText(info) : buildReminderText(info);
     insertIntoCompose(box, text);
   }
