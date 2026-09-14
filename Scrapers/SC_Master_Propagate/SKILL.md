@@ -191,6 +191,12 @@ whose 인입사유(AI) is empty — the same rule `Master.js` uses, hence idempo
   is built with `httplib2.Http(timeout=300)`.
 - Some sheets in these books (connected dashboards) have no `gridProperties`;
   tolerate it.
+- **유지훈P `1-3점` row-1 invariant:** the 10 array-literal formulas in A1:V1 hash
+  (md5 of the FORMULA-rendered row) to `bf423486dc…` — identical before/after the
+  2026-09-11 and 2026-09-14 inserts. Recompute after every insert-at-top run; a
+  different hash means the `$X$2` refs shifted and row 1 must be rewritten.
+- `last_data_row` scans A + the Review-ID col + the paste-through col (not just
+  A/K): the J-col books have agent-typed rows with no ASIN or Review ID.
 
 ## Decisions log (all from the user)
 

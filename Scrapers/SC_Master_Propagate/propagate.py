@@ -509,7 +509,8 @@ def phase_b_commit_product(svc, product, cfg, new_rows, payload):
         print(f"[{product}] inserted {n} rows at row 2; row-1 formulas rewritten "
               f"({sum(1 for x in row1 if str(x).startswith('='))} formula cells)")
     else:
-        first = last_data_row(svc, dest_id, dest_sheet)
+        first = last_data_row(svc, dest_id, dest_sheet,
+                              cols=("A", cfg["dest_review_id_col"], cfg["paste_through_col"]))
         ensure_rows(svc, dest_id, props, first + n - 1)
     last = first + n - 1
 
