@@ -60,7 +60,7 @@ python3 propagate.py --product 전략폰 --commit
 python3 propagate.py --product 유지훈P --commit          #   …insert-at-row-2 book last
 python3 propagate.py --refresh-tem --commit             # Phase C
 python3 propagate.py --all-products                     # must end at 0 pending everywhere
-python3 propagate.py --notify --new-sheet SC_260911 --commit   # Phase E: Chat completion notice
+python3 propagate.py --cleanup --notify --new-sheet SC_260911 --commit   # Phase F + E (see below)
 ```
 
 Everything is dry-run without `--commit`. `--finish --product X --commit`
@@ -176,27 +176,30 @@ whose 인입사유(AI) is empty — the same rule `Master.js` uses, hence idempo
 - **유지훈P**: col **L** on the freshly inserted rows 2..N+1.
 - **SDA / Auto_Acc / Power_Acc / 전략폰**: skip (`dr_skip: True`).
 
-### Phase E — completion notice to Google Chat (user rule, 2026-09-14)
-After everything above, post to the GCX Chat incoming webhook (`NOTIFY_WEBHOOK`
-in `propagate.py`; the URL lives only in the script and in memory
-`sc_master_sheet_propagation`, not in docs):
+### Phase F — delete older dated tabs (DEFAULT, user rule 2026-09-14)
+`--cleanup [--commit]`. Once the newest `SC_yymmdd` / `CaspiLM_yymmdd` tab has
+been distributed, the older tabs of each family are deleted (their rows already
+live in master `SC`). Rules the script enforces:
+- The **newest tab of each family is always kept** (families are matched by
+  `^(SC|CaspiLM)_\d{6}`; `CaspiLM_BadReview_…`-style tabs are not touched).
+- A tab is deleted **only if every Review ID in it is already in `SC`**. If any
+  are missing it is kept and reported — run `--new-sheet <that tab> --commit`
+  first (that is exactly what happened 2026-09-14: `SC_260907` and two
+  CaspiLM tabs had 1/1/7 never-funneled rows; funnel → then cleanup).
+- First live run 2026-09-14 removed 8 tabs (`SC_260831`, `SC_260907`,
+  `SC_260908`–`11`, `CaspiLM_260827_asof0830`, `CaspiLM_260905`).
 
-```
-*Bad Review Monitoring Completed for yyyy-mm-dd*
-• <source book name> SC_yymmdd: N rows scraped
-• <spreadsheet name> <tab>: +N        (one line per touched tab, incl. +0)
-```
-
-- `<spreadsheet name>` is the **live Drive file name** (fetched via
-  `drive.files.get`, stripped) followed by the **tab name**, e.g.
-  `Auto Accessory_CustomerReviews (★1~3) (2024~2026) 1-3점` — never a hardcoded
-  label.
-- `+N` = rows whose `Update 날짜` / `Exported Date` equals today (so it reports
-  everything added that day, by any pipeline, not just this run's pastes).
-- Tabs listed: each active product's paste tab, plus the `1-3점` mirror on the
-  has15 books (GlxZ8, Pixel11). Inactive products are omitted.
-- `--notify` without `--commit` prints the message and does not send. First
-  sent 2026-09-14.
+### Phase E — completion notice to Google Chat (user rule, 2026-09-14; cardsV2 since the same day)
+`--notify --new-sheet <tab> [--removed a,b] [--commit]` posts a **cardsV2 app
+card** to the GCX Chat incoming webhook (`NOTIFY_WEBHOOK` in `propagate.py`;
+the URL lives only in the script and in memory `sc_master_sheet_propagation`).
+Run it together with `--cleanup` so the removed tabs are listed automatically.
+Layout (verified against the cardsV2 notes in memory `gchat_cardsv2_schema_reference`):
+- Header: **Bad Review Monitoring Completed** · subtitle `yyyy-mm-dd · SC scraper → SC master → 7 monitoring books`, Sheets logo.
+- **Source** section: `SC_yymmdd` (reviews scraped) and master `SC` (rows total), each a `decoratedText` with an **Open** button (`openLink` → `…/edit#gid=<tab gid>`).
+- **Monitoring sheets · +N rows today** section: one `decoratedText` per touched tab — topLabel = product, text = `<b>live Drive spreadsheet name</b> · tab`, bottomLabel = `+N rows added today` (N = rows whose `Update 날짜`/`Exported Date` is today, by any pipeline), **Open** button to that tab. Has15 books list `1-5점` and its `1-3점` mirror; the section total counts only the paste tabs.
+- **Housekeeping**: `tem` refreshed, `Removed older tabs: …`.
+- Spreadsheet names come from `drive.files.get` at send time — never hardcoded. `--notify` without `--commit` prints the JSON and does not send. First card sent 2026-09-14.
 
 ## Lessons
 

@@ -663,9 +663,10 @@ def count_today_rows(svc, sid, sheet, today_iso):
     return sum(1 for v in vals if v and is_today_cell(v[0], today_iso))
 
 
-def phase_e_notify(svc, creds, new_sheet=None, dry_run=True):
-    """Post 'Bad Review Monitoring Completed for <date>' + rows added today per
-    sheet, labelled '<spreadsheet name> <tab name>' (names fetched live from Drive)."""
+def phase_e_notify(svc, creds, new_sheet=None, removed=None, dry_run=True):
+    """Phase E: post a cardsV2 app card — header + one row per touched tab
+    (live Drive spreadsheet name + tab, rows added today, Open button linking to
+    that tab) + a housekeeping footer (tem refresh, removed tabs)."""
     import requests
     from googleapiclient.discovery import build as _build
     drive = _build("drive", "v3", credentials=creds)
@@ -675,12 +676,30 @@ def phase_e_notify(svc, creds, new_sheet=None, dry_run=True):
         if sid not in names:
             names[sid] = drive.files().get(fileId=sid, fields="name").execute()["name"].strip()
         return names[sid]
+    def tab_url(sid, tab):
+        gid = sheet_props(svc, sid, tab)["sheetId"]
+        return f"https://docs.google.com/spreadsheets/d/{sid}/edit#gid={gid}"
+    def row(label, sid, tab, count_text, icon="table_chart"):
+        return {"decoratedText": {
+            "startIcon": {"materialIcon": {"name": icon}},
+            "topLabel": label,
+            "text": f"<b>{book_name(sid)}</b> · {tab}",
+            "wrapText": True,
+            "bottomLabel": count_text,
+            "button": {"text": "Open", "type": "FILLED_TONAL",
+                       "onClick": {"openLink": {"url": tab_url(sid, tab)}}},
+        }}
 
-    lines = []
+    src_widgets, total = [], 0
     if new_sheet:
-        tab = svc.spreadsheets().values().get(
-            spreadsheetId=SRC, range=f"'{new_sheet}'!K2:K").execute().get("values", [])
-        lines.append(f"• {book_name(SRC)} {new_sheet}: {len(tab)} rows scraped")
+        n = len(svc.spreadsheets().values().get(
+            spreadsheetId=SRC, range=f"'{new_sheet}'!K2:K").execute().get("values", []))
+        src_widgets.append(row("Scraped today", SRC, new_sheet, f"{n:,} reviews scraped", "download"))
+    sc_n = len(svc.spreadsheets().values().get(
+        spreadsheetId=SRC, range=f"'{SC_SHEET}'!K2:K").execute().get("values", []))
+    src_widgets.append(row("Master sheet", SRC, SC_SHEET, f"{sc_n:,} rows total", "database"))
+
+    dest_widgets = []
     for product, cfg in PRODUCTS.items():
         if cfg.get("inactive"):
             continue
@@ -688,15 +707,80 @@ def phase_e_notify(svc, creds, new_sheet=None, dry_run=True):
         tabs = [cfg["dest_sheet"]] + ([cfg["one_three_sheet"]] if cfg.get("one_three_sheet") else [])
         for tab in tabs:
             n = count_today_rows(svc, sid, tab, today)
-            lines.append(f"• {book_name(sid)} {tab}: +{n if n is not None else '?'}")
-    text = f"*Bad Review Monitoring Completed for {today}*\n" + "\n".join(lines)
-    print(text)
+            if tab == cfg["dest_sheet"]:          # 1-3점 mirrors are a subset — don't double count
+                total += n or 0
+            dest_widgets.append(row(product, sid, tab, f"+{n if n is not None else '?'} rows added today"))
+
+    house = [f"<b>tem</b> refreshed (F–K)"]
+    if removed:
+        house.append("<b>Removed older tabs:</b> " + ", ".join(removed))
+    sections = [
+        {"header": "Source", "widgets": src_widgets},
+        {"header": f"Monitoring sheets · +{total:,} rows today", "widgets": dest_widgets},
+        {"header": "Housekeeping", "widgets": [{"textParagraph": {"text": "<br>".join(house)}}]},
+    ]
+    card = {"cardsV2": [{"cardId": "sc-review-propagate", "card": {
+        "header": {"title": "Bad Review Monitoring Completed",
+                   "subtitle": f"{today} · SC scraper → SC master → 7 monitoring books",
+                   "imageUrl": "https://fonts.gstatic.com/s/i/productlogos/sheets/v1/web-48dp/logo_sheets_color_1x_web_48dp.png",
+                   "imageType": "SQUARE"},
+        "sections": sections,
+    }}]}
+    print(json.dumps(card, ensure_ascii=False, indent=1)[:4000])
     if dry_run:
         print("[dry-run] not sent")
         return
-    r = requests.post(NOTIFY_WEBHOOK, json={"text": text}, timeout=30)
-    r.raise_for_status()
-    print(f"✓ posted to Chat (message {r.json().get('name','?')})")
+    r = requests.post(NOTIFY_WEBHOOK, json=card, timeout=30,
+                      headers={"Content-Type": "application/json; charset=UTF-8"})
+    if r.status_code >= 300:
+        raise SystemExit(f"Chat webhook {r.status_code}: {r.text[:500]}")
+    print(f"✓ posted card to Chat (message {r.json().get('name','?')})")
+
+
+DATED_TAB_RE = r"^(SC|CaspiLM)_(\d{6})"   # SC_260914, CaspiLM_260905, CaspiLM_260827_asof0830
+
+
+def phase_f_cleanup(svc, dry_run=True):
+    """Default closing step (user rule 2026-09-14): once the newest SC_yymmdd /
+    CaspiLM_yymmdd tab has been distributed, delete the OLDER dated tabs of each
+    family. Safety: a tab is deleted only if every Review ID in it is already in
+    master `SC`; the newest tab of each family is always kept. Returns the list
+    of deleted tab titles."""
+    import re
+    meta = svc.spreadsheets().get(spreadsheetId=SRC,
+                                  fields="sheets(properties(sheetId,title))").execute()
+    fams = {}
+    for sh in meta["sheets"]:
+        t = sh["properties"]["title"]
+        m = re.match(DATED_TAB_RE, t)
+        if m:
+            fams.setdefault(m.group(1), []).append((m.group(2), t, sh["properties"]["sheetId"]))
+    sc_ids = set(r[0] for r in svc.spreadsheets().values().get(
+        spreadsheetId=SRC, range=f"'{SC_SHEET}'!K2:K").execute().get("values", []) if r and r[0])
+    deleted, kept = [], []
+    reqs = []
+    for fam, tabs in fams.items():
+        newest = max(d for d, _, _ in tabs)
+        for d, title, gid in sorted(tabs):
+            if d >= newest:
+                kept.append(f"{title} (newest)")
+                continue
+            ids = [r[0] for r in svc.spreadsheets().values().get(
+                spreadsheetId=SRC, range=f"'{title}'!K2:K").execute().get("values", []) if r and r[0]]
+            missing = [x for x in ids if x not in sc_ids]
+            if missing:
+                kept.append(f"{title} (KEPT: {len(missing)}/{len(ids)} Review IDs not in SC)")
+                continue
+            deleted.append(title)
+            reqs.append({"deleteSheet": {"sheetId": gid}})
+            print(f"  {'[dry-run] would delete' if dry_run else 'deleting'} {title}: "
+                  f"{len(ids)} rows, all present in SC")
+    for k in kept:
+        print(f"  keep {k}")
+    if reqs and not dry_run:
+        svc.spreadsheets().batchUpdate(spreadsheetId=SRC, body={"requests": reqs}).execute()
+        print(f"  ✓ deleted {len(deleted)} tab(s)")
+    return deleted
 
 
 def phase_c_refresh_tem(svc, dry_run=True):
@@ -744,6 +828,10 @@ def main():
     ap.add_argument("--notify", action="store_true",
                     help="Phase E: post 'Bad Review Monitoring Completed' + rows added today per "
                          "sheet to the GCX Chat webhook (pass --new-sheet to include the scrape line)")
+    ap.add_argument("--cleanup", action="store_true",
+                    help="Phase F: delete older SC_yymmdd / CaspiLM_yymmdd tabs (newest of each family kept; "
+                         "a tab is only deleted if all its Review IDs are in master SC)")
+    ap.add_argument("--removed", help="comma-separated tab names to list under 'Removed older tabs' in the notify card (auto-filled by --cleanup)")
     ap.add_argument("--commit", action="store_true", help="actually write (default: dry-run)")
     args = ap.parse_args()
     dry = not args.commit
@@ -757,9 +845,14 @@ def main():
         print("=== Phase C: tem refresh ===")
         phase_c_refresh_tem(svc, dry_run=dry)
 
+    removed = [x for x in (args.removed or "").split(",") if x]
+    if args.cleanup:
+        print("=== Phase F: cleanup old dated tabs ===")
+        removed += phase_f_cleanup(svc, dry_run=dry)
+
     if args.notify:
         print("=== Phase E: notify ===")
-        phase_e_notify(svc, svc._creds, new_sheet=args.new_sheet, dry_run=dry)
+        phase_e_notify(svc, svc._creds, new_sheet=args.new_sheet, removed=removed, dry_run=dry)
 
     if args.all_products:
         prods = [p for p, c in PRODUCTS.items() if not c.get("inactive")]
@@ -782,7 +875,7 @@ def main():
         print(f"=== Phase B/C/D: {p} ===")
         phase_b_c_d_product(svc, p, dry_run=dry)
 
-    if not args.new_sheet and not prods and not args.refresh_tem and not args.notify:
+    if not args.new_sheet and not prods and not args.refresh_tem and not args.notify and not args.cleanup:
         ap.print_help()
 
 
