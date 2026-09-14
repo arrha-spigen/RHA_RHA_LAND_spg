@@ -89,6 +89,12 @@ TEM_REFRESH = {  # tem col letter -> (source book id, source sheet, review-id co
 }
 TEM_CLEAR_TO_ROW = 6000  # nuke any residue below the refreshed data
 
+# Phase E — completion notice to the GCX Google Chat room (user rule 2026-09-14).
+# Incoming-webhook URL (same pattern as BadReview_ChatReport/broadcast.py ROOMS).
+NOTIFY_WEBHOOK = ("https://chat.googleapis.com/v1/spaces/AAAAlxfKOYE/messages"
+                  "?key=AIzaSyDdI0hCZtE6vySjMm-WEfRq3CPzqKqqsHI"
+                  "&token=TtxdDkyX3Q5QGgKRWGKeedQk5R9z8IQ4mn_4m5oLhu4")
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Per-product config. Verified 2026-09-10 against live sheet headers/filter views
 # unless marked CONFIRM.
@@ -239,7 +245,9 @@ def get_service():
     import httplib2
     from google_auth_httplib2 import AuthorizedHttp
     http = AuthorizedHttp(creds, http=httplib2.Http(timeout=300))
-    return build("sheets", "v4", http=http)
+    svc = build("sheets", "v4", http=http)
+    svc._creds = creds  # used by phase_e_notify for the Drive names lookup
+    return svc
 
 
 def load_filter_views(svc):
@@ -636,6 +644,61 @@ def restyle_update_dates(svc, sid, sheet, today_iso):
           f"cells dated {today_iso}")
 
 
+def is_today_cell(v, today_iso):
+    y, m, d = (int(x) for x in today_iso.split("-"))
+    serial = (datetime.date(y, m, d) - datetime.date(1899, 12, 30)).days
+    return v == serial or str(v).strip() in (today_iso, f"{y}. {m}. {d}")
+
+
+def count_today_rows(svc, sid, sheet, today_iso):
+    """Rows in `sheet` whose Update 날짜 / Exported Date is today (whoever added them)."""
+    hdr = header_row(svc, sid, sheet)
+    col = find_col(hdr, want_exact="Update 날짜") or find_col(hdr, want_exact="Exported Date")
+    if not col:
+        return None
+    letter = idx_to_a1_col(col)
+    vals = svc.spreadsheets().values().get(
+        spreadsheetId=sid, range=f"'{sheet}'!{letter}2:{letter}",
+        valueRenderOption="UNFORMATTED_VALUE").execute().get("values", [])
+    return sum(1 for v in vals if v and is_today_cell(v[0], today_iso))
+
+
+def phase_e_notify(svc, creds, new_sheet=None, dry_run=True):
+    """Post 'Bad Review Monitoring Completed for <date>' + rows added today per
+    sheet, labelled '<spreadsheet name> <tab name>' (names fetched live from Drive)."""
+    import requests
+    from googleapiclient.discovery import build as _build
+    drive = _build("drive", "v3", credentials=creds)
+    today = today_kst_iso()
+    names = {}
+    def book_name(sid):
+        if sid not in names:
+            names[sid] = drive.files().get(fileId=sid, fields="name").execute()["name"].strip()
+        return names[sid]
+
+    lines = []
+    if new_sheet:
+        tab = svc.spreadsheets().values().get(
+            spreadsheetId=SRC, range=f"'{new_sheet}'!K2:K").execute().get("values", [])
+        lines.append(f"• {book_name(SRC)} {new_sheet}: {len(tab)} rows scraped")
+    for product, cfg in PRODUCTS.items():
+        if cfg.get("inactive"):
+            continue
+        sid = cfg["dest_id"]
+        tabs = [cfg["dest_sheet"]] + ([cfg["one_three_sheet"]] if cfg.get("one_three_sheet") else [])
+        for tab in tabs:
+            n = count_today_rows(svc, sid, tab, today)
+            lines.append(f"• {book_name(sid)} {tab}: +{n if n is not None else '?'}")
+    text = f"*Bad Review Monitoring Completed for {today}*\n" + "\n".join(lines)
+    print(text)
+    if dry_run:
+        print("[dry-run] not sent")
+        return
+    r = requests.post(NOTIFY_WEBHOOK, json={"text": text}, timeout=30)
+    r.raise_for_status()
+    print(f"✓ posted to Chat (message {r.json().get('name','?')})")
+
+
 def phase_c_refresh_tem(svc, dry_run=True):
     """Rewrite tem cols F-K from each product's 1-5점 (유지훈P: 1-3점) Review-ID
     col K. Cols A-E are IMPORTRANGE — never touched. Safe to run every time."""
@@ -678,18 +741,25 @@ def main():
     ap.add_argument("--finish", action="store_true",
                     help="with --product: (re)run only the post-paste steps — =dr() on today's "
                          "un-classified rows + Update 날짜 restyle. Idempotent.")
+    ap.add_argument("--notify", action="store_true",
+                    help="Phase E: post 'Bad Review Monitoring Completed' + rows added today per "
+                         "sheet to the GCX Chat webhook (pass --new-sheet to include the scrape line)")
     ap.add_argument("--commit", action="store_true", help="actually write (default: dry-run)")
     args = ap.parse_args()
     dry = not args.commit
     svc = get_service()
 
-    if args.new_sheet:
+    if args.new_sheet and not args.notify:
         print("=== Phase A ===")
         phase_a_append_and_dedupe(svc, args.new_sheet, dry_run=dry)
 
     if args.refresh_tem:
         print("=== Phase C: tem refresh ===")
         phase_c_refresh_tem(svc, dry_run=dry)
+
+    if args.notify:
+        print("=== Phase E: notify ===")
+        phase_e_notify(svc, svc._creds, new_sheet=args.new_sheet, dry_run=dry)
 
     if args.all_products:
         prods = [p for p, c in PRODUCTS.items() if not c.get("inactive")]
@@ -712,7 +782,7 @@ def main():
         print(f"=== Phase B/C/D: {p} ===")
         phase_b_c_d_product(svc, p, dry_run=dry)
 
-    if not args.new_sheet and not prods and not args.refresh_tem:
+    if not args.new_sheet and not prods and not args.refresh_tem and not args.notify:
         ap.print_help()
 
 

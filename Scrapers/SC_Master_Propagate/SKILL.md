@@ -60,6 +60,7 @@ python3 propagate.py --product 전략폰 --commit
 python3 propagate.py --product 유지훈P --commit          #   …insert-at-row-2 book last
 python3 propagate.py --refresh-tem --commit             # Phase C
 python3 propagate.py --all-products                     # must end at 0 pending everywhere
+python3 propagate.py --notify --new-sheet SC_260911 --commit   # Phase E: Chat completion notice
 ```
 
 Everything is dry-run without `--commit`. `--finish --product X --commit`
@@ -174,6 +175,28 @@ whose 인입사유(AI) is empty — the same rule `Master.js` uses, hence idempo
   `1-5점` rows.
 - **유지훈P**: col **L** on the freshly inserted rows 2..N+1.
 - **SDA / Auto_Acc / Power_Acc / 전략폰**: skip (`dr_skip: True`).
+
+### Phase E — completion notice to Google Chat (user rule, 2026-09-14)
+After everything above, post to the GCX Chat incoming webhook (`NOTIFY_WEBHOOK`
+in `propagate.py`; the URL lives only in the script and in memory
+`sc_master_sheet_propagation`, not in docs):
+
+```
+*Bad Review Monitoring Completed for yyyy-mm-dd*
+• <source book name> SC_yymmdd: N rows scraped
+• <spreadsheet name> <tab>: +N        (one line per touched tab, incl. +0)
+```
+
+- `<spreadsheet name>` is the **live Drive file name** (fetched via
+  `drive.files.get`, stripped) followed by the **tab name**, e.g.
+  `Auto Accessory_CustomerReviews (★1~3) (2024~2026) 1-3점` — never a hardcoded
+  label.
+- `+N` = rows whose `Update 날짜` / `Exported Date` equals today (so it reports
+  everything added that day, by any pipeline, not just this run's pastes).
+- Tabs listed: each active product's paste tab, plus the `1-3점` mirror on the
+  has15 books (GlxZ8, Pixel11). Inactive products are omitted.
+- `--notify` without `--commit` prints the message and does not send. First
+  sent 2026-09-14.
 
 ## Lessons
 

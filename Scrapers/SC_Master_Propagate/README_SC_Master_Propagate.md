@@ -40,6 +40,10 @@ python3 propagate.py --finish --product GlxZ8 --commit
 
 # Phase C — rewrite tem cols F-K (A-E are IMPORTRANGE, never touched)
 python3 propagate.py --refresh-tem --commit
+
+# Phase E — post "Bad Review Monitoring Completed for <date>" + rows added
+# today per sheet (live spreadsheet name + tab) to the GCX Chat webhook
+python3 propagate.py --notify --new-sheet SC_260914 --commit
 ```
 
 Every phase is dry-run without `--commit`. Run products one at a time and read
