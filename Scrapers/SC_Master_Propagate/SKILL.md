@@ -6,8 +6,10 @@ description: >-
   (append minus header, dedupe by Review ID), propagate the new rows to the 7
   active product monitoring books via the `<Product> finalize` filter views
   (stamping Update 날짜, 키워드 =ai() and =dr() where each book expects them),
-  restyle the Update 날짜 column (today = yellow+bold, older = plain), and
-  refresh the `tem` sheet. Trigger when the user says "propagate the SC sheet",
+  restyle the Update 날짜 column (today = yellow+bold, older = plain), refresh
+  the `tem` sheet, delete the older dated tabs (newest kept, only if all their
+  rows are in `SC`), and post the "Bad Review Monitoring Completed" cardsV2
+  card (per-sheet Open buttons) to the GCX Chat webhook. Trigger when the user says "propagate the SC sheet",
   "cascade SC_yymmdd / CaspiLM_yymmdd downstream", "run the SC review
   propagation", "append to SC sheet and distribute", "do the job" after a
   scrape, or any close paraphrase — and offer it right after any SC scraper run
