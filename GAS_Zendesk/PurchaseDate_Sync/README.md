@@ -1,8 +1,9 @@
 # PurchaseDate_Sync — Zendesk → monday.com "Purchase Date" bridge
 
 Fills the **Purchase Date** date column on the Case+CP monday boards
-[Galaxy Z8 (18421346787)](https://spigen.monday.com/boards/18421346787) and
-[Pixel 11 (18425190666)](https://spigen.monday.com/boards/18425190666)
+[Galaxy Z8 (18421346787)](https://spigen.monday.com/boards/18421346787),
+[Pixel 11 (18425190666)](https://spigen.monday.com/boards/18425190666), and
+[iPhone 18 Series (18430082360)](https://spigen.monday.com/boards/18430082360)
 from the Zendesk custom ticket field **Purchase Date** (field id `360019586172`).
 Boards are listed in `MONDAY_BOARD_IDS` in `Code.js` — they share the same
 column ids, so adding a new series board is a one-line change.
@@ -14,7 +15,7 @@ board columns — for a date column its dropdown only offers Zendesk's system
 fields (`Created at` / `Due at` / `Updated at`). So the Purchase Date entered
 by agents on the ticket never reaches the board.
 
-## How  (rewritten 2026-09-08 — scheduled batch)
+## How  (rewritten 2026-09-08 — scheduled batch; switched to twice-daily 2026-09-15)
 
 Previously a Zendesk webhook hit `doPost` on every "Purchase Date changed"
 event. In practice it fired ~5–6×/min around the clock and each call walked
@@ -23,7 +24,7 @@ consumer of the monday.com account's API budget (~tens of thousands of calls
 /day). It is now a scheduled batch:
 
 ```
-Time trigger every SYNC_EVERY_MINUTES min (15 → ~96 runs/day)
+Time trigger twice a day, at each hour in SYNC_HOURS_KST (default 9am/9pm KST)
   └─ scheduledPurchaseDateSync()   (script-lock guarded; overlapping tick = no-op)
        └─ _runPurchaseDateSync_()
             ├─ ONE walk of each board in MONDAY_BOARD_IDS (500 items/page)
@@ -34,14 +35,11 @@ Time trigger every SYNC_EVERY_MINUTES min (15 → ~96 runs/day)
                ONLY for items where the ticket's date differs from the board
 ```
 
-The Z8 board holds ~1,040 items (**3 pages**) and the Pixel 11 board ~300
-(**1 page**), so a run costs **~4 monday reads + only-changed writes** →
-**~400–500 monday calls/day** across 96 runs (was ~40,000/day via the webhook).
-
-`MONDAY_CALLS_MAX_PER_RUN = 50` is a hard ceiling — `mondayGql_` throws once a
-single run passes it (50 × 96 = 4,800/day absolute worst case). A run that hits
-the cap stops cleanly and the next run picks up the remainder, so nothing is
-lost; a genuine loop/bug fails loudly instead of repeating the 2026-09 runaway.
+`MONDAY_CALLS_MAX_PER_RUN = 200` is a hard ceiling — `mondayGql_` throws once a
+single run passes it (200 × 2 runs/day = 400/day absolute worst case, still
+far under the old ~40,000/day webhook). A run that hits the cap stops cleanly
+and the next run picks up the remainder, so nothing is lost; a genuine
+loop/bug fails loudly instead of repeating the 2026-09 runaway.
 
 `doPost` is now a **no-op** — deactivate the Zendesk trigger + webhook.
 
@@ -50,16 +48,16 @@ lost; a genuine loop/bug fails loudly instead of repeating the 2026-09 runaway.
 | Piece | Where |
 |---|---|
 | GAS project | `PurchaseDate_Sync` (standalone) |
-| Time trigger | every 15 min `scheduledPurchaseDateSync` (~96/day) — installed by `setupPurchaseDateTriggers` |
+| Time trigger | twice daily at `SYNC_HOURS_KST` (default 9am/9pm KST) `scheduledPurchaseDateSync` — installed by `setupPurchaseDateTriggers` |
 | Zendesk webhook | "monday Purchase Date Sync" → **deactivate** (endpoint is a no-op now) |
 | Zendesk trigger | "monday Purchase Date Sync" → **deactivate** |
-| monday boards | `18421346787` (Z8), `18425190666` (Pixel 11, added 2026-09-11) — columns `date_mm59ejfp` (Purchase Date), `integration_mm0fzmv0` (Zendesk Ticket) on both |
+| monday boards | `18421346787` (Z8), `18425190666` (Pixel 11, added 2026-09-11), `18430082360` (iPhone 18 Series, added 2026-09-15) — columns `date_mm59ejfp` (Purchase Date), `integration_mm0fzmv0` (Zendesk Ticket) on all |
 
 ## Functions (GAS editor → Run)
 
-- `setupPurchaseDateTriggers` — **run once** to install the every-15-min trigger
-  (needs the OAuth consent click; 403s if invoked headlessly). Re-run-safe;
-  also clears any stale `backfillPurchaseDates` timer.
+- `setupPurchaseDateTriggers` — **run once** to install the twice-daily
+  trigger(s) (needs the OAuth consent click; 403s if invoked headlessly).
+  Re-run-safe; also clears any stale `backfillPurchaseDates` timer.
 - `scheduledPurchaseDateSync` — the batch sync itself; also runnable on demand.
 - `backfillPurchaseDates` — alias for `scheduledPurchaseDateSync` (kept for
   older docs). Now also refreshes items whose date changed, not just empty ones.

@@ -3,32 +3,32 @@
  *
  * WHY THIS EXISTS
  * The native monday↔Zendesk integration on the Case+CP boards (Galaxy Z8
- * 18421346787, Pixel 11 18425190666) cannot map Zendesk CUSTOM fields to
- * board columns — its date
+ * 18421346787, Pixel 11 18425190666, iPhone 18 18430082360) cannot map
+ * Zendesk CUSTOM fields to board columns — its date
  * dropdown only offers the system fields (Created at / Due at / Updated at).
  * "Purchase Date" (Zendesk custom field 360019586172) therefore never
  * reaches the board's Purchase Date column.
  *
- * HOW IT WORKS  (rewritten 2026-09-08 — scheduled batch)
+ * HOW IT WORKS  (rewritten 2026-09-08 — scheduled batch;
+ *                 switched to a true twice-daily schedule 2026-09-15)
  * Previously this ran as a Zendesk webhook (doPost) that fired ~5-6x/min and
  * walked the ENTIRE board up to 4x on every single call — the top consumer
  * of the account's monday.com API budget. It now runs as a scheduled batch:
  *
  *   scheduledPurchaseDateSync()  — installed by setupPurchaseDateTriggers()
- *   to run every SYNC_EVERY_MINUTES minutes (15 → ~96 runs/day):
+ *   to run twice a day, at the KST hours in SYNC_HOURS_KST (default 9am/9pm):
  *     1. ONE walk of EACH board in MONDAY_BOARD_IDS (500 items/page) to
  *        collect every item that has a linked Zendesk ticket, plus its
- *        current Purchase Date cell. (2026-09-11: Pixel 11 board added —
- *        both boards share the same column ids.)
+ *        current Purchase Date cell. (2026-09-11: Pixel 11 board added;
+ *        2026-09-15: board 18430082360 added — all boards share the same
+ *        column ids.)
  *     2. Fetch those tickets from Zendesk in bulk (show_many, 100 ids/call).
  *     3. Write the Purchase Date to an item ONLY when it differs from what's
  *        already on the board.
  *   A script lock makes an overlapping tick a no-op, so a long run can never
- *   pile up. The board is small (~960 items = 2 pages), so a run costs ~2
- *   monday reads + only-changed writes → ~200-300 monday calls/day total
- *   (96 runs), versus the ~40,000/day the old webhook was burning.
- *   MONDAY_CALLS_MAX_PER_RUN is a hard ceiling: mondayGql_ throws past it so
- *   no future change can quietly turn this back into a runaway.
+ *   pile up. MONDAY_CALLS_MAX_PER_RUN is a hard ceiling: mondayGql_ throws
+ *   past it so no future change can quietly turn this back into a runaway —
+ *   a capped run just picks up the remainder on the next tick.
  *
  * The old webhook path is disabled — doPost() is now a no-op. After
  * deploying this version, also deactivate the Zendesk trigger + webhook that
@@ -49,6 +49,7 @@ const MONDAY_TOKEN = 'eyJhbGciOiJIUzI1NiJ9.eyJ0aWQiOjU0ODE3MjIzOSwiYWFpIjoxMSwid
 const MONDAY_BOARD_IDS = [
   18421346787, // 📌Galaxy Z8 Case+CP
   18425190666, // 📌Pixel 11 Case+CP   (added 2026-09-11)
+  18430082360, // 📌iPhone 18 Series Case+CP   (added 2026-09-15)
 ];
 const MONDAY_DATE_COL = 'date_mm59ejfp';          // "Purchase Date" (date)
 const MONDAY_TICKET_COL = 'integration_mm0fzmv0'; // "Zendesk Ticket" (integration)
@@ -57,22 +58,22 @@ const MONDAY_TICKET_COL = 'integration_mm0fzmv0'; // "Zendesk Ticket" (integrati
 // Kept only so doPost can still recognise stray webhook traffic; unused otherwise.
 const WEBHOOK_SECRET = '8GD3uY_vYU5N9GJlD0T1y1b9jJylrPnv21QmeqBSsKU';
 
-// How often the batch sync runs. 15 min → 96 runs/day (~100/day).
-// GAS everyMinutes() only accepts 1, 5, 10, 15 or 30.
-const SYNC_EVERY_MINUTES = 15;
+// Sync runs twice a day (changed 2026-09-15, was every 15 min) at these KST
+// hours (0-23), installed by setupPurchaseDateTriggers().
+const SYNC_HOURS_KST = [9, 21];
 
 const BOARD_PAGE_LIMIT = 500;    // monday items_page max
 const ZD_SHOW_MANY_CHUNK = 100;  // Zendesk tickets/show_many max ids per call
 const WRITE_SLEEP_MS = 120;      // small gap between monday writes
 
-// Hard ceiling on monday API calls per single run. A healthy run is ~2 reads
-// plus a handful of writes. 50 * 96 runs/day = 4,800/day absolute worst case
-// (< 5,000 by design); real usage is ~200-300/day. If a bulk date edit needs
-// more than ~48 writes in one 15-min window the run stops at the cap and the
-// remainder is picked up by the next run (it re-walks and still sees the diff),
-// so nothing is lost — and a genuine bug/loop bails loud instead of repeating
-// the 2026-09 runaway.
-const MONDAY_CALLS_MAX_PER_RUN = 50;
+// Hard ceiling on monday API calls per single run. A healthy run is ~3 reads
+// (one per board) plus a handful of writes. 200 * 2 runs/day = 400/day
+// absolute worst case, far under any real budget concern. If a bulk date
+// edit needs more writes than the cap in one run, the run stops at the cap
+// and the remainder is picked up by the next run (it re-walks and still sees
+// the diff), so nothing is lost — and a genuine bug/loop bails loud instead
+// of repeating the 2026-09 runaway.
+const MONDAY_CALLS_MAX_PER_RUN = 200;
 let _mondayCallCount = 0; // reset at the top of each run
 
 // ── Zendesk helpers ───────────────────────────────────────────────────────────
@@ -252,15 +253,18 @@ function _runPurchaseDateSync_(startedAt) {
 
 // Run once from the GAS editor (needs the script.scriptapp OAuth consent, so
 // it 403s if invoked headlessly). Replaces any existing scheduledPurchaseDateSync
-// trigger with a single every-SYNC_EVERY_MINUTES timer. Safe to re-run.
+// trigger with one daily timer per hour in SYNC_HOURS_KST (script timeZone is
+// Asia/Seoul — see appsscript.json). Safe to re-run.
 function setupPurchaseDateTriggers() {
   ScriptApp.getProjectTriggers().forEach(t => {
     const fn = t.getHandlerFunction();
     if (fn === 'scheduledPurchaseDateSync' || fn === 'backfillPurchaseDates') ScriptApp.deleteTrigger(t);
   });
-  ScriptApp.newTrigger('scheduledPurchaseDateSync')
-    .timeBased().everyMinutes(SYNC_EVERY_MINUTES).create();
-  Logger.log(`Installed 1 trigger for scheduledPurchaseDateSync every ${SYNC_EVERY_MINUTES} min (~${Math.round(1440 / SYNC_EVERY_MINUTES)} runs/day).`);
+  SYNC_HOURS_KST.forEach(hour => {
+    ScriptApp.newTrigger('scheduledPurchaseDateSync')
+      .timeBased().atHour(hour).everyDays(1).create();
+  });
+  Logger.log(`Installed ${SYNC_HOURS_KST.length} trigger(s) for scheduledPurchaseDateSync at ${SYNC_HOURS_KST.join(':00, ')}:00 KST daily.`);
 }
 
 // Kept for compatibility with older docs/muscle memory. The scheduled sync
