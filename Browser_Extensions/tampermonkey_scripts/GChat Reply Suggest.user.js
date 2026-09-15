@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         GChat Reply Suggest
 // @namespace    https://spigen.com/gcx
-// @version      3.5.2
+// @version      3.6.0
 // @description  Alt+G offers T3 Esc (deterministic ticket-forward, no AI) / Gratitude / Reminder templates in every Google Chat room by default; only in designated rooms does it suggest AI-generated reply sentences instead
 // @author       Spigen GCX
 // @updateURL    https://raw.githubusercontent.com/codingintheusa0402/spigen-gcx-automation/main/Browser_Extensions/tampermonkey_scripts/GChat%20Reply%20Suggest.user.js
@@ -623,9 +623,10 @@
     if (active) active.scrollIntoView({ block: "nearest" });
   }
 
-  function openPicker(box, title, items, defaultIndex, renderItem, onConfirm) {
+  function openPicker(box, title, items, defaultIndex, renderItem, onConfirm, opts) {
     removeBar();
-    pickerState = { items, selectedIndex: defaultIndex, box, onConfirm };
+    const wrap = !!(opts && opts.wrap);
+    pickerState = { items, selectedIndex: defaultIndex, box, onConfirm, wrap };
 
     const bar = document.createElement("div");
     bar.id = BAR_ID;
@@ -694,7 +695,8 @@
       (el, name) => {
         el.textContent = name;
       },
-      (name) => onPicked(name === NO_MENTION ? null : name)
+      (name) => onPicked(name === NO_MENTION ? null : name),
+      { wrap: true }
     );
   }
 
@@ -870,14 +872,20 @@
           if (e.key === "ArrowDown") {
             e.preventDefault();
             e.stopImmediatePropagation();
-            pickerState.selectedIndex = Math.min(pickerState.selectedIndex + 1, pickerState.items.length - 1);
+            const n = pickerState.items.length;
+            pickerState.selectedIndex = pickerState.wrap
+              ? (pickerState.selectedIndex + 1) % n
+              : Math.min(pickerState.selectedIndex + 1, n - 1);
             highlightPickerSelection();
             return;
           }
           if (e.key === "ArrowUp") {
             e.preventDefault();
             e.stopImmediatePropagation();
-            pickerState.selectedIndex = Math.max(pickerState.selectedIndex - 1, 0);
+            const n = pickerState.items.length;
+            pickerState.selectedIndex = pickerState.wrap
+              ? (pickerState.selectedIndex - 1 + n) % n
+              : Math.max(pickerState.selectedIndex - 1, 0);
             highlightPickerSelection();
             return;
           }
