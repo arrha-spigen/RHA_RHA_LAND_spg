@@ -1,0 +1,192 @@
+#!/usr/bin/env python3
+"""
+BadReview auto-broadcast — unattended weekday version of `badreview-chat-broadcast`.
+
+Runs from a `launchd` LaunchAgent (see launchagent/README.md in this folder), every
+weekday at 10:30 AM KST. NO test-send, NO confirmation prompt — by explicit user
+request (2026-09-15): "make this a hook that runs every weekdays (except Korean
+national holidays) and send automatically to all the chatrooms KST10:30AM without
+test sending to my private chatroom". This script is the ONLY broadcast path that
+skips the test-room gate — the interactive `badreview-chat-broadcast` skill keeps its
+HARD RULE (test first, ask for confirmation) for every manually-triggered run.
+
+Data source: Sheets API v4 with the gws_shim OAuth token (~/.config/gws_shim/token.json),
+NOT the browser/gviz method the interactive skill uses — this runs unattended with no
+Chrome session available. Card building and the room list are NOT duplicated here: this
+script imports report.py from the two per-product skills and broadcast.py from
+badreview-chat-broadcast, so all three stay the single source of truth for card layout,
+significance-highlighting thresholds, and the 12-room list.
+
+Usage:
+  auto_broadcast.py                 # normal run (skips silently on holiday/weekend)
+  auto_broadcast.py --dry-run       # crunch + build cards, print results, send nothing
+  auto_broadcast.py --force         # send even if today is a weekend/holiday (manual testing)
+  auto_broadcast.py --date 2026-09-16   # override "today" (KST) for testing
+"""
+import argparse, datetime, importlib.util, json, os, sys, time, urllib.error, urllib.parse, urllib.request
+
+SKILLS = os.path.expanduser("~/.claude/skills")
+GWS_TOKEN_PATH = os.path.expanduser("~/.config/gws_shim/token.json")
+LOG_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "logs")
+
+SHEETS = {
+    "pixel11": "12I6z_FFmDIMHa0rLanltKKFp7kI_yREQj3adkMamPgI",
+    "glxz8":   "19OhswglYMx_dxSFFDtWI1WYPWq2jONJn6RK84KITwy4",
+}
+
+# Fallback if the Nager.Date API is unreachable at run time (network hiccup). Kept in
+# sync manually from https://date.nager.at/api/v3/PublicHolidays/2026/KR (fetched
+# 2026-09-15) MINUS 근로자의날/Labour Day (May 1 — not a 관공서 공휴일, so NOT skipped).
+# Re-derive for next year before this list runs out; the API call is tried first every
+# run specifically so this fallback rarely matters.
+KR_HOLIDAYS_FALLBACK_2026 = {
+    "2026-01-01", "2026-02-16", "2026-02-17", "2026-02-18", "2026-03-02",
+    "2026-05-05", "2026-05-25", "2026-06-03", "2026-06-06", "2026-07-17",
+    "2026-08-17", "2026-09-24", "2026-09-25", "2026-09-26", "2026-10-05",
+    "2026-10-09", "2026-12-25",
+}
+
+
+def _load(path, name):
+    spec = importlib.util.spec_from_file_location(name, path)
+    m = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(m)
+    return m
+
+
+def log(msg):
+    os.makedirs(LOG_DIR, exist_ok=True)
+    line = f"[{datetime.datetime.now().isoformat(timespec='seconds')}] {msg}"
+    print(line)
+    with open(os.path.join(LOG_DIR, "auto_broadcast.log"), "a") as f:
+        f.write(line + "\n")
+
+
+def kr_holidays(year):
+    """{'YYYY-MM-DD', ...} of Korean public (관공서) holidays for `year`."""
+    try:
+        url = f"https://date.nager.at/api/v3/PublicHolidays/{year}/KR"
+        with urllib.request.urlopen(url, timeout=10) as r:
+            data = json.load(r)
+        # Nager's KR set already excludes Labour Day (근로자의날) as of the 2026-09-15
+        # check — matches "national holiday" (관공서 공휴일) intent. If that ever
+        # changes, filter by `types` here instead of trusting the raw list.
+        return {d["date"] for d in data}
+    except Exception as e:
+        log(f"WARNING: Nager.Date holiday lookup failed ({e}); using hardcoded fallback")
+        return KR_HOLIDAYS_FALLBACK_2026 if year == 2026 else set()
+
+
+def refresh_gws_token():
+    tok = json.load(open(GWS_TOKEN_PATH))
+    d = urllib.parse.urlencode({
+        "client_id": tok["client_id"], "client_secret": tok["client_secret"],
+        "refresh_token": tok["refresh_token"], "grant_type": "refresh_token",
+    }).encode()
+    r = json.load(urllib.request.urlopen(urllib.request.Request(
+        "https://oauth2.googleapis.com/token", d)))
+    tok["token"] = r["access_token"]
+    json.dump(tok, open(GWS_TOKEN_PATH, "w"), indent=2)
+    return tok["token"]
+
+
+def sheets_get(token, sheet_id, a1_range):
+    url = (f"https://sheets.googleapis.com/v4/spreadsheets/{sheet_id}/values/"
+           f"{urllib.parse.quote(a1_range)}?valueRenderOption=FORMATTED_VALUE")
+    req = urllib.request.Request(url, headers={"Authorization": "Bearer " + token})
+    return json.load(urllib.request.urlopen(req)).get("values", [])
+
+
+def crunch(token, sheet_id, today):
+    """Same shape/logic as the interactive skills' step-3 JS (todayCount, todayTags,
+    recentAvg, film, case) — see pixel11-badreview-chat-report/SKILL.md."""
+    rows = sheets_get(token, sheet_id, "'1-3점'!A1:Z")
+    header, body = rows[0], [r + [""] * (len(rows[0]) - len(r)) for r in rows[1:]]
+    iU, iT, iC = header.index("Update 날짜"), header.index("인입사유(tag)"), header.index("대분류")
+
+    today_count = 0
+    tal, day_counts = {}, {}
+    cat = {"휴대폰보호필름": {}, "휴대폰케이스": {}}
+    for r in body:
+        tag = (r[iT] or "").strip() or "(빈칸)"
+        if tag == "긍정 리뷰":
+            continue
+        cc = (r[iC] or "").strip()
+        if cc in cat:
+            cat[cc][tag] = cat[cc].get(tag, 0) + 1
+        d = _parse_date(r[iU])
+        if d:
+            day_counts[d] = day_counts.get(d, 0) + 1
+            if d == today:
+                today_count += 1
+                tal[tag] = tal.get(tag, 0) + 1
+
+    recent_sum = sum(day_counts.get(today - datetime.timedelta(days=k), 0) for k in range(1, 8))
+
+    def block(c):
+        top5 = sorted(c.items(), key=lambda kv: -kv[1])[:5]
+        return {"tot": sum(c.values()), "top5": top5}
+
+    return {
+        "todayCount": today_count,
+        "todayTags": sorted(tal.items(), key=lambda kv: -kv[1]),
+        "recentAvg": recent_sum / 7,
+        "film": block(cat["휴대폰보호필름"]),
+        "case": block(cat["휴대폰케이스"]),
+    }
+
+
+def _parse_date(s):
+    import re
+    m = re.search(r"(\d{4})\D+(\d{1,2})\D+(\d{1,2})", s or "")
+    return datetime.date(int(m.group(1)), int(m.group(2)), int(m.group(3))) if m else None
+
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--dry-run", action="store_true", help="build cards, send nothing")
+    ap.add_argument("--force", action="store_true", help="ignore the weekday/holiday skip")
+    ap.add_argument("--date", help="override today (KST), YYYY-MM-DD")
+    a = ap.parse_args()
+
+    today = datetime.date.fromisoformat(a.date) if a.date else datetime.date.today()
+
+    if not a.force:
+        if today.weekday() >= 5:  # 5=Sat, 6=Sun
+            log(f"SKIP {today.isoformat()}: weekend")
+            return
+        if today.isoformat() in kr_holidays(today.year):
+            log(f"SKIP {today.isoformat()}: Korean public holiday")
+            return
+
+    log(f"RUN {today.isoformat()}: fetching sheets")
+    token = refresh_gws_token()
+    px_data = crunch(token, SHEETS["pixel11"], today)
+    z8_data = crunch(token, SHEETS["glxz8"], today)
+    log(f"  pixel11 todayCount={px_data['todayCount']} recentAvg={px_data['recentAvg']:.2f}")
+    log(f"  glxz8   todayCount={z8_data['todayCount']} recentAvg={z8_data['recentAvg']:.2f}")
+
+    px_report = _load(f"{SKILLS}/pixel11-badreview-chat-report/report.py", "auto_px_report")
+    z8_report = _load(f"{SKILLS}/glxz8-badreview-chat-report/report.py", "auto_z8_report")
+    broadcast = _load(f"{SKILLS}/badreview-chat-broadcast/broadcast.py", "auto_broadcast_mod")
+
+    px_card = px_report.build_card(px_data, today)
+    z8_card = z8_report.build_card(z8_data, today)
+
+    if a.dry_run:
+        log("[dry-run] cards built, not sending. Rooms that would receive them:")
+        for room in broadcast.ROOMS:
+            log(f"  - {room['name']}")
+        return
+
+    for room in broadcast.ROOMS:
+        log(f"[{room['name']}] Z8 : " + broadcast._post(broadcast.room_url(room, "glxz8"), z8_card))
+        time.sleep(1.0)
+        log(f"[{room['name']}] PX : " + broadcast._post(broadcast.room_url(room, "pixel11"), px_card))
+        time.sleep(1.0)
+
+    log(f"DONE {today.isoformat()}: sent to {len(broadcast.ROOMS)} rooms")
+
+
+if __name__ == "__main__":
+    main()
