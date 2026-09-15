@@ -41,6 +41,7 @@ import argparse
 import datetime
 import json
 import os
+import re
 import sys
 
 from google.oauth2.credentials import Credentials
@@ -67,6 +68,28 @@ TEM_SHEET = "tem"
 # that auto-spill down open-ended ranges — never write to O..W.
 SC_DATA_COLS = 14
 SC_REVIEW_ID_IDX = 10  # 0-based col K within the A..N block
+
+# Lesson 2026-09-15: a stray header row (ASIN="ASIN", Review ID="Review ID", …)
+# got funneled into master `SC` from some source tab whose only header-strip
+# was "drop row 1" — a header row buried anywhere ELSE in that tab sailed
+# through untouched. Its Device MAP formula then COUNTIF-matched the literal
+# text "ASIN" against every one of the 8 신제품 라인업 lookup sheets' own header
+# cell, so Device became "ALL 9 products at once" and it got pasted into EVERY
+# single destination in one run. A real Amazon Review ID always matches this;
+# never funnel/paste a row that doesn't.
+REVIEW_ID_RE = re.compile(r"^R[A-Z0-9]{6,20}$")
+
+
+def is_valid_review_row(row):
+    """row: list of the 14 SC-layout data cells (A..N). False = reject (header/
+    garbage row) — never let it into SC (Phase A) or a destination (Phase B)."""
+    asin = (row[0] if len(row) > 0 else "").strip()
+    rid = (row[SC_REVIEW_ID_IDX] if len(row) > SC_REVIEW_ID_IDX else "").strip()
+    if not REVIEW_ID_RE.match(rid):
+        return False
+    if not asin or asin.upper() == "ASIN":
+        return False
+    return True
 
 # tem sheet columns (1-based), header row 1, Review IDs from row 2:
 #  A SDA | B iPh17 | C Auto Acc | D 전략폰 | E Power_Acc | F 유지훈P |
@@ -330,8 +353,13 @@ def phase_a_append_and_dedupe(svc, new_sheet, dry_run=True):
     ).execute().get("values", [])
     if not src_vals:
         raise SystemExit(f"{new_sheet} is empty")
-    body = src_vals[1:]  # drop header
+    body = src_vals[1:]  # drop header (but don't TRUST this is the only header row present)
     body = [r + [""] * (SC_DATA_COLS - len(r)) for r in body if any(c.strip() for c in r)]
+    n_before = len(body)
+    body = [r for r in body if is_valid_review_row(r)]
+    if len(body) != n_before:
+        print(f"  REJECTED {n_before - len(body)} malformed/header-like row(s) from "
+              f"{new_sheet} (bad Review ID or ASIN=='ASIN') — not funneled into SC")
 
     # Only the Review-ID column is needed for dedup — reading the full A:N
     # block (14 cols incl. review text) was ~14x heavier and timed out.
@@ -400,6 +428,11 @@ def phase_b_c_d_product(svc, product, dry_run=True):
         if row_passes(row, crit):
             cand.append(row)
     print(f"[{product}] filter view {cfg['filter_view']!r}: {len(cand)} rows pass criteria")
+    n_cand = len(cand)
+    cand = [r for r in cand if is_valid_review_row(r)]
+    if len(cand) != n_cand:
+        print(f"[{product}] REJECTED {n_cand - len(cand)} malformed/header-like candidate row(s) "
+              f"(bad Review ID or ASIN=='ASIN') — defense-in-depth, should be rare/never")
 
     dest_id, dest_sheet = cfg["dest_id"], cfg["dest_sheet"]
     existing_ids = set(col_values(svc, dest_id, dest_sheet, cfg["dest_review_id_col"]))
