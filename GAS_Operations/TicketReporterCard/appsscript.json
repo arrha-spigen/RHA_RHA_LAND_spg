@@ -1,0 +1,16 @@
+{
+  "timeZone": "Asia/Seoul",
+  "runtimeVersion": "V8",
+  "exceptionLogging": "STACKDRIVER",
+  "oauthScopes": [
+    "https://www.googleapis.com/auth/spreadsheets",
+    "https://www.googleapis.com/auth/script.external_request"
+  ],
+  "addOns": {
+    "common": {
+      "name": "Ticket Reporter",
+      "logoUrl": "https://lh3.googleusercontent.com/7rTYMwEWSNl4z3gmx106wEgLz0sXZbACu10SMQdoH_nu-q05C4-B53nXqrbVhTr2WNXwwDYke9lsA5wZfUyBA3IULVdlf--k_A"
+    },
+    "chat": {}
+  }
+}

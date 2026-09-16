@@ -47,7 +47,8 @@ spigen-gcx-automation/
 │   ├── KPI_Report/                      # Populates KPI result cells on the team's KPI spreadsheet
 │   ├── Monday_CX_Board/                 # Generic Monday.com board ↔ Google Sheet sync (modeless UI dialog)
 │   ├── ASIN_Master_MondaySync/          # Monday.com board sync + ABM_Relay_Log retention cleanup
-│   └── BadReview_ChatReport/            # Pixel 11 / Galaxy Z8 배드리뷰(1~3점) daily Chat app-card + team broadcast
+│   ├── BadReview_ChatReport/            # Pixel 11 / Galaxy Z8 배드리뷰(1~3점) daily Chat app-card + team broadcast
+│   └── TicketReporterCard/              # Interactive Chat app — TCK report → internal note/thread-reply workflow
 │
 ├── GAS_Zendesk/                         # GAS — Zendesk / CS ticketing operations
 │   ├── ABM_TicketMerge/                 # Merges duplicate Amazon Buyer Message tickets + inbound cleanup
@@ -112,6 +113,7 @@ spigen-gcx-automation/
 | [GAS_Operations/Monday_CX_Board](GAS_Operations/Monday_CX_Board/) | Generic Monday.com board ↔ Google Sheet sync, with a modeless dialog UI (live log, Monday branding). | [README](GAS_Operations/Monday_CX_Board/README.md) |
 | [GAS_Operations/ASIN_Master_MondaySync](GAS_Operations/ASIN_Master_MondaySync/) | Same Monday.com board ↔ Sheet sync engine as Monday_CX_Board, plus an independent daily cleanup of the `ABM_Relay_Log` tab (prunes rows older than 15 days) written by GCXReply_GAS. | [README](GAS_Operations/ASIN_Master_MondaySync/README.md) |
 | [GAS_Operations/BadReview_ChatReport](GAS_Operations/BadReview_ChatReport/) | Standalone Python: builds the Pixel 11 / Galaxy Z8 배드리뷰(1~3점) Google Chat app-card from each `1-3점` sheet (today's count + Top 5 인입사유 by 대분류) and fans it out to the GCX cross-team rooms — `--test` room first, then `--broadcast --yes`. Reads Sheets via the gws_shim OAuth token. Twin of the `*-badreview-chat-report` Claude skills. | [README](GAS_Operations/BadReview_ChatReport/README.md) |
+| [GAS_Operations/TicketReporterCard](GAS_Operations/TicketReporterCard/) | Interactive Google Chat app companion to the `ticket-reporter` Claude skill — renders a TCK report as a card with a canned-phrase dropdown + submit button that files a Zendesk internal note; resolves plain thread-replies back to their ticket via a Sheet-based thread↔ticket map (works around `chat.bot` not being a consentable OAuth scope); `/revision <feedback>` channel feeds writing-rule updates back to the Claude session. | [README](GAS_Operations/TicketReporterCard/README.md) |
 
 ### Google Apps Script — Zendesk / CS ticketing operations
 
