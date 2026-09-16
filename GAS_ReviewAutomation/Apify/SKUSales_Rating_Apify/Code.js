@@ -9,6 +9,10 @@ function onOpen() {
     .addSeparator()
     .addItem('Install Weekly Monday 8AM Trigger', 'setupWeeklyTrigger')
     .addItem('Remove Weekly Trigger', 'removeWeeklyTrigger')
+    .addSeparator()
+    .addItem('Sync New ASINs Now', 'syncNewAsinsToApifyTask')
+    .addItem('Install Weekly ASIN-Sync Trigger', 'setupAsinSyncTrigger')
+    .addItem('Remove Weekly ASIN-Sync Trigger', 'removeAsinSyncTrigger')
     .addToUi();
 }
 
@@ -111,7 +115,7 @@ function pollRatingRunAndWrite() {
     const items = _fetchRatingDatasetItems_(datasetId, token);
     const written = _writeRatingsToSheet_(items);
 
-    Logger.log('Rating refresh done: %s dataset item(s), %s row(s) written.', items.length, written);
+    Logger.log('Rating refresh done: %s dataset item(s), %s row(s) written.', items.size, written);
     try {
       ss.toast(`Rating refresh done: ${written} row(s) updated.`, 'Apify Rating', 8);
     } catch (e) { /* no UI context */ }
@@ -243,6 +247,85 @@ function setupWeeklyTrigger() {
 
 function removeWeeklyTrigger() {
   _deleteTriggersByHandler_('runApifyRatingRefreshNow');
+}
+
+
+/**********************************************************
+ * WEEKLY ASIN SYNC — scans the sheet for ASINs not yet covered by the
+ * Apify task's URL list and appends them. Runs from a persistent
+ * time-based trigger, so it fires even with no session open.
+ **********************************************************/
+// Amazon ASINs are always exactly 10 uppercase-alphanumeric characters.
+// The ASIN column also holds non-ASIN placeholder text on some rows
+// (e.g. "TBU", "미판매" = not-yet-updated / discontinued) — never scrape those.
+function _looksLikeAsin_(value) {
+  return /^[A-Z0-9]{10}$/.test(value);
+}
+function syncNewAsinsToApifyTask() {
+  const token = _getToken();
+
+  const getUrl = `https://api.apify.com/v2/actor-tasks/${encodeURIComponent(TASK_ID)}?token=${encodeURIComponent(token)}`;
+  const getResp = UrlFetchApp.fetch(getUrl, { muteHttpExceptions: true });
+  if (getResp.getResponseCode() >= 400) {
+    throw new Error(`Failed to read task: HTTP ${getResp.getResponseCode()}: ${getResp.getContentText().slice(0, 500)}`);
+  }
+  const task = JSON.parse(getResp.getContentText()).data;
+  const currentUrls = (task.input && task.input.urls) || [];
+  const coveredAsins = new Set(currentUrls.map(u => u.split('/dp/')[1]).filter(Boolean));
+
+  const ss = SpreadsheetApp.openById(getSpreadsheetId_());
+  const sheet = ss.getSheetByName(SHEET_NAME);
+  if (!sheet) throw new Error(`Sheet "${SHEET_NAME}" not found.`);
+
+  const newUrls = [];
+  const lastRow = sheet.getLastRow();
+  if (lastRow >= DATA_START_ROW) {
+    const numRows = lastRow - DATA_START_ROW + 1;
+    const asinValues = sheet.getRange(DATA_START_ROW, ASIN_COL, numRows, 1).getValues();
+    for (const row of asinValues) {
+      const asin = String(row[0] || '').trim();
+      if (asin && _looksLikeAsin_(asin) && !coveredAsins.has(asin)) {
+        newUrls.push(`https://www.amazon.de/dp/${asin}`);
+        coveredAsins.add(asin); // dedup within this same sync pass too
+      }
+    }
+  }
+
+  if (newUrls.length === 0) {
+    Logger.log('ASIN sync: no new ASINs found.');
+    return;
+  }
+
+  const putUrl = `https://api.apify.com/v2/actor-tasks/${encodeURIComponent(TASK_ID)}?token=${encodeURIComponent(token)}`;
+  const putResp = UrlFetchApp.fetch(putUrl, {
+    method: 'put',
+    contentType: 'application/json',
+    payload: JSON.stringify({ input: { urls: currentUrls.concat(newUrls) } }),
+    muteHttpExceptions: true
+  });
+  if (putResp.getResponseCode() >= 400) {
+    throw new Error(`Failed to update task: HTTP ${putResp.getResponseCode()}: ${putResp.getContentText().slice(0, 500)}`);
+  }
+
+  Logger.log('ASIN sync: added %s new ASIN(s) to task %s (total urls now %s).',
+    newUrls.length, TASK_ID, currentUrls.length + newUrls.length);
+}
+
+function setupAsinSyncTrigger() {
+  removeAsinSyncTrigger();
+  ScriptApp.newTrigger('syncNewAsinsToApifyTask')
+    .timeBased()
+    .onWeekDay(ScriptApp.WeekDay[CONFIG.asinSyncWeekDay])
+    .atHour(CONFIG.asinSyncHour)
+    .nearMinute(0)
+    .inTimezone(CONFIG.timezone)
+    .create();
+  Logger.log('ASIN-sync trigger installed: every %s ~%s:00 %s.',
+    CONFIG.asinSyncWeekDay, CONFIG.asinSyncHour, CONFIG.timezone);
+}
+
+function removeAsinSyncTrigger() {
+  _deleteTriggersByHandler_('syncNewAsinsToApifyTask');
 }
 
 

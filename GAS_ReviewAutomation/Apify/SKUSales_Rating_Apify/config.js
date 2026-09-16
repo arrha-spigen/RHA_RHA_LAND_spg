@@ -15,7 +15,9 @@ const TASK_ID = 'QWtvKi7oXZ6YYR92G';
 const CONFIG = {
   pollIntervalMinutes: 1, // ScriptApp.everyMinutes() only accepts 1/5/10/15/30
   pollMaxMinutes: 180,
-  timezone: 'Asia/Seoul'
+  timezone: 'Asia/Seoul',
+  asinSyncWeekDay: 'SUNDAY', // ScriptApp.WeekDay name — must run before Monday's weekly kickoff
+  asinSyncHour: 7
 };
 
 function getSpreadsheetId_() {

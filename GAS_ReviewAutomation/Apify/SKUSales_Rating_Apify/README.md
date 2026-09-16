@@ -25,6 +25,7 @@ Container-bound Google Apps Script for the "해외사업부문 개발 발의 품
 3. `productRating` comes back locale-formatted (e.g. `"4,5 von 5 Sternen"` for amazon.de) — `_extractRatingValue_()` takes the leading number and normalizes the decimal comma to a dot (e.g. `4.5`).
 4. A time-based trigger calls `runApifyRatingRefreshNow` every Monday ~08:00 Asia/Seoul (see `setupWeeklyTrigger()`).
 5. `reprocessDataset(datasetId)` re-applies an already-completed run's dataset to the sheet without starting a new Apify run — useful after a write-logic fix.
+6. `syncNewAsinsToApifyTask()` scans the sheet's ASIN column for any ASIN not yet covered by the task's `input.urls`, appends `https://www.amazon.de/dp/<ASIN>` for each one, and PUTs the task via the Apify API. A weekly trigger (`setupAsinSyncTrigger()`, every Sunday ~07:00 Asia/Seoul — before Monday's kickoff) runs this automatically, so rows added to the sheet during the week get picked up without any manual step. `_looksLikeAsin_()` requires exactly 10 uppercase-alphanumeric characters, so placeholder text some rows carry instead of a real ASIN (e.g. `"TBU"`, `"미판매"`) is never sent to Apify.
 
 ---
 
@@ -42,7 +43,8 @@ In the Apps Script editor (or via the spreadsheet's **Apify Rating** menu once t
 
 1. Set the `APIFY_TOKEN` script property.
 2. Run **Apify Rating → Install Weekly Monday 8AM Trigger** (or call `setupWeeklyTrigger()` once) to install the recurring kickoff trigger. This requires an OAuth authorization prompt the first time.
-3. Optionally run **Apify Rating → Run Now (refresh ratings)** to do an immediate refresh.
+3. Run **Apify Rating → Install Weekly ASIN-Sync Trigger** (or call `setupAsinSyncTrigger()` once) to install the Sunday ASIN-sync trigger.
+4. Optionally run **Apify Rating → Run Now (refresh ratings)** to do an immediate refresh.
 
 ---
 
