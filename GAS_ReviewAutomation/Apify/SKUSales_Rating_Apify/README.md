@@ -1,5 +1,7 @@
 # SKUSales_Rating_Apify
 
+> Sibling project: [iPhone18Fold_Rating_Apify](../iPhone18Fold_Rating_Apify/) — same design, different spreadsheet. See [AmazonDE_RatingScraper_README.md](../AmazonDE_RatingScraper_README.md) for the shared architecture.
+
 Container-bound Google Apps Script for the "해외사업부문 개발 발의 품목_사후관리 (세일즈, 리뷰, 필드테스트)" spreadsheet. Runs the Apify task `product-details-scraper-ljh` (axesso_data/amazon-product-details-scraper actor, pre-loaded with each row's Amazon.de URL) every Monday 8AM KST and writes each product's current rating back into the sheet, matched by ASIN.
 
 **Linked spreadsheet:** `1_9O8oTHt-yHewG0aGeioeM0psZ2kprf3lgH77-BFLs8`
