@@ -51,4 +51,10 @@ cd ~/Desktop/GCX/GAS_Operations/TCTChatLog_GCX
 clasp push --force
 ```
 
-Set a daily time-based trigger on the summary function in the GAS editor.
+Run `setupAutoExtendEscT2Trigger()` once in the GAS editor. It installs a
+daily 6AM self-check (`autoExtendEscT2Triggers`) that rolls the
+`sendDailyEscT2` schedule (weekday, Thu 15:30 / other weekdays 17:30 KST)
+forward 30 days whenever fewer than 3 days remain — full wipe + rebuild each
+time, so no duplicate triggers accumulate. Runs forever until the installed
+trigger is manually removed. (`createEscT2Triggers()` still exists for a
+one-off manual regen with a hardcoded end date.)

@@ -130,4 +130,10 @@ cd ~/Desktop/GCX/GAS_Operations/TicketDailyReport
 clasp push --force
 ```
 
-Set a daily time-based trigger on `runZendeskDailyJob` in the GAS editor.
+Run `setupAutoExtendZendeskTrigger()` once in the GAS editor. It installs a
+daily 6AM self-check (`autoExtendZendeskTriggers`) that rolls the
+`runZendeskDailyJob` schedule (weekday 9AM KST) forward 30 days whenever
+fewer than 3 days remain — full wipe + rebuild each time, so no duplicate
+triggers accumulate. Runs forever until the installed trigger is manually
+removed. (`createTriggers()` still exists for a one-off manual regen with a
+hardcoded end date.)

@@ -12,7 +12,7 @@ function createEscT2Triggers() {
   const tz = Session.getScriptTimeZone();
   const now = new Date();
   const today = new Date(now.getFullYear(), now.getMonth(), now.getDate()); 
-  const endDate = new Date('2026-08-01'); // adjust as needed
+  const endDate = new Date('2026-09-30'); // adjust as needed
 
   // 3) Create new triggers 
   for (let d = new Date(today); d <= endDate; d.setDate(d.getDate() + 1)) {
@@ -35,4 +35,73 @@ function createEscT2Triggers() {
       .at(triggerTime)
       .create();
   }
+}
+
+/**
+ * Self-perpetuating trigger scheduler for sendDailyEscT2.
+ * Run setupAutoExtendEscT2Trigger() once — after that this checks itself
+ * daily and rolls the schedule forward 30 days whenever fewer than 3 days
+ * remain, forever, until someone manually deletes the installed trigger.
+ */
+function autoExtendEscT2Triggers() {
+  const HANDLER = 'sendDailyEscT2';
+  const PROP_KEY = 'ESCT2_TRIGGER_SCHEDULE_END';
+  const EXTEND_DAYS = 30;
+  const THRESHOLD_DAYS = 3;
+
+  const props = PropertiesService.getScriptProperties();
+  const now = new Date();
+  const storedEnd = props.getProperty(PROP_KEY);
+  const currentEnd = storedEnd ? new Date(storedEnd) : null;
+
+  if (currentEnd) {
+    const daysLeft = (currentEnd - now) / 86400000;
+    if (daysLeft >= THRESHOLD_DAYS) {
+      Logger.log(`[autoExtendEscT2Triggers] ${daysLeft.toFixed(1)} days remain (schedule ends ${currentEnd}). No extension needed.`);
+      return;
+    }
+  }
+
+  const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+  const endDate = new Date(today);
+  endDate.setDate(endDate.getDate() + EXTEND_DAYS);
+
+  // Wipe + fully rebuild the window so re-runs can never create duplicates.
+  ScriptApp.getProjectTriggers().forEach(t => {
+    if (t.getHandlerFunction() === HANDLER) ScriptApp.deleteTrigger(t);
+  });
+
+  let created = 0;
+  for (let d = new Date(today); d <= endDate; d.setDate(d.getDate() + 1)) {
+    const day = d.getDay(); // 0 = Sun, 6 = Sat
+    if (day === 0 || day === 6) continue;
+
+    const triggerTime = new Date(d);
+    if (day === 4) {
+      triggerTime.setHours(15, 30, 0, 0); // Thursday -> 15:30
+    } else {
+      triggerTime.setHours(17, 30, 0, 0); // Other weekdays -> 17:30
+    }
+    if (triggerTime <= now) continue;
+
+    ScriptApp.newTrigger(HANDLER).timeBased().at(triggerTime).create();
+    created++;
+  }
+
+  props.setProperty(PROP_KEY, endDate.toISOString());
+  Logger.log(`[autoExtendEscT2Triggers] Rebuilt schedule: ${created} triggers through ${endDate}.`);
+}
+
+/**
+ * Run this ONCE manually (or via GAS editor ▶ Run) to install the daily
+ * self-check trigger. Safe to re-run — clears any prior copy first so no
+ * duplicate installer trigger is ever created.
+ */
+function setupAutoExtendEscT2Trigger() {
+  const HANDLER = 'autoExtendEscT2Triggers';
+  ScriptApp.getProjectTriggers().forEach(t => {
+    if (t.getHandlerFunction() === HANDLER) ScriptApp.deleteTrigger(t);
+  });
+  ScriptApp.newTrigger(HANDLER).timeBased().everyDays(1).atHour(6).create();
+  Logger.log('[setupAutoExtendEscT2Trigger] Daily 6AM self-check installed — runs forever until manually removed.');
 }
