@@ -5,6 +5,7 @@ const BOARD_ID = 5669388007; // ← change per sheet
 const MONDAY_API_KEY_HARDCODED = ''; // or set Script Property 'MONDAY_API_KEY'
 const PAGE_LIMIT = 500;
 const RUN_LOCK_KEY = 'MONDAY_SYNC_LOCK';
+const RUN_LOCK_STALE_MS = 20 * 60 * 1000; // 20min — normal syncs finish well under a minute
 const RESPECT_SHEET_FORMATS = true;
 
 /** ====== MENU + UI (modeless dialog with Monday logo + live log) ====== **/
@@ -372,7 +373,12 @@ function _getMondayApiKey_(){
 }
 function _acquireRunLock_(){
   var props = PropertiesService.getScriptProperties();
-  if (props.getProperty(RUN_LOCK_KEY)) throw new Error('Another Monday sync is already running.');
+  var existing = props.getProperty(RUN_LOCK_KEY);
+  if (existing) {
+    var age = Date.now() - Number(existing);
+    if (!(age >= 0) || age < RUN_LOCK_STALE_MS) throw new Error('Another Monday sync is already running.');
+    // Orphaned lock (execution killed before its finally could release it) — clear and proceed.
+  }
   props.setProperty(RUN_LOCK_KEY, String(Date.now()));
 }
 function _releaseRunLock_(){ PropertiesService.getScriptProperties().deleteProperty(RUN_LOCK_KEY); }
