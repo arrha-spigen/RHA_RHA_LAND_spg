@@ -48,8 +48,28 @@ test-send + explicit "yes" on every manual run — that hard rule is untouched.
    `broadcast.py` from `~/.claude/skills/badreview-chat-broadcast/` for the room list
    + POST helper. Any card-layout or room-list change made to those files takes effect
    here automatically — nothing to keep in sync manually.
-4. Posts Z8 then PX to all 12 rooms (same order/pacing as the interactive `--all`),
-   logs each result.
+4. **Z8-only KR gate** (2026-09-18): checks whether any of today's Z8 rows have
+   `국가(tag)` == `KR` — Z8's single largest country segment, unlike Pixel 11 which has
+   none. KR reviews occasionally upload after 11 AM (past this 10:30 run), so 0 KR rows
+   is treated as "maybe still incomplete," not a real zero day. If so, the script
+   **does not** broadcast Z8 to the 12 rooms — it posts an alert (with the built Z8
+   card attached, so you can preview it) to the **private test room only**, and Pixel
+   11 still sends normally to all 12. Resend Z8 once you've confirmed it's a real zero
+   day, or once KR reviews land, with:
+   ```bash
+   python3 ~/.claude/skills/badreview-chat-broadcast/broadcast.py --all --product glxz8 \
+     --z8-data '<fresh JSON>'          # normal interactive path (test-first, confirm)
+   # or, to force this script past the gate on a rerun:
+   python3 auto_broadcast.py --force --ignore-kr-gate
+   ```
+   ⚠️ `--force` only bypasses the weekday/holiday skip — it does **not** hold back
+   Pixel 11, and does **not** need `--ignore-kr-gate` to still send PX. Never combine
+   `--force` with a real (non-`--dry-run`) run against a made-up `--date` "just to
+   test" — it broadcasts to all 12 live rooms exactly like a real day would. (Learned
+   the hard way 2026-09-18: testing the KR-gate alert with `--force --date 2026-09-21`
+   sent a real, wrongly-dated Pixel 11 card to all 12 rooms. Use `--dry-run` for that.)
+5. Posts Z8 (unless held by the KR gate) then PX to all 12 rooms (same order/pacing as
+   the interactive `--all`), logs each result.
 
 ## Manual controls
 

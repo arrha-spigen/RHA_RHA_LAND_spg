@@ -109,6 +109,12 @@ def count_unfilled_today(header, body, today):
     return sum(1 for r in body if _parse_date(r[iU]) == today and not (r[iT] or "").strip())
 
 
+def today_kr_count(header, body, today):
+    """How many of today's rows are from Korea (국가(tag) == 'KR')."""
+    iU, iN = header.index("Update 날짜"), header.index("국가(tag)")
+    return sum(1 for r in body if _parse_date(r[iU]) == today and (r[iN] or "").strip().upper() == "KR")
+
+
 def fetch_ready(token, sheet_id, today, label, max_retries=3, wait_s=600):
     """fetch_rows, retrying (per user rule, 2026-09-18) up to `max_retries` times,
     `wait_s` apart, while any of today's rows still have a blank 인입사유(tag). Sends
@@ -174,6 +180,9 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--dry-run", action="store_true", help="build cards, send nothing")
     ap.add_argument("--force", action="store_true", help="ignore the weekday/holiday skip")
+    ap.add_argument("--ignore-kr-gate", action="store_true",
+                     help="send the Z8 card to all rooms even if 0 KR reviews today "
+                          "(after you've manually confirmed that's correct)")
     ap.add_argument("--date", help="override today (KST), YYYY-MM-DD")
     a = ap.parse_args()
 
@@ -206,19 +215,48 @@ def main():
     px_card = px_report.build_card(px_data, today)
     z8_card = z8_report.build_card(z8_data, today)
 
+    # KR is Z8's single largest country segment (Pixel 11 has none at all) and KR
+    # reviews occasionally land after 11 AM — past this 10:30 run. Zero KR rows today
+    # is therefore a signal the upload may still be incomplete, not necessarily a
+    # real zero day. Per user rule (2026-09-18): don't auto-broadcast Z8 in that case
+    # — alert the private room and hold it for a manual, confirmed resend instead.
+    z8_kr_count = today_kr_count(z8_header, z8_body, today)
+    hold_z8 = z8_kr_count == 0 and not a.ignore_kr_gate
+    if z8_kr_count == 0:
+        log(f"NOTE: 0 KR reviews in today's Z8 data" +
+            (" — --ignore-kr-gate set, sending anyway" if a.ignore_kr_gate else " — holding Z8 broadcast"))
+
     if a.dry_run:
         log("[dry-run] cards built, not sending. Rooms that would receive them:")
         for room in broadcast.ROOMS:
             log(f"  - {room['name']}")
+        if hold_z8:
+            log("[dry-run] would ALERT the private room instead of broadcasting Z8 (0 KR reviews today)")
         return
 
+    if hold_z8:
+        test_url = broadcast.BASE.format(sid=broadcast.TEST_ROOM["sid"], tok=broadcast.TEST_ROOM["token"])
+        alert = {
+            "text": (f"⚠️ Galaxy Z8 배드리뷰 자동발송 보류 — 오늘({today.isoformat()}) KR 리뷰 0건.\n"
+                     f"KR 리뷰는 간혹 11시 이후 업로드되는 경우가 있어, 확인 후 수동 재발송이 필요합니다.\n"
+                     f"확인 후 재발송: python3 auto_broadcast.py --force --ignore-kr-gate\n"
+                     f"(또는 badreview-chat-broadcast 스킬로 --product glxz8 재발송)"),
+            "cardsV2": z8_card["cardsV2"],
+        }
+        log("ALERT (0 KR reviews, Z8 held): " + broadcast._post(test_url, alert))
+
     for room in broadcast.ROOMS:
-        log(f"[{room['name']}] Z8 : " + broadcast._post(broadcast.room_url(room, "glxz8"), z8_card))
-        time.sleep(1.0)
+        if not hold_z8:
+            log(f"[{room['name']}] Z8 : " + broadcast._post(broadcast.room_url(room, "glxz8"), z8_card))
+            time.sleep(1.0)
         log(f"[{room['name']}] PX : " + broadcast._post(broadcast.room_url(room, "pixel11"), px_card))
         time.sleep(1.0)
 
-    log(f"DONE {today.isoformat()}: sent to {len(broadcast.ROOMS)} rooms")
+    if hold_z8:
+        log(f"DONE {today.isoformat()}: PX sent to {len(broadcast.ROOMS)} rooms; "
+            f"Z8 HELD (0 KR reviews) — alert posted to private room")
+    else:
+        log(f"DONE {today.isoformat()}: sent to {len(broadcast.ROOMS)} rooms")
 
 
 if __name__ == "__main__":
