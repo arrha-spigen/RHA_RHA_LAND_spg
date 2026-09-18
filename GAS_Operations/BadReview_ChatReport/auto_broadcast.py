@@ -97,11 +97,39 @@ def sheets_get(token, sheet_id, a1_range):
     return json.load(urllib.request.urlopen(req)).get("values", [])
 
 
-def crunch(token, sheet_id, today):
+def fetch_rows(token, sheet_id):
+    rows = sheets_get(token, sheet_id, "'1-3점'!A1:Z")
+    return rows[0], [r + [""] * (len(rows[0]) - len(r)) for r in rows[1:]]
+
+
+def count_unfilled_today(header, body, today):
+    """How many rows with Update 날짜 == today still have a blank 인입사유(tag) —
+    the AI tagging agents can lag behind newly-added rows."""
+    iU, iT = header.index("Update 날짜"), header.index("인입사유(tag)")
+    return sum(1 for r in body if _parse_date(r[iU]) == today and not (r[iT] or "").strip())
+
+
+def fetch_ready(token, sheet_id, today, label, max_retries=3, wait_s=600):
+    """fetch_rows, retrying (per user rule, 2026-09-18) up to `max_retries` times,
+    `wait_s` apart, while any of today's rows still have a blank 인입사유(tag). Sends
+    whatever it has after the last retry either way — never blocks a scheduled run
+    indefinitely — but the caller is told how many rows were still unfilled."""
+    for attempt in range(max_retries + 1):
+        header, body = fetch_rows(token, sheet_id)
+        unfilled = count_unfilled_today(header, body, today)
+        if unfilled == 0:
+            return header, body, 0
+        if attempt < max_retries:
+            log(f"{label}: {unfilled} today-row(s) still missing 인입사유(tag) "
+                f"(attempt {attempt + 1}/{max_retries + 1}) — waiting {wait_s // 60} min")
+            time.sleep(wait_s)
+    log(f"{label}: still {unfilled} today-row(s) unfilled after {max_retries} retries — sending anyway")
+    return header, body, unfilled
+
+
+def crunch(header, body, today):
     """Same shape/logic as the interactive skills' step-3 JS (todayCount, todayTags,
     recentAvg, film, case) — see pixel11-badreview-chat-report/SKILL.md."""
-    rows = sheets_get(token, sheet_id, "'1-3점'!A1:Z")
-    header, body = rows[0], [r + [""] * (len(rows[0]) - len(r)) for r in rows[1:]]
     iU, iT, iC = header.index("Update 날짜"), header.index("인입사유(tag)"), header.index("대분류")
 
     today_count = 0
@@ -161,8 +189,13 @@ def main():
 
     log(f"RUN {today.isoformat()}: fetching sheets")
     token = refresh_gws_token()
-    px_data = crunch(token, SHEETS["pixel11"], today)
-    z8_data = crunch(token, SHEETS["glxz8"], today)
+    px_header, px_body, px_unfilled = fetch_ready(token, SHEETS["pixel11"], today, "pixel11")
+    z8_header, z8_body, z8_unfilled = fetch_ready(token, SHEETS["glxz8"], today, "glxz8")
+    px_data = crunch(px_header, px_body, today)
+    z8_data = crunch(z8_header, z8_body, today)
+    if px_unfilled or z8_unfilled:
+        log(f"NOTE: sending with pixel11={px_unfilled} glxz8={z8_unfilled} today-row(s) "
+            f"still missing 인입사유(tag) — retries exhausted")
     log(f"  pixel11 todayCount={px_data['todayCount']} recentAvg={px_data['recentAvg']:.2f}")
     log(f"  glxz8   todayCount={z8_data['todayCount']} recentAvg={z8_data['recentAvg']:.2f}")
 

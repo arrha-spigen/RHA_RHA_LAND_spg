@@ -32,7 +32,13 @@ test-send + explicit "yes" on every manual run — that hard rule is untouched.
      baked into the script (`KR_HOLIDAYS_FALLBACK_2026`) — re-derive this every
      January from the same API for the new year, or the fallback silently stops
      covering real holidays.
-3. Otherwise: refreshes the `gws_shim` Sheets API token, reads both sheets' `1-3점`
+3. Otherwise: refreshes the `gws_shim` Sheets API token, then for each sheet checks
+   whether every row with today's `Update 날짜` already has its `인입사유(tag)` filled
+   in (the AI tagging agents can lag behind newly-added rows — this is exactly what
+   triggered a manual Z8 resend on 2026-09-18). If not, **waits 10 minutes and
+   rechecks, up to 3 retries** (30 min max) before giving up and sending anyway —
+   logging how many rows were still untagged rather than staying silent about it.
+   Then reads both sheets' `1-3점`
    tab directly (Sheets API v4 — **not** the browser/`gviz` method the interactive
    skill uses, since there's no Chrome session in an unattended launchd run), computes
    the same `{todayCount, todayTags, recentAvg, film, case}` shape as the interactive
