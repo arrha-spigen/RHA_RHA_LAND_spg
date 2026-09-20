@@ -63,11 +63,25 @@ test-send + explicit "yes" on every manual run — that hard rule is untouched.
    python3 auto_broadcast.py --force --ignore-kr-gate
    ```
    ⚠️ `--force` only bypasses the weekday/holiday skip — it does **not** hold back
-   Pixel 11, and does **not** need `--ignore-kr-gate` to still send PX. Never combine
-   `--force` with a real (non-`--dry-run`) run against a made-up `--date` "just to
-   test" — it broadcasts to all 12 live rooms exactly like a real day would. (Learned
-   the hard way 2026-09-18: testing the KR-gate alert with `--force --date 2026-09-21`
-   sent a real, wrongly-dated Pixel 11 card to all 12 rooms. Use `--dry-run` for that.)
+   Pixel 11, and does **not** need `--ignore-kr-gate` to still send PX. (Learned the
+   hard way 2026-09-18: testing the KR-gate alert with `--force --date 2026-09-21`
+   sent a real, wrongly-dated Pixel 11 card to all 12 rooms.)
+
+## Testing — NEVER a bare live run
+
+**Rule (2026-09-21, permanent): when testing anything in this script, always pass
+`--test-only` — never a bare run, and never `--force` alone with a fake `--date`.**
+`--test-only` sends BOTH cards to the private test room only (space `AAQAc9NQmJQ`) and
+never touches `broadcast.ROOMS`, no matter what `--date` is given — it implies
+`--force` (a test send shouldn't also get skipped by the weekday/holiday check) and
+disables the KR-gate hold (nothing to hold back when it's already private). This is
+what should have been used on 2026-09-18 instead of `--force --date 2026-09-21`
+without `--test-only`, which leaked a live card to all 12 rooms.
+
+```bash
+python3 auto_broadcast.py --test-only --dry-run --date 2026-09-27   # inspect first
+python3 auto_broadcast.py --test-only --date 2026-09-27             # then actually send, still private-only
+```
 5. Posts Z8 (unless held by the KR gate) then PX to all 12 rooms (same order/pacing as
    the interactive `--all`), logs each result.
 

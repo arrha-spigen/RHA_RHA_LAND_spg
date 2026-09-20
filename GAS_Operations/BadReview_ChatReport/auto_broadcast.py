@@ -179,6 +179,11 @@ def _parse_date(s):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--dry-run", action="store_true", help="build cards, send nothing")
+    ap.add_argument("--test-only", action="store_true",
+                     help="send BOTH cards to the private test room ONLY, never the 12 live "
+                          "rooms — implies --force (weekday/holiday skip doesn't apply to a "
+                          "test send). ALWAYS use this, not a bare live run, to test anything "
+                          "here — see the 2026-09-21 incident in AUTO_BROADCAST.md")
     ap.add_argument("--force", action="store_true", help="ignore the weekday/holiday skip")
     ap.add_argument("--ignore-kr-gate", action="store_true",
                      help="send the Z8 card to all rooms even if 0 KR reviews today "
@@ -188,7 +193,7 @@ def main():
 
     today = datetime.date.fromisoformat(a.date) if a.date else datetime.date.today()
 
-    if not a.force:
+    if not (a.force or a.test_only):
         if today.weekday() >= 5:  # 5=Sat, 6=Sun
             log(f"SKIP {today.isoformat()}: weekend")
             return
@@ -221,14 +226,20 @@ def main():
     # real zero day. Per user rule (2026-09-18): don't auto-broadcast Z8 in that case
     # — alert the private room and hold it for a manual, confirmed resend instead.
     z8_kr_count = today_kr_count(z8_header, z8_body, today)
-    hold_z8 = z8_kr_count == 0 and not a.ignore_kr_gate
+    # --test-only never touches the 12 live rooms, so there's nothing to hold back —
+    # both cards go to the private room together, same as a normal test-send would.
+    hold_z8 = z8_kr_count == 0 and not a.ignore_kr_gate and not a.test_only
     if z8_kr_count == 0:
-        log(f"NOTE: 0 KR reviews in today's Z8 data" +
-            (" — --ignore-kr-gate set, sending anyway" if a.ignore_kr_gate else " — holding Z8 broadcast"))
+        why = "--test-only, sending anyway" if a.test_only else \
+              "--ignore-kr-gate set, sending anyway" if a.ignore_kr_gate else "holding Z8 broadcast"
+        log(f"NOTE: 0 KR reviews in today's Z8 data — {why}")
+
+    targets = [broadcast.TEST_ROOM] if a.test_only else broadcast.ROOMS
 
     if a.dry_run:
-        log("[dry-run] cards built, not sending. Rooms that would receive them:")
-        for room in broadcast.ROOMS:
+        log(f"[dry-run] cards built, not sending. {'Test room' if a.test_only else 'Rooms'} "
+            f"that would receive them:")
+        for room in targets:
             log(f"  - {room['name']}")
         if hold_z8:
             log("[dry-run] would ALERT the private room instead of broadcasting Z8 (0 KR reviews today)")
@@ -245,7 +256,7 @@ def main():
         }
         log("ALERT (0 KR reviews, Z8 held): " + broadcast._post(test_url, alert))
 
-    for room in broadcast.ROOMS:
+    for room in targets:
         if not hold_z8:
             log(f"[{room['name']}] Z8 : " + broadcast._post(broadcast.room_url(room, "glxz8"), z8_card))
             time.sleep(1.0)
@@ -253,10 +264,10 @@ def main():
         time.sleep(1.0)
 
     if hold_z8:
-        log(f"DONE {today.isoformat()}: PX sent to {len(broadcast.ROOMS)} rooms; "
+        log(f"DONE {today.isoformat()}: PX sent to {len(targets)} rooms; "
             f"Z8 HELD (0 KR reviews) — alert posted to private room")
     else:
-        log(f"DONE {today.isoformat()}: sent to {len(broadcast.ROOMS)} rooms")
+        log(f"DONE {today.isoformat()}: sent to {len(targets)} {'test' if a.test_only else ''} room(s)")
 
 
 if __name__ == "__main__":
