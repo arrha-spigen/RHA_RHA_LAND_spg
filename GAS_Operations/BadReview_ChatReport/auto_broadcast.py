@@ -13,9 +13,12 @@ HARD RULE (test first, ask for confirmation) for every manually-triggered run.
 Data source: Sheets API v4 with the gws_shim OAuth token (~/.config/gws_shim/token.json),
 NOT the browser/gviz method the interactive skill uses — this runs unattended with no
 Chrome session available. Card building and the room list are NOT duplicated here: this
-script imports report.py from the two per-product skills and broadcast.py from
-badreview-chat-broadcast, so all three stay the single source of truth for card layout,
+script imports report.py from the three per-product skills and broadcast.py from
+badreview-chat-broadcast, so all four stay the single source of truth for card layout,
 significance-highlighting thresholds, and the 12-room list.
+
+iPhone 18 (added 2026-09-21) reuses each room's `glxz8` webhook token, same as Z8 —
+see `room_url()`/`SHARES_GLXZ8_TOKEN` in broadcast.py. It has no KR-gate (that's Z8-only).
 
 Usage:
   auto_broadcast.py                 # normal run (skips silently on holiday/weekend)
@@ -30,8 +33,9 @@ GWS_TOKEN_PATH = os.path.expanduser("~/.config/gws_shim/token.json")
 LOG_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "logs")
 
 SHEETS = {
-    "pixel11": "12I6z_FFmDIMHa0rLanltKKFp7kI_yREQj3adkMamPgI",
-    "glxz8":   "19OhswglYMx_dxSFFDtWI1WYPWq2jONJn6RK84KITwy4",
+    "pixel11":  "12I6z_FFmDIMHa0rLanltKKFp7kI_yREQj3adkMamPgI",
+    "glxz8":    "19OhswglYMx_dxSFFDtWI1WYPWq2jONJn6RK84KITwy4",
+    "iphone18": "1aYxZRm7pf5Egx6fIoAGpGg8CWzHaZ_zsBRKsvh9U1iU",
 }
 
 # Fallback if the Nager.Date API is unreachable at run time (network hiccup). Kept in
@@ -205,20 +209,25 @@ def main():
     token = refresh_gws_token()
     px_header, px_body, px_unfilled = fetch_ready(token, SHEETS["pixel11"], today, "pixel11")
     z8_header, z8_body, z8_unfilled = fetch_ready(token, SHEETS["glxz8"], today, "glxz8")
+    ip18_header, ip18_body, ip18_unfilled = fetch_ready(token, SHEETS["iphone18"], today, "iphone18")
     px_data = crunch(px_header, px_body, today)
     z8_data = crunch(z8_header, z8_body, today)
-    if px_unfilled or z8_unfilled:
-        log(f"NOTE: sending with pixel11={px_unfilled} glxz8={z8_unfilled} today-row(s) "
-            f"still missing 인입사유(tag) — retries exhausted")
-    log(f"  pixel11 todayCount={px_data['todayCount']} recentAvg={px_data['recentAvg']:.2f}")
-    log(f"  glxz8   todayCount={z8_data['todayCount']} recentAvg={z8_data['recentAvg']:.2f}")
+    ip18_data = crunch(ip18_header, ip18_body, today)
+    if px_unfilled or z8_unfilled or ip18_unfilled:
+        log(f"NOTE: sending with pixel11={px_unfilled} glxz8={z8_unfilled} iphone18={ip18_unfilled} "
+            f"today-row(s) still missing 인입사유(tag) — retries exhausted")
+    log(f"  pixel11  todayCount={px_data['todayCount']} recentAvg={px_data['recentAvg']:.2f}")
+    log(f"  glxz8    todayCount={z8_data['todayCount']} recentAvg={z8_data['recentAvg']:.2f}")
+    log(f"  iphone18 todayCount={ip18_data['todayCount']} recentAvg={ip18_data['recentAvg']:.2f}")
 
     px_report = _load(f"{SKILLS}/pixel11-badreview-chat-report/report.py", "auto_px_report")
     z8_report = _load(f"{SKILLS}/glxz8-badreview-chat-report/report.py", "auto_z8_report")
+    ip18_report = _load(f"{SKILLS}/iphone18-badreview-chat-report/report.py", "auto_ip18_report")
     broadcast = _load(f"{SKILLS}/badreview-chat-broadcast/broadcast.py", "auto_broadcast_mod")
 
     px_card = px_report.build_card(px_data, today)
     z8_card = z8_report.build_card(z8_data, today)
+    ip18_card = ip18_report.build_card(ip18_data, today)
 
     # KR is Z8's single largest country segment (Pixel 11 has none at all) and KR
     # reviews occasionally land after 11 AM — past this 10:30 run. Zero KR rows today
@@ -260,11 +269,13 @@ def main():
         if not hold_z8:
             log(f"[{room['name']}] Z8 : " + broadcast._post(broadcast.room_url(room, "glxz8"), z8_card))
             time.sleep(1.0)
+        log(f"[{room['name']}] IP18 : " + broadcast._post(broadcast.room_url(room, "iphone18"), ip18_card))
+        time.sleep(1.0)
         log(f"[{room['name']}] PX : " + broadcast._post(broadcast.room_url(room, "pixel11"), px_card))
         time.sleep(1.0)
 
     if hold_z8:
-        log(f"DONE {today.isoformat()}: PX sent to {len(targets)} rooms; "
+        log(f"DONE {today.isoformat()}: PX + IP18 sent to {len(targets)} rooms; "
             f"Z8 HELD (0 KR reviews) — alert posted to private room")
     else:
         log(f"DONE {today.isoformat()}: sent to {len(targets)} {'test' if a.test_only else ''} room(s)")

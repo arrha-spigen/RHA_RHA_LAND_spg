@@ -1,8 +1,10 @@
 # Auto-broadcast (unattended weekday schedule)
 
-Sends the Pixel 11 + Galaxy Z8 배드리뷰(1~3점) cards to all 12 GCX rooms **every weekday
-at 10:30 AM KST**, skipping Korean public holidays automatically — **no test-send, no
-confirmation prompt.** Added 2026-09-15 per explicit user request. This is a *separate*
+Sends the Pixel 11 + Galaxy Z8 + iPhone 18 (added 2026-09-21) 배드리뷰(1~3점) cards to
+all 12 GCX rooms **every weekday at 10:30 AM KST**, skipping Korean public holidays
+automatically — **no test-send, no confirmation prompt.** Added 2026-09-15 per
+explicit user request. iPhone 18 reuses each room's `glxz8` webhook token (no KR-gate
+— that check is Z8-only). This is a *separate*
 path from the interactive `badreview-chat-broadcast` skill, which still requires a
 test-send + explicit "yes" on every manual run — that hard rule is untouched.
 
